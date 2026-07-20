@@ -24,18 +24,46 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     return p;
 }
 
-+ (BOOL)isBlacklisted {
-    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
-    NSString *raw = [d stringForKey:@"blacklistRaw"];
-    if (!raw.length) return NO;
-    NSString *bid = NSBundle.mainBundle.bundleIdentifier;
-    if (!bid) return NO;
-    NSArray *parts = [raw componentsSeparatedByString:@","];
+// 解析逗号/换行分隔的 bundle id 列表，命中返回 YES
++ (BOOL)_bundleId:(NSString *)bid inList:(NSString *)raw {
+    if (!raw.length || !bid) return NO;
+    NSArray *parts = [raw componentsSeparatedByCharactersInSet:
+                      [NSCharacterSet characterSetWithCharactersInString:@",\n"]];
     for (NSString *s in parts) {
-        NSString *t = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        if ([t isEqualToString:bid]) return YES;
+        NSString *t = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (t.length && [t isEqualToString:bid]) return YES;
     }
     return NO;
+}
+
+// 是否允许当前 App 生效：
+//  - whitelistMode 未设置或 YES：只有白名单内的 App 生效（空白名单 = 全部不生效）
+//  - whitelistMode == NO：回到全局生效 + 黑名单排除（原逻辑）
++ (BOOL)isAllowed {
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    NSString *bid = NSBundle.mainBundle.bundleIdentifier;
+    if (!bid) return NO;
+
+    id wm = [d objectForKey:@"whitelistMode"];
+    BOOL whitelistMode = wm ? [wm boolValue] : YES;   // 未设置 → 默认白名单模式
+
+    if (whitelistMode) {
+        NSString *raw = [d stringForKey:@"whitelistRaw"];
+        return [self _bundleId:bid inList:raw];
+    } else {
+        NSString *raw = [d stringForKey:@"blacklistRaw"];
+        if (!raw.length) return YES;
+        return ![self _bundleId:bid inList:raw];
+    }
+}
+
++ (BOOL)isBlacklisted {
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    NSString *bid = NSBundle.mainBundle.bundleIdentifier;
+    if (!bid) return NO;
+    NSString *raw = [d stringForKey:@"blacklistRaw"];
+    if (!raw.length) return NO;
+    return [self _bundleId:bid inList:raw];
 }
 
 @end

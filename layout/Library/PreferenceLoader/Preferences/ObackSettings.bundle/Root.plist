@@ -126,6 +126,38 @@
         </dict>
         <dict>
             <key>cell</key>
+            <string>PSGroupCell</string>
+            <key>label</key>
+            <string>生效范围</string>
+            <key>footerText</key>
+            <string>开启「仅白名单 App 生效」后，只有白名单内的 App 有手势返回，其余一律不生效（默认）。关闭则回到全局生效、黑名单 App 排除。</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSSwitchCell</string>
+            <key>label</key>
+            <string>仅白名单 App 生效</string>
+            <key>key</key>
+            <string>whitelistMode</string>
+            <key>default</key>
+            <true/>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSTextFieldCell</string>
+            <key>label</key>
+            <string>白名单(逗号分隔)</string>
+            <key>key</key>
+            <string>whitelistRaw</string>
+            <key>default</key>
+            <string></string>
+            <key>placeholder</key>
+            <string>com.apple.AppStore,com.tencent.xin</string>
+            <key>isIPad</key>
+            <false/>
+        </dict>
+        <dict>
+            <key>cell</key>
             <string>PSTextFieldCell</string>
             <key>label</key>
             <string>黑名单(逗号分隔)</string>

@@ -48,7 +48,7 @@ static void *kAttachedKey = &kAttachedKey;
 // 只在"落在边缘 + 可返回 + 不在黑名单"时，手势才接管，否则放行给 App 自身
 - (BOOL)gestureRecognizerShouldBegin:(UIPanGestureRecognizer *)pan {
     if (self.interacting) return NO;
-    if ([ObackPreferences isBlacklisted]) return NO;
+    if (![ObackPreferences isAllowed]) return NO;
 
     ObackParams *p = [ObackPreferences params];
     UIWindow *win = (UIWindow *)pan.view;
