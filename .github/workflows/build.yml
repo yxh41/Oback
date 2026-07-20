@@ -10,26 +10,15 @@ jobs:
   build:
     runs-on: macos-14
     env:
-      THEOS: ${{ github.workspace }}/theos
+      # roothide 打包方案（Makefile 里也已写死，这里再保险设一次）
       THEOS_PACKAGE_SCHEME: roothide
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install build tools (ldid / fakeroot / dpkg)
-        run: brew install ldid fakeroot dpkg
-
-      - name: Clone Theos
-        run: git clone --recursive https://github.com/theos/theos.git "$THEOS"
-
-      - name: Fetch iOS SDK
-        run: |
-          git clone --depth=1 https://github.com/theos/sdks.git /tmp/theos-sdks
-          mkdir -p "$THEOS/sdks"
-          cp -R /tmp/theos-sdks/*.sdk "$THEOS/sdks/"
-
-      - name: Build package (roothide)
-        run: make package FINALPACKAGE=1
+      # 由社区维护的 theos CI Action 负责安装 theos + iOS SDK + dpkg/ldid 等工具链
+      - name: Build package with Theos
+        uses: xzr46770661/action-build-theos@main
 
       - name: Upload .deb
         uses: actions/upload-artifact@v4
