@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Filter</key>
+    <dict>
+        <key>Bundles</key>
+        <array>
+            <!-- UIKit 被所有 App 进程加载，因此注入 UIKit 即可全局生效 -->
+            <string>com.apple.UIKit</string>
+        </array>
+    </dict>
+</dict>
+</plist>

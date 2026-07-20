@@ -1,0 +1,39 @@
+name: Build Oback (roothide)
+
+# 推送或手动触发时，在 GitHub 的 macOS runner 上用 Theos 编译 roothide 版 .deb
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    env:
+      THEOS: ${{ github.workspace }}/theos
+      THEOS_PACKAGE_SCHEME: roothide
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build tools (ldid / fakeroot / dpkg)
+        run: brew install ldid fakeroot dpkg
+
+      - name: Clone Theos
+        run: git clone --recursive https://github.com/theos/theos.git "$THEOS"
+
+      - name: Fetch iOS SDK
+        run: |
+          git clone --depth=1 https://github.com/theos/sdks.git /tmp/theos-sdks
+          mkdir -p "$THEOS/sdks"
+          cp -R /tmp/theos-sdks/*.sdk "$THEOS/sdks/"
+
+      - name: Build package (roothide)
+        run: make package FINALPACKAGE=1
+
+      - name: Upload .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: oback-deb
+          path: packages/*.deb
+          if-no-files-found: error

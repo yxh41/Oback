@@ -1,0 +1,16 @@
+# Theos 构建产物（不需要提交）
+.theos/
+obj/
+packages/
+.deb.makeok
+*.deb
+
+# 系统 / 编辑器
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# WorkBuddy 内部记忆（不进仓库）
+.workbuddy/
