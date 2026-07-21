@@ -2,6 +2,11 @@
 #import "ObackPreferences.h"
 #import <objc/runtime.h>
 
+#pragma mark - 仅识别横向的 pan（避免纵向滑动误触发返回）
+@interface ObackPanGestureRecognizer : UIPanGestureRecognizer
+@property (nonatomic, assign) CGPoint startPoint;
+@end
+
 static void *kAttachedKey = &kAttachedKey;
 
 @implementation ObackManager {
@@ -35,8 +40,8 @@ static void *kAttachedKey = &kAttachedKey;
 - (void)attachToWindow:(UIWindow *)win {
     if (!win) return;
     if (objc_getAssociatedObject(win, kAttachedKey)) return;  // 每个 window 只挂一次
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self
-                                                                          action:@selector(handlePan:)];
+    ObackPanGestureRecognizer *pan = [[ObackPanGestureRecognizer alloc] initWithTarget:self
+                                                                                 action:@selector(handlePan:)];
     pan.delegate = self;
     pan.maximumNumberOfTouches = 1;
     [win addGestureRecognizer:pan];
@@ -71,10 +76,17 @@ static void *kAttachedKey = &kAttachedKey;
     BOOL poppable = (nav && nav.viewControllers.count > 1) || (top.presentingViewController != nil);
     if (!poppable) return NO;
 
-    // 左边缘且列表已横向滚动时，让位给滚动，避免和横滑列表打架
-    if (edge == ObackEdgeLeft) {
-        UIScrollView *sv = [self scrollViewAtPoint:loc inView:win];
-        if (sv && sv.contentOffset.x > 1.0) return NO;
+    // 边缘内滑与下方横向滚动列表冲突时，让位给滚动（左右边缘通用）
+    UIScrollView *sv = [self scrollViewAtPoint:loc inView:win];
+    if (sv) {
+        CGFloat maxX = sv.contentSize.width - sv.bounds.size.width;
+        BOOL canScrollHoriz = (maxX > 1.0);
+        if (canScrollHoriz) {
+            // 左边缘内滑且列表还能向左滚 -> 放行给滚动
+            if (edge == ObackEdgeLeft && sv.contentOffset.x > 1.0) return NO;
+            // 右边缘内滑且列表还能向右滚 -> 放行给滚动
+            if (edge == ObackEdgeRight && sv.contentOffset.x < maxX - 1.0) return NO;
+        }
     }
 
     self.currentEdge = edge;
@@ -169,6 +181,36 @@ static void *kAttachedKey = &kAttachedKey;
         hit = hit.superview;
     }
     return nil;
+}
+
+@end
+
+#pragma mark - 仅识别横向的 pan 实现
+@implementation ObackPanGestureRecognizer
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesBegan:touches withEvent:event];
+    UITouch *touch = [touches anyObject];
+    if (touch) self.startPoint = [touch locationInView:self.view];
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.state == UIGestureRecognizerStatePossible) {
+        UITouch *touch = [touches anyObject];
+        if (touch) {
+            CGPoint now = [touch locationInView:self.view];
+            CGFloat dx = now.x - self.startPoint.x;
+            CGFloat dy = now.y - self.startPoint.y;
+            // 累计位移超阈值后判定方向，纵向则直接失败，放行给底层滚动
+            if (fabs(dx) >= 8.0 || fabs(dy) >= 8.0) {
+                if (fabs(dy) > fabs(dx)) {
+                    self.state = UIGestureRecognizerStateFailed;
+                    return;
+                }
+            }
+        }
+    }
+    [super touchesMoved:touches withEvent:event];
 }
 
 @end
