@@ -4,7 +4,7 @@
 <dict>
     <key>title</key>
     <string>Oback</string>
-    <key>entries</key>
+    <key>items</key>
     <array>
         <dict>
             <key>cell</key>
