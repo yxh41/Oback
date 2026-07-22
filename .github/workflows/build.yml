@@ -1,7 +1,9 @@
 name: Build Oback (roothide)
 
-# 推送或手动触发时，在 GitHub 的 macOS runner 上自行安装 Theos + iOS SDK 并编译 roothide 版 .deb
-# 不依赖任何第三方 build action（此前用的 xzr46770661/action-build-theos 仓库已不可访问，导致 job 在 Set up job 阶段失败）
+# 在 GitHub macOS runner 上：用标准 theos 编出 rootless .deb，
+# 再用 roothide 官方 RootHidePatcher 的 patch.sh 转成 roothide .deb。
+# 说明：roothide 没有内置 theos package scheme（标准 theos 与 roothide/theos 都不带），
+# 官方推荐流程就是 rootless 构建 + patch.sh 转换。
 on:
   push:
     branches: [ main, master ]
@@ -18,58 +20,64 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer 2>/dev/null || true
+
       - name: Install dependencies
-        env:
-          HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
         run: |
-          brew install dpkg ldid
-          brew install xz
+          brew install dpkg ldid gnu-sed findutils coreutils xz
           cpanm -n IO::Compress::Lzma 2>/dev/null || true
 
       - name: Install Theos
         run: |
-          git clone https://github.com/theos/theos.git "$THEOS"
-          cd "$THEOS"
-          git submodule update --init --recursive 2>&1 || true
+          git clone --recursive https://github.com/theos/theos.git "$THEOS"
           for f in logos.pl dm.pl; do
-            if [ -e "$THEOS/bin/$f" ]; then
-              echo "OK: bin/$f exists"
-            else
-              echo "Fixing bin/$f"
-              rm -f "$THEOS/bin/$f"
-              case "$f" in
-                logos.pl) curl -fsSL https://raw.githubusercontent.com/theos/logos/master/logos.pl -o "$THEOS/bin/logos.pl" ;;
-                dm.pl)    curl -fsSL https://raw.githubusercontent.com/theos/dm.pl/master/dm.pl -o "$THEOS/bin/dm.pl" ;;
-              esac
-              chmod +x "$THEOS/bin/$f"
-            fi
+            [ -e "$THEOS/bin/$f" ] && continue
+            case "$f" in
+              logos.pl) curl -fsSL https://raw.githubusercontent.com/theos/logos/master/logos.pl -o "$THEOS/bin/logos.pl" ;;
+              dm.pl)    curl -fsSL https://raw.githubusercontent.com/theos/dm.pl/master/dm.pl -o "$THEOS/bin/dm.pl" ;;
+            esac
+            chmod +x "$THEOS/bin/$f"
           done
 
       - name: Install SDKs
         run: |
           rm -rf "$THEOS/sdks"
           git clone --depth=1 https://github.com/theos/sdks.git "$THEOS/sdks"
-          echo "Installed SDKs:"
           ls -1 "$THEOS/sdks/" | grep -i iphone
 
-      - name: Build roothide package
+      - name: Build rootless .deb
         run: |
           set -o pipefail
-          echo "=== Building roothide .deb ==="
           make clean
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide 2>&1 | tee ci-build.log
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless 2>&1 | tee ci-build.log
+          ROOTLESS_DEB=$(ls packages/*_iphoneos-arm64.deb 2>/dev/null | head -n1)
+          echo "ROOTLESS_DEB=$ROOTLESS_DEB"
+          [ -n "$ROOTLESS_DEB" ] || { echo "No rootless .deb produced"; exit 1; }
 
-      - name: Show build log on failure
+      - name: Convert to roothide (.deb) via RootHidePatcher/patch.sh
+        run: |
+          set -o pipefail
+          curl -fsSL https://raw.githubusercontent.com/roothide/RootHidePatcher/master/patch.sh -o /tmp/patch.sh
+          curl -fsSL https://raw.githubusercontent.com/roothide/RootHidePatcher/master/roothide.entitlements -o /tmp/roothide.entitlements
+          chmod +x /tmp/patch.sh
+          ROOTLESS_DEB=$(ls packages/*_iphoneos-arm64.deb | head -n1)
+          sudo env "PATH=$PATH" bash /tmp/patch.sh "$ROOTLESS_DEB" packages/oback_roothide.deb 2>&1 | tee ci-patch.log
+          echo "=== produced roothide deb ==="
+          ls -la packages/oback_roothide.deb
+          dpkg-deb -I packages/oback_roothide.deb | head -20
+
+      - name: Show logs on failure
         if: failure()
         run: |
-          echo "===== ci-build.log ====="
-          cat ci-build.log
+          echo "===== ci-build.log ====="; cat ci-build.log 2>/dev/null
+          echo "===== ci-patch.log ====="; cat ci-patch.log 2>/dev/null
 
-      - name: Upload .deb
+      - name: Upload roothide .deb
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: oback-deb
-          path: packages/*.deb
+          path: packages/oback_roothide.deb
           if-no-files-found: error
           retention-days: 90

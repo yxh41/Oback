@@ -1,10 +1,14 @@
 # Oback — OPPO 风格边缘手势返回（roothide / iOS 16.4.1）
-# 构建：make package THEOS_PACKAGE_SCHEME=roothide
-# 也可直接在下面写死 THEOS_PACKAGE_SCHEME，省得每次带环境变量。
+# roothide 没有内置 theos package scheme，官方推荐流程：
+#   1) 用 rootless scheme 编出 .deb（/var/jb 布局，架构 iphoneos-arm64）
+#   2) 用 roothide 官方的 RootHidePatcher/patch.sh 转成 roothide .deb
+#      （把 /var/jb 路径重写进 @loader_path/.jbroot/，架构改为 iphoneos-arm64e）
+# 本地出 roothide 包：make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+#                    sudo bash patch.sh packages/xxx_rootless.deb packages/oback_roothide.deb
 
 TARGET := iphone:clang:16.4
 ARCHS := arm64
-THEOS_PACKAGE_SCHEME := roothide
+THEOS_PACKAGE_SCHEME := rootless
 
 include $(THEOS)/makefiles/common.mk
 
