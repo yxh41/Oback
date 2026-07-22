@@ -49,23 +49,23 @@ jobs:
       - name: Build rootless .deb
         run: |
           set -o pipefail
-          make clean
+          make clean || true
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless 2>&1 | tee ci-build.log
           ROOTLESS_DEB=$(ls packages/*_iphoneos-arm64.deb 2>/dev/null | head -n1)
           echo "ROOTLESS_DEB=$ROOTLESS_DEB"
           [ -n "$ROOTLESS_DEB" ] || { echo "No rootless .deb produced"; exit 1; }
 
-      - name: Surface build errors as annotations
+      - name: Surface build log as annotations
         if: always()
         run: |
           if [ -f ci-build.log ]; then
-            grep -nE "error:|fatal error|make(\[[0-9]+\])?: \*\*\*|Stop\.|No such file|SDK not found|not found|undefined symbol|ld: " ci-build.log \
-              | sed 's/\r//' | head -60 \
-              | while IFS= read -r line; do
-                  # 去掉可能破坏 workflow 命令的冒号序列，再作为 annotation 输出
-                  safe=$(printf '%s' "$line" | sed 's/::/:/g')
-                  echo "::error::$safe"
-                done
+            # 逐行输出为 annotation，确保真实报错可被匿名 API 读取（不再依赖关键词匹配）
+            sed 's/\r//' ci-build.log | tail -150 | while IFS= read -r line; do
+              safe=$(printf '%s' "$line" | sed 's/::/:/g' | cut -c1-500)
+              [ -n "$safe" ] && echo "::error::$safe"
+            done
+          else
+            echo "::error::ci-build.log was not created (build aborted before 'make package')"
           fi
 
       - name: Convert to roothide (.deb) via RootHidePatcher/patch.sh
