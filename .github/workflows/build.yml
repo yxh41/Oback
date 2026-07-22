@@ -1,24 +1,64 @@
 name: Build Oback (roothide)
 
-# 推送或手动触发时，在 GitHub 的 macOS runner 上用 Theos 编译 roothide 版 .deb
+# 推送或手动触发时，在 GitHub 的 macOS runner 上自行安装 Theos + iOS SDK 并编译 roothide 版 .deb
+# 不依赖任何第三方 build action（此前用的 xzr46770661/action-build-theos 仓库已不可访问，导致 job 在 Set up job 阶段失败）
 on:
   push:
     branches: [ main, master ]
   workflow_dispatch:
 
+env:
+  THEOS: ${{ github.workspace }}/theos
+
 jobs:
   build:
-    runs-on: macos-14
-    env:
-      # roothide 打包方案（Makefile 里也已写死，这里再保险设一次）
-      THEOS_PACKAGE_SCHEME: roothide
+    runs-on: macos-15
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 由社区维护的 theos CI Action 负责安装 theos + iOS SDK + dpkg/ldid 等工具链
-      - name: Build package with Theos
-        uses: xzr46770661/action-build-theos@main
+      - name: Install dependencies
+        env:
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
+        run: |
+          brew install dpkg ldid
+          brew install xz
+          cpanm -n IO::Compress::Lzma 2>/dev/null || true
+
+      - name: Install Theos
+        run: |
+          git clone https://github.com/theos/theos.git "$THEOS"
+          cd "$THEOS"
+          git submodule update --init --recursive 2>&1 || true
+          for f in logos.pl dm.pl; do
+            if [ -e "$THEOS/bin/$f" ]; then
+              echo "OK: bin/$f exists"
+            else
+              echo "Fixing bin/$f"
+              rm -f "$THEOS/bin/$f"
+              case "$f" in
+                logos.pl) curl -fsSL https://raw.githubusercontent.com/theos/logos/master/logos.pl -o "$THEOS/bin/logos.pl" ;;
+                dm.pl)    curl -fsSL https://raw.githubusercontent.com/theos/dm.pl/master/dm.pl -o "$THEOS/bin/dm.pl" ;;
+              esac
+              chmod +x "$THEOS/bin/$f"
+            fi
+          done
+
+      - name: Install SDKs
+        run: |
+          rm -rf "$THEOS/sdks"
+          git clone --depth=1 https://github.com/theos/sdks.git "$THEOS/sdks"
+          echo "Installed SDKs:"
+          ls -1 "$THEOS/sdks/" | grep -i iphone
+
+      - name: Build roothide package
+        run: |
+          echo "=== Building roothide .deb ==="
+          make clean
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide THEOS_ENV=silent 2>&1 || make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+          echo "Build done:"
+          ls -lh packages/
 
       - name: Upload .deb
         uses: actions/upload-artifact@v4
@@ -26,3 +66,4 @@ jobs:
           name: oback-deb
           path: packages/*.deb
           if-no-files-found: error
+          retention-days: 90
