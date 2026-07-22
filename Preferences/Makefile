@@ -2,10 +2,10 @@ include $(THEOS)/makefiles/common.mk
 
 BUNDLE_NAME = ObackSettings
 
-ObackSettings_FILES = ObackSettingsController.m
+ObackSettings_FILES = ObackSettingsController.m ObackAppListController.m
 ObackSettings_INSTALL_PATH = /Library/PreferenceBundles
 ObackSettings_FRAMEWORKS = UIKit
-ObackSettings_PRIVATE_FRAMEWORKS = Preferences
+ObackSettings_PRIVATE_FRAMEWORKS = Preferences MobileCoreServices
 ObackSettings_CFLAGS = -fobjc-arc
 
 include $(THEOS_MAKE_PATH)/bundle.mk
