@@ -117,14 +117,17 @@ static UIImage *ObackIconForAppPath(NSString *appPath) {
     return ([self.mode isEqualToString:@"white"] ? @"whitelistApps" : @"blacklistApps");
 }
 
-// 让 specifier 上设置的 cellClass 真正生效（否则框架用默认 PSSwitchCell，图标不会显示）
+// 让 specifier 上设置的 cellClass 真正生效（否则框架用默认 PSSwitchCell，图标不会显示）。
+// 注意：PSListController 头文件未声明 cellClassForSpecifier:，不能用 [super cellClassForSpecifier:]，
+// 否则 theos 编译报「no visible @interface declares the selector」。默认分支直接返回 PSSwitchCell 即可，
+// 因为 PSListController 默认实现本就会读取 specifier 的 cellClass 属性（我们已经设了）。
 - (Class)cellClassForSpecifier:(PSSpecifier *)specifier {
     NSString *n = [specifier propertyForKey:@"cellClass"];
     if (n.length) {
         Class c = NSClassFromString(n);
         if (c) return c;
     }
-    return [super cellClassForSpecifier:specifier];
+    return NSClassFromString(@"PSSwitchCell");
 }
 
 - (NSArray *)specifiers {
