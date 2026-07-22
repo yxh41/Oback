@@ -95,7 +95,7 @@ static void *kTDKey = &kTDKey;
 %hook UINavigationController
 
 - (void)setDelegate:(id<UINavigationControllerDelegate>)delegate {
-    // 避免递归：已经是我们自己的转发器时直接调用原方法（%orig 透传原参数）
+    // 避免递归：已是我们自己的转发器时直接调用原方法（透传原参数）
     if ([delegate isKindOfClass:[ObackNavDelegate class]]) { %orig; return; }
 
     ObackNavDelegate *fd = objc_getAssociatedObject(self, kNavDelegateKey);
