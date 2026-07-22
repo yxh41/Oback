@@ -2,9 +2,11 @@
 //  ObackAppListController.m
 //  Oback 设置页 —— App 选择器（黑白名单）
 //
-//  枚举设备上已安装的用户 App，每个 App 一个开关，开关状态分别存入
-//  NSUserDefaults(suite=com.zlhkf.oback) 的 whitelistApps / blacklistApps 数组。
-//  图标通过 LSApplicationProxy（私有 API，roothide 下可用）加载。
+//  枚举设备上已安装的用户 App。
+//  注意：iOS 11+ 起 LSApplicationWorkspace.allInstalledApplications 对非授权进程
+//  返回空数组（需特定 entitlement），roothide 注入的设置 App 拿不到。
+//  故这里改为扫描 /var/containers/Bundle/Application/*.app，零私有框架依赖，iOS 16 仍有效。
+//  图标从目标 App 的 .app bundle 直接加载（支持 asset catalog 的 CFBundleIconName 与旧式 CFBundleIconFiles）。
 //
 
 #import "ObackAppListController.h"
@@ -12,44 +14,33 @@
 #import <Preferences/PSTableCell.h>
 #import <Preferences/PSSwitchTableCell.h>
 #import <UIKit/UIKit.h>
-#import <objc/message.h>
 
 static NSString *const kDomain = @"com.zlhkf.oback";
 
-#pragma mark - 图标加载（私有 API）
+#pragma mark - 图标加载（从目标 App bundle 读取，不依赖私有 API）
 
-static UIImage *ObackIconForBundle(NSString *bid) {
-    if (!bid.length) return nil;
-    Class proxyCls = NSClassFromString(@"LSApplicationProxy");
-    if (!proxyCls) return nil;
-    SEL appSel = NSSelectorFromString(@"applicationProxyForIdentifier:");
-    if (![proxyCls respondsToSelector:appSel]) return nil;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-    id proxy = [proxyCls performSelector:appSel withObject:bid];
-#pragma clang diagnostic pop
-    if (!proxy) return nil;
-
-    // 1) icon 属性（UIImage）
-    SEL iconSel = NSSelectorFromString(@"icon");
-    if ([proxy respondsToSelector:iconSel]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        UIImage *img = [proxy performSelector:iconSel];
-#pragma clang diagnostic pop
-        if (img) return img;
+static UIImage *ObackIconForAppPath(NSString *appPath) {
+    if (!appPath.length) return nil;
+    NSBundle *b = [NSBundle bundleWithPath:appPath];
+    if (!b) return nil;
+    NSString *infoPath = [appPath stringByAppendingPathComponent:@"Info.plist"];
+    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
+    if (!info) return nil;
+    NSString *iconName = info[@"CFBundleIconName"];
+    if (!iconName.length) {
+        NSDictionary *icons = info[@"CFBundleIcons"][@"CFBundlePrimaryIcon"];
+        NSArray *files = icons[@"CFBundleIconFiles"];
+        iconName = files.firstObject;
     }
-    // 2) iconDataForVariant:（NSData，variant 传 0 取主图标）
-    SEL dataSel = NSSelectorFromString(@"iconDataForVariant:");
-    if ([proxy respondsToSelector:dataSel]) {
-        NSData *(*fn)(id, SEL, NSInteger) = (NSData *(*)(id, SEL, NSInteger))objc_msgSend;
-        NSData *data = fn(proxy, dataSel, 0);
-        if (data) {
-            UIImage *img = [UIImage imageWithData:data];
-            if (img) return img;
+    UIImage *img = nil;
+    if (iconName.length) {
+        img = [UIImage imageNamed:iconName inBundle:b compatibleWithTraitCollection:nil];
+        if (!img) {
+            NSString *p = [appPath stringByAppendingPathComponent:iconName];
+            img = [UIImage imageWithContentsOfFile:p];
         }
     }
-    return nil;
+    return img;
 }
 
 #pragma mark - 自定义 cell：图标 + 名称 + bundle id 副标题
@@ -79,11 +70,12 @@ static UIImage *ObackIconForBundle(NSString *bid) {
 - (void)setSpecifier:(PSSpecifier *)specifier {
     [super setSpecifier:specifier];
     NSString *bid = [specifier propertyForKey:@"appBundleID"];
+    NSString *appPath = [specifier propertyForKey:@"appPath"];
     self.textLabel.text = specifier.name ?: bid;
     self.textLabel.font = [UIFont systemFontOfSize:17];
     if (bid) {
         self.obDetail.text = bid;
-        UIImage *icon = ObackIconForBundle(bid);
+        UIImage *icon = ObackIconForAppPath(appPath);
         if (icon) {
             CGSize sz = CGSizeMake(29, 29);
             UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:sz];
@@ -119,49 +111,26 @@ static UIImage *ObackIconForBundle(NSString *bid) {
 @implementation ObackAppListController
 
 - (NSArray *)_installedUserApps {
-    Class wsCls = NSClassFromString(@"LSApplicationWorkspace");
-    if (!wsCls) return @[];
-    SEL defSel = NSSelectorFromString(@"defaultWorkspace");
-    if (![wsCls respondsToSelector:defSel]) return @[];
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-    id ws = [wsCls performSelector:defSel];
-#pragma clang diagnostic pop
-    if (!ws) return @[];
-    SEL allSel = NSSelectorFromString(@"allApplications");
-    if (![ws respondsToSelector:allSel]) allSel = NSSelectorFromString(@"allInstalledApplications");
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-    NSArray *apps = [ws performSelector:allSel];
-#pragma clang diagnostic pop
-    if (![apps isKindOfClass:[NSArray class]]) return @[];
-
     NSMutableArray *result = [NSMutableArray array];
-    for (id app in apps) {
-        // 只保留用户安装的 App（过滤系统 / 隐藏）
-        SEL typeSel = NSSelectorFromString(@"applicationType");
-        NSString *type = nil;
-        if ([app respondsToSelector:typeSel]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            type = [app performSelector:typeSel];
-#pragma clang diagnostic pop
+    NSString *appDir = @"/var/containers/Bundle/Application";
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray *uuids = [fm contentsOfDirectoryAtPath:appDir error:nil];
+    for (NSString *uuid in uuids) {
+        NSString *uuidPath = [appDir stringByAppendingPathComponent:uuid];
+        BOOL isDir = NO;
+        if (![fm fileExistsAtPath:uuidPath isDirectory:&isDir] || !isDir) continue;
+        NSArray *entries = [fm contentsOfDirectoryAtPath:uuidPath error:nil];
+        for (NSString *entry in entries) {
+            if (![entry hasSuffix:@".app"]) continue;
+            NSString *appPath = [uuidPath stringByAppendingPathComponent:entry];
+            NSString *infoPath = [appPath stringByAppendingPathComponent:@"Info.plist"];
+            NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
+            if (!info) continue;
+            NSString *bid = info[@"CFBundleIdentifier"];
+            if (!bid.length) continue;
+            NSString *name = info[@"CFBundleDisplayName"] ?: info[@"CFBundleName"] ?: bid;
+            [result addObject:@{@"bundleID": bid, @"name": name, @"path": appPath}];
         }
-        if (type && ![type isEqualToString:@"User"]) continue;
-
-        SEL bidSel = NSSelectorFromString(@"bundleIdentifier");
-        SEL nameSel = NSSelectorFromString(@"localizedName");
-        NSString *bid = nil, *name = nil;
-        if ([app respondsToSelector:bidSel]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            bid = [app performSelector:bidSel];
-            if ([app respondsToSelector:nameSel]) name = [app performSelector:nameSel];
-#pragma clang diagnostic pop
-        }
-        if (!bid) continue;
-        if (!name) name = bid;
-        [result addObject:@{@"bundleID": bid, @"name": name}];
     }
     [result sortUsingDescriptors:@[[NSSortDescriptor sortDescriptorWithKey:@"name" ascending:YES]]];
     return result;
@@ -185,14 +154,16 @@ static UIImage *ObackIconForBundle(NSString *bid) {
         for (NSDictionary *app in [self _installedUserApps]) {
             NSString *bid = app[@"bundleID"];
             NSString *name = app[@"name"];
+            NSString *path = app[@"path"];
             PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name
-                                                           target:self
-                                                              set:@selector(_setAppEnabled:specifier:)
-                                                              get:@selector(_isAppEnabled:)
-                                                          detail:nil
-                                                              cell:PSSwitchCell
-                                                              edit:nil];
+                                                          target:self
+                                                             set:@selector(_setAppEnabled:specifier:)
+                                                             get:@selector(_isAppEnabled:)
+                                                         detail:nil
+                                                             cell:PSSwitchCell
+                                                             edit:nil];
             [s setProperty:bid forKey:@"appBundleID"];
+            [s setProperty:path forKey:@"appPath"];
             [s setProperty:NSStringFromClass([ObackAppCell class]) forKey:@"cellClass"];
             [specs addObject:s];
         }
