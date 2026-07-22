@@ -1,9 +1,11 @@
 name: Build Oback (roothide)
 
-# 在 GitHub macOS runner 上：用标准 theos 编出 rootless .deb，
-# 再用 roothide 官方 RootHidePatcher 的 patch.sh 转成 roothide .deb。
-# 说明：roothide 没有内置 theos package scheme（标准 theos 与 roothide/theos 都不带），
-# 官方推荐流程就是 rootless 构建 + patch.sh 转换。
+# 在 GitHub macOS runner 上：
+#   1) 用标准 theos 编出 rootless .deb（/var/jb 布局，iphoneos-arm64）
+#   2) 用 roothide 官方 RootHidePatcher 的 patch.sh 转成 roothide .deb
+#      （把 /var/jb 路径重写进 @loader_path/.jbroot/，架构改为 iphoneos-arm64e）
+# 参考 RunningDotIndicator 的验证配置：动态探测 theos/sdks 中的最新 iPhoneOS SDK，
+# 用 sed 改写 Makefile 的 TARGET，避免硬编码 SDK 版本缺失导致构建失败。
 on:
   push:
     branches: [ main, master ]
@@ -46,27 +48,24 @@ jobs:
           git clone --depth=1 https://github.com/theos/sdks.git "$THEOS/sdks"
           ls -1 "$THEOS/sdks/" | grep -i iphone
 
+      - name: Detect SDK version
+        id: sdk
+        run: |
+          SDK=$(ls "$THEOS/sdks/" | grep -o 'iPhoneOS[0-9.]*\.sdk' | sed 's/iPhoneOS//;s/\.sdk//' | sort -V | tail -1)
+          echo "sdk_version=$SDK" >> "$GITHUB_OUTPUT"
+          echo "Detected latest SDK: $SDK"
+          sed -i '' "s/TARGET := iphone:clang:.*/TARGET := iphone:clang:$SDK:15.0/" Makefile
+          echo "Makefile TARGET now:"
+          grep '^TARGET' Makefile
+
       - name: Build rootless .deb
         run: |
           set -o pipefail
-          make clean || true
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless 2>&1 | tee ci-build.log
+          make clean
+          make package FINALPACKAGE=1 THEOS_ENV=silent 2>&1 | tee ci-build.log || make package FINALPACKAGE=1 2>&1 | tee ci-build.log
           ROOTLESS_DEB=$(ls packages/*_iphoneos-arm64.deb 2>/dev/null | head -n1)
           echo "ROOTLESS_DEB=$ROOTLESS_DEB"
           [ -n "$ROOTLESS_DEB" ] || { echo "No rootless .deb produced"; exit 1; }
-
-      - name: Surface build log as annotations
-        if: always()
-        run: |
-          if [ -f ci-build.log ]; then
-            # 逐行输出为 annotation，确保真实报错可被匿名 API 读取（不再依赖关键词匹配）
-            sed 's/\r//' ci-build.log | tail -150 | while IFS= read -r line; do
-              safe=$(printf '%s' "$line" | sed 's/::/:/g' | cut -c1-500)
-              [ -n "$safe" ] && echo "::error::$safe"
-            done
-          else
-            echo "::error::ci-build.log was not created (build aborted before 'make package')"
-          fi
 
       - name: Convert to roothide (.deb) via RootHidePatcher/patch.sh
         if: success()
@@ -80,18 +79,6 @@ jobs:
           echo "=== produced roothide deb ==="
           ls -la packages/oback_roothide.deb
           dpkg-deb -I packages/oback_roothide.deb | head -20
-
-      - name: Surface patch errors as annotations
-        if: always()
-        run: |
-          if [ -f ci-patch.log ]; then
-            grep -nE "error|fatal|No such file|not found|denied|Stop" ci-patch.log \
-              | sed 's/\r//' | head -40 \
-              | while IFS= read -r line; do
-                  safe=$(printf '%s' "$line" | sed 's/::/:/g')
-                  echo "::error::$safe"
-                done
-          fi
 
       - name: Upload roothide .deb
         if: success()

@@ -6,8 +6,8 @@
 # 本地出 roothide 包：make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
 #                    sudo bash patch.sh packages/xxx_rootless.deb packages/oback_roothide.deb
 
-TARGET := iphone:clang:16.4
-ARCHS := arm64
+TARGET := iphone:clang:16.5:15.0
+ARCHS := arm64 arm64e
 THEOS_PACKAGE_SCHEME := rootless
 
 include $(THEOS)/makefiles/common.mk
