@@ -17,9 +17,12 @@
 ├── ObackManager.h/.m          # 全局手势管理器：边缘判定 / 路由 / 黑名单
 ├── ObackTransition.h/.m       # OPPO 视差动画引擎（动画 + 交互控制器）
 ├── ObackPreferences.h/.m      # 从设置域实时读取参数
-├── layout/Library/PreferenceLoader/Preferences/ObackSettings.bundle/
-│   ├── Root.plist                # 设置面板定义
-│   └── Info.plist
+├── layout/Library/PreferenceLoader/Preferences/ObackSettings.plist   # PreferenceLoader 入口(isController 风格)
+├── Preferences/                  # 设置子工程（编译型 bundle，由 SUBPROJECTS 随 tweak 一起打进 roothide .deb）
+│   ├── Makefile                  # BUNDLE_NAME = ObackSettings → 安装到 /Library/PreferenceBundles
+│   ├── ObackSettings.plist       # bundle 的 Info.plist（CFBundleIdentifier=com.zlhkf.oback, NSPrincipalClass=ObackSettingsController）
+│   ├── ObackSettingsController.h/.m  # PSListController 子类，从 Resources/Root.plist 加载控件
+│   └── Resources/Root.plist      # 设置面板定义（每个控件 cell 带 defaults=com.zlhkf.oback，与 ObackPreferences.m 读取域一致）
 └── README.md
 ```
 

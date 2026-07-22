@@ -21,6 +21,8 @@
             <string>左边缘返回</string>
             <key>key</key>
             <string>leftEnabled</string>
+            <key>defaults</key>
+            <string>com.zlhkf.oback</string>
             <key>default</key>
             <true/>
         </dict>
@@ -31,6 +33,8 @@
             <string>右边缘返回</string>
             <key>key</key>
             <string>rightEnabled</string>
+            <key>defaults</key>
+            <string>com.zlhkf.oback</string>
             <key>default</key>
             <true/>
         </dict>
@@ -41,6 +45,8 @@
             <string>触感反馈</string>
             <key>key</key>
             <string>hapticEnabled</string>
+            <key>defaults</key>
+            <string>com.zlhkf.oback</string>
             <key>default</key>
             <true/>
         </dict>
@@ -51,6 +57,8 @@
             <string>当前页阴影</string>
             <key>key</key>
             <string>shadowEnabled</string>
+            <key>defaults</key>
+            <string>com.zlhkf.oback</string>
             <key>default</key>
             <true/>
         </dict>
@@ -61,6 +69,8 @@
             <string>触发宽度 (pt)</string>
             <key>key</key>
             <string>triggerWidth</string>
+            <key>defaults</key>
+            <string>com.zlhkf.oback</string>
             <key>default</key>
             <real>24</real>
             <key>min</key>
@@ -75,6 +85,8 @@
             <string>视差位移</string>
             <key>key</key>
             <string>parallaxOffset</string>
+            <key>defaults</key>
+            <string>com.zlhkf.oback</string>
             <key>default</key>
             <real>0.3</real>
             <key>min</key>
@@ -89,6 +101,8 @@
             <string>上一页最小缩放</string>
             <key>key</key>
             <string>previousScaleMin</string>
+            <key>defaults</key>
+            <string>com.zlhkf.oback</string>
             <key>default</key>
             <real>0.92</real>
             <key>min</key>
@@ -103,6 +117,8 @@
             <string>遮罩浓度</string>
             <key>key</key>
             <string>dimAlpha</string>
+            <key>defaults</key>
+            <string>com.zlhkf.oback</string>
             <key>default</key>
             <real>0.35</real>
             <key>min</key>
@@ -117,6 +133,8 @@
             <string>动画时长 (s)</string>
             <key>key</key>
             <string>duration</string>
+            <key>defaults</key>
+            <string>com.zlhkf.oback</string>
             <key>default</key>
             <real>0.32</real>
             <key>min</key>
@@ -139,6 +157,8 @@
             <string>仅白名单 App 生效</string>
             <key>key</key>
             <string>whitelistMode</string>
+            <key>defaults</key>
+            <string>com.zlhkf.oback</string>
             <key>default</key>
             <true/>
         </dict>
@@ -149,6 +169,8 @@
             <string>白名单(逗号分隔)</string>
             <key>key</key>
             <string>whitelistRaw</string>
+            <key>defaults</key>
+            <string>com.zlhkf.oback</string>
             <key>default</key>
             <string></string>
             <key>placeholder</key>
@@ -163,6 +185,8 @@
             <string>黑名单(逗号分隔)</string>
             <key>key</key>
             <string>blacklistRaw</string>
+            <key>defaults</key>
+            <string>com.zlhkf.oback</string>
             <key>default</key>
             <string></string>
             <key>placeholder</key>

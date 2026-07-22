@@ -4,10 +4,16 @@
 <dict>
     <key>entry</key>
     <dict>
-        <key>label</key>
-        <string>Oback</string>
         <key>bundle</key>
         <string>ObackSettings</string>
+        <key>cell</key>
+        <string>PSLinkCell</string>
+        <key>detail</key>
+        <string>ObackSettingsController</string>
+        <key>isController</key>
+        <true/>
+        <key>label</key>
+        <string>Oback</string>
         <key>footerText</key>
         <string>OPPO 风格边缘手势返回（roothide / iOS 16.4.1）</string>
     </dict>

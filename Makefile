@@ -23,6 +23,10 @@ Oback_LIBRARIES :=
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
+# 偏好设置子工程（编译型 bundle，随 tweak 一起打进 roothide .deb）
+SUBPROJECTS = Preferences
+include $(THEOS_MAKE_PATH)/aggregate.mk
+
 # 安装后重新加载 backboardd，让所有 App 重新注入
 after-install::
 	install.exec "killall -9 backboardd" 2>/dev/null || true
