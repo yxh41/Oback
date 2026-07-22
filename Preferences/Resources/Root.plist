@@ -25,6 +25,8 @@
             <string>com.zlhkf.oback</string>
             <key>default</key>
             <true/>
+            <key>footnote</key>
+            <string>从屏幕左边缘向内滑动，触发返回上一页。</string>
         </dict>
         <dict>
             <key>cell</key>
@@ -37,6 +39,8 @@
             <string>com.zlhkf.oback</string>
             <key>default</key>
             <true/>
+            <key>footnote</key>
+            <string>从屏幕右边缘向内滑动返回，部分系统 App（如相机）可能不支持。</string>
         </dict>
         <dict>
             <key>cell</key>
@@ -49,6 +53,8 @@
             <string>com.zlhkf.oback</string>
             <key>default</key>
             <true/>
+            <key>footnote</key>
+            <string>到达提交阈值时触发轻微震动，提供操作确认感。</string>
         </dict>
         <dict>
             <key>cell</key>
@@ -61,6 +67,8 @@
             <string>com.zlhkf.oback</string>
             <key>default</key>
             <true/>
+            <key>footnote</key>
+            <string>返回过程中给当前页面叠加投影，增强层叠立体感。</string>
         </dict>
         <dict>
             <key>cell</key>
@@ -77,6 +85,8 @@
             <real>8</real>
             <key>max</key>
             <real>60</real>
+            <key>footnote</key>
+            <string>屏幕边缘多宽的范围会被识别为返回手势（8–60 点）。越宽越容易误触，越窄越难触发。</string>
         </dict>
         <dict>
             <key>cell</key>
@@ -93,6 +103,8 @@
             <real>0</real>
             <key>max</key>
             <real>0.6</real>
+            <key>footnote</key>
+            <string>上一页随手势探出的位移比例，数值越大探出越明显（0–0.6）。</string>
         </dict>
         <dict>
             <key>cell</key>
@@ -109,6 +121,8 @@
             <real>0.8</real>
             <key>max</key>
             <real>1</real>
+            <key>footnote</key>
+            <string>静止时上一页的最小缩放比例，营造纵深效果（0.8–1.0）。调小纵深感更强。</string>
         </dict>
         <dict>
             <key>cell</key>
@@ -125,6 +139,8 @@
             <real>0</real>
             <key>max</key>
             <real>0.8</real>
+            <key>footnote</key>
+            <string>返回时覆盖在上一页上的暗色遮罩强度（0–0.8）。越大越暗，对比越强烈。</string>
         </dict>
         <dict>
             <key>cell</key>
@@ -141,6 +157,8 @@
             <real>0.15</real>
             <key>max</key>
             <real>0.6</real>
+            <key>footnote</key>
+            <string>松手后完成或取消返回动画的时长（0.15–0.6 秒）。越短越跟手，越长越顺滑。</string>
         </dict>
         <dict>
             <key>cell</key>
@@ -161,6 +179,8 @@
             <string>com.zlhkf.oback</string>
             <key>default</key>
             <true/>
+            <key>footnote</key>
+            <string>开：仅「选白名单程序」中的 App 生效。关：所有 App 生效，并排除「选黑名单程序」中的 App。</string>
         </dict>
         <dict>
             <key>cell</key>
