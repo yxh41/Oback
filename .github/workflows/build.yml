@@ -1,9 +1,8 @@
 name: Build Oback (roothide)
 
-# 在 GitHub macOS runner 上：
-#   1) 用标准 theos 编出 rootless .deb（/var/jb 布局，iphoneos-arm64）
-#   2) 用 roothide 官方 RootHidePatcher 的 patch.sh 转成 roothide .deb
-#      （把 /var/jb 路径重写进 @loader_path/.jbroot/，架构改为 iphoneos-arm64e）
+# 在 GitHub macOS runner 上用 roothide 官方 theos 分支直接构建 roothide .deb：
+#   1) clone roothide/theos（内置 roothide package scheme）
+#   2) make package 直接产出 iphoneos-arm64e 的 roothide .deb（无需 patch.sh）
 # 参考 RunningDotIndicator 的验证配置：动态探测 theos/sdks 中的最新 iPhoneOS SDK，
 # 用 sed 改写 Makefile 的 TARGET，避免硬编码 SDK 版本缺失导致构建失败。
 on:
@@ -30,9 +29,9 @@ jobs:
           brew install dpkg ldid gnu-sed findutils coreutils xz
           cpanm -n IO::Compress::Lzma 2>/dev/null || true
 
-      - name: Install Theos
+      - name: Install Theos (roothide fork)
         run: |
-          git clone --recursive https://github.com/theos/theos.git "$THEOS"
+          git clone --recursive https://github.com/roothide/theos.git "$THEOS"
           for f in logos.pl dm.pl; do
             [ -e "$THEOS/bin/$f" ] && continue
             case "$f" in
@@ -58,33 +57,22 @@ jobs:
           echo "Makefile TARGET now:"
           grep '^TARGET' Makefile
 
-      - name: Build rootless .deb
+      - name: Build roothide .deb
         run: |
           set -o pipefail
           make clean
           make package FINALPACKAGE=1 THEOS_ENV=silent 2>&1 | tee ci-build.log || make package FINALPACKAGE=1 2>&1 | tee ci-build.log
-          ROOTLESS_DEB=$(ls packages/*_iphoneos-arm64.deb 2>/dev/null | head -n1)
-          echo "ROOTLESS_DEB=$ROOTLESS_DEB"
-          [ -n "$ROOTLESS_DEB" ] || { echo "No rootless .deb produced"; exit 1; }
-
-      - name: Convert to roothide (.deb) via RootHidePatcher/patch.sh
-        if: success()
-        run: |
-          set -o pipefail
-          curl -fsSL https://raw.githubusercontent.com/roothide/RootHidePatcher/master/patch.sh -o /tmp/patch.sh
-          curl -fsSL https://raw.githubusercontent.com/roothide/RootHidePatcher/master/roothide.entitlements -o /tmp/roothide.entitlements
-          chmod +x /tmp/patch.sh
-          ROOTLESS_DEB=$(ls packages/*_iphoneos-arm64.deb | head -n1)
-          sudo env "PATH=$PATH" bash /tmp/patch.sh "$ROOTLESS_DEB" packages/oback_roothide.deb 2>&1 | tee ci-patch.log
-          echo "=== produced roothide deb ==="
-          ls -la packages/oback_roothide.deb
-          dpkg-deb -I packages/oback_roothide.deb | head -20
+          ROOTHIDE_DEB=$(ls packages/*_iphoneos-arm64e.deb 2>/dev/null | head -n1)
+          echo "ROOTHIDE_DEB=$ROOTHIDE_DEB"
+          [ -n "$ROOTHIDE_DEB" ] || { echo "No roothide .deb produced"; exit 1; }
+          ls -la "$ROOTHIDE_DEB"
+          dpkg-deb -I "$ROOTHIDE_DEB" | head -20
 
       - name: Upload roothide .deb
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: oback-deb
-          path: packages/oback_roothide.deb
+          path: packages/*_iphoneos-arm64e.deb
           if-no-files-found: error
           retention-days: 90
