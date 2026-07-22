@@ -24,7 +24,10 @@ static UIImage *ObackIconForBundle(NSString *bid) {
     if (!proxyCls) return nil;
     SEL appSel = NSSelectorFromString(@"applicationProxyForIdentifier:");
     if (![proxyCls respondsToSelector:appSel]) return nil;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     id proxy = [proxyCls performSelector:appSel withObject:bid];
+#pragma clang diagnostic pop
     if (!proxy) return nil;
 
     // 1) icon 属性（UIImage）
@@ -120,11 +123,17 @@ static UIImage *ObackIconForBundle(NSString *bid) {
     if (!wsCls) return @[];
     SEL defSel = NSSelectorFromString(@"defaultWorkspace");
     if (![wsCls respondsToSelector:defSel]) return @[];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     id ws = [wsCls performSelector:defSel];
+#pragma clang diagnostic pop
     if (!ws) return @[];
     SEL allSel = NSSelectorFromString(@"allApplications");
     if (![ws respondsToSelector:allSel]) allSel = NSSelectorFromString(@"allInstalledApplications");
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     NSArray *apps = [ws performSelector:allSel];
+#pragma clang diagnostic pop
     if (![apps isKindOfClass:[NSArray class]]) return @[];
 
     NSMutableArray *result = [NSMutableArray array];
