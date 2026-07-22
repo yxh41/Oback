@@ -5,7 +5,7 @@
 
 #import <Preferences/PSListController.h>
 
-@interface ObackAppListController : PSListController
+@interface ObackAppListController : PSListController <UISearchResultsUpdating>
 // @"white" -> 白名单模式；@"black" -> 黑名单模式。由薄子类在 init 中设定。
 @property (nonatomic, copy) NSString *mode;
 @end
