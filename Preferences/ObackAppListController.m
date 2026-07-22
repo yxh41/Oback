@@ -43,6 +43,15 @@ static NSString *const kDomain = @"com.zlhkf.oback";
                 if (!info) continue;
                 NSString *bid = info[@"CFBundleIdentifier"];
                 if (!bid.length) continue;
+                // 只保留在桌面上有图标的 App：过滤掉无 UI / 无图标的守护进程、插件、隐藏程序等。
+                // 判定依据为 Info.plist 中任一图标字段存在（CFBundleIconName / CFBundleIconFiles / CFBundleIcons）。
+                id iconName = info[@"CFBundleIconName"];
+                id iconFiles = info[@"CFBundleIconFiles"];
+                id icons = info[@"CFBundleIcons"];
+                BOOL hasIcon = ([iconName isKindOfClass:[NSString class]] && [iconName length])
+                            || ([iconFiles isKindOfClass:[NSArray class]] && [iconFiles count])
+                            || ([icons isKindOfClass:[NSDictionary class]] && [icons count]);
+                if (!hasIcon) continue;
                 NSString *name = info[@"CFBundleDisplayName"] ?: info[@"CFBundleName"] ?: bid;
                 [result addObject:@{@"bundleID": bid, @"name": name}];
             }
