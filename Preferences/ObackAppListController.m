@@ -17,91 +17,64 @@
 
 static NSString *const kDomain = @"com.zlhkf.oback";
 
-#pragma mark - 图标加载（从目标 App bundle 读取，不依赖私有 API）
+#pragma mark - 图标加载（从目标 App bundle 读取，不依赖私有 API，全程容错）
 
 static UIImage *ObackIconForAppPath(NSString *appPath) {
-    if (!appPath.length) return nil;
-    NSBundle *b = [NSBundle bundleWithPath:appPath];
-    if (!b) return nil;
-    NSString *infoPath = [appPath stringByAppendingPathComponent:@"Info.plist"];
-    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
-    if (!info) return nil;
-    NSString *iconName = info[@"CFBundleIconName"];
-    if (!iconName.length) {
-        NSDictionary *icons = info[@"CFBundleIcons"][@"CFBundlePrimaryIcon"];
-        NSArray *files = icons[@"CFBundleIconFiles"];
-        iconName = files.firstObject;
-    }
-    UIImage *img = nil;
-    if (iconName.length) {
-        img = [UIImage imageNamed:iconName inBundle:b compatibleWithTraitCollection:nil];
+    @try {
+        if (!appPath.length) return nil;
+        NSBundle *b = [NSBundle bundleWithPath:appPath];
+        if (!b) return nil;
+        NSString *infoPath = [appPath stringByAppendingPathComponent:@"Info.plist"];
+        NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
+        if (!info) return nil;
+        NSString *iconName = info[@"CFBundleIconName"];
+        if (!iconName.length) {
+            NSDictionary *icons = info[@"CFBundleIcons"][@"CFBundlePrimaryIcon"];
+            NSArray *files = icons[@"CFBundleIconFiles"];
+            iconName = files.firstObject;
+        }
+        if (!iconName.length) return nil;
+        UIImage *img = [UIImage imageNamed:iconName inBundle:b compatibleWithTraitCollection:nil];
         if (!img) {
             NSString *p = [appPath stringByAppendingPathComponent:iconName];
             img = [UIImage imageWithContentsOfFile:p];
         }
+        if (!img) return nil;
+        // 统一缩放到 29x29，圆角交给 cell 处理
+        UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(29, 29)];
+        return [r imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull ctx) {
+            [img drawInRect:CGRectMake(0, 0, 29, 29)];
+        }];
+    } @catch (NSException *e) {
+        (void)e;
+        return nil;
     }
-    return img;
 }
 
-#pragma mark - 自定义 cell：图标 + 名称 + bundle id 副标题
+#pragma mark - 自定义 cell：系统原生 imageView 图标 + 名称(含 bundle id)
 
-@interface ObackAppCell : PSSwitchTableCell {
-    UILabel *_obDetail;
-}
+@interface ObackAppCell : PSSwitchTableCell
 @end
 
 @implementation ObackAppCell
 
-- (UILabel *)obDetail {
-    if (!_obDetail) {
-        _obDetail = [[UILabel alloc] init];
-        _obDetail.font = [UIFont systemFontOfSize:11];
-        if (@available(iOS 13.0, *)) {
-            _obDetail.textColor = [UIColor secondaryLabelColor];
-        } else {
-            _obDetail.textColor = [UIColor grayColor];
-        }
-        _obDetail.translatesAutoresizingMaskIntoConstraints = NO;
-        [self.contentView addSubview:_obDetail];
-    }
-    return _obDetail;
-}
-
+// 不重写 layoutSubviews：完全交给 UITableViewCell / PSSwitchTableCell 的原生布局，
+// 只设置内容，避免与父类内部布局冲突导致崩溃。
 - (void)setSpecifier:(PSSpecifier *)specifier {
     [super setSpecifier:specifier];
     NSString *bid = [specifier propertyForKey:@"appBundleID"];
     NSString *appPath = [specifier propertyForKey:@"appPath"];
-    self.textLabel.text = specifier.name ?: bid;
-    self.textLabel.font = [UIFont systemFontOfSize:17];
-    if (bid) {
-        self.obDetail.text = bid;
-        UIImage *icon = ObackIconForAppPath(appPath);
-        if (icon) {
-            CGSize sz = CGSizeMake(29, 29);
-            UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:sz];
-            UIImage *scaled = [r imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull ctx) {
-                [icon drawInRect:CGRectMake(0, 0, sz.width, sz.height)];
-            }];
-            self.imageView.image = scaled;
-            self.imageView.layer.cornerRadius = 6;
-            self.imageView.clipsToBounds = YES;
-        }
+    NSString *name = specifier.name ?: bid;
+    if (bid.length) {
+        name = [NSString stringWithFormat:@"%@  (%@)", name, bid];
     }
-    [self setNeedsLayout];
-}
-
-- (void)layoutSubviews {
-    [super layoutSubviews];
-    CGFloat h = CGRectGetHeight(self.contentView.bounds);
-    CGFloat iconSize = 29;
-    if (self.imageView.image) {
-        self.imageView.frame = CGRectMake(15, (h - iconSize) / 2, iconSize, iconSize);
+    self.textLabel.text = name;
+    UIImage *icon = ObackIconForAppPath(appPath);
+    if (icon) {
+        self.imageView.image = icon;
+        self.imageView.layer.cornerRadius = 6;
+        self.imageView.clipsToBounds = YES;
     }
-    CGFloat textX = 15 + iconSize + 10;
-    CGFloat rightPad = 70; // 给右侧开关留位
-    CGFloat w = CGRectGetWidth(self.contentView.bounds) - textX - rightPad;
-    self.textLabel.frame = CGRectMake(textX, 7, w, 22);
-    self.obDetail.frame = CGRectMake(textX, 30, w, 15);
 }
 
 @end
@@ -111,63 +84,83 @@ static UIImage *ObackIconForAppPath(NSString *appPath) {
 @implementation ObackAppListController
 
 - (NSArray *)_installedUserApps {
-    NSMutableArray *result = [NSMutableArray array];
-    NSString *appDir = @"/var/containers/Bundle/Application";
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSArray *uuids = [fm contentsOfDirectoryAtPath:appDir error:nil];
-    for (NSString *uuid in uuids) {
-        NSString *uuidPath = [appDir stringByAppendingPathComponent:uuid];
-        BOOL isDir = NO;
-        if (![fm fileExistsAtPath:uuidPath isDirectory:&isDir] || !isDir) continue;
-        NSArray *entries = [fm contentsOfDirectoryAtPath:uuidPath error:nil];
-        for (NSString *entry in entries) {
-            if (![entry hasSuffix:@".app"]) continue;
-            NSString *appPath = [uuidPath stringByAppendingPathComponent:entry];
-            NSString *infoPath = [appPath stringByAppendingPathComponent:@"Info.plist"];
-            NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
-            if (!info) continue;
-            NSString *bid = info[@"CFBundleIdentifier"];
-            if (!bid.length) continue;
-            NSString *name = info[@"CFBundleDisplayName"] ?: info[@"CFBundleName"] ?: bid;
-            [result addObject:@{@"bundleID": bid, @"name": name, @"path": appPath}];
+    @try {
+        NSMutableArray *result = [NSMutableArray array];
+        NSString *appDir = @"/var/containers/Bundle/Application";
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSArray *uuids = [fm contentsOfDirectoryAtPath:appDir error:nil];
+        for (NSString *uuid in uuids) {
+            NSString *uuidPath = [appDir stringByAppendingPathComponent:uuid];
+            BOOL isDir = NO;
+            if (![fm fileExistsAtPath:uuidPath isDirectory:&isDir] || !isDir) continue;
+            NSArray *entries = [fm contentsOfDirectoryAtPath:uuidPath error:nil];
+            for (NSString *entry in entries) {
+                if (![entry hasSuffix:@".app"]) continue;
+                NSString *appPath = [uuidPath stringByAppendingPathComponent:entry];
+                NSString *infoPath = [appPath stringByAppendingPathComponent:@"Info.plist"];
+                NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
+                if (!info) continue;
+                NSString *bid = info[@"CFBundleIdentifier"];
+                if (!bid.length) continue;
+                NSString *name = info[@"CFBundleDisplayName"] ?: info[@"CFBundleName"] ?: bid;
+                [result addObject:@{@"bundleID": bid, @"name": name, @"path": appPath}];
+            }
         }
+        [result sortUsingDescriptors:@[[NSSortDescriptor sortDescriptorWithKey:@"name" ascending:YES]]];
+        return result;
+    } @catch (NSException *e) {
+        return @[];
     }
-    [result sortUsingDescriptors:@[[NSSortDescriptor sortDescriptorWithKey:@"name" ascending:YES]]];
-    return result;
 }
 
 - (NSString *)_storeKey {
     return ([self.mode isEqualToString:@"white"] ? @"whitelistApps" : @"blacklistApps");
 }
 
+// 让 specifier 上设置的 cellClass 真正生效（否则框架用默认 PSSwitchCell，图标不会显示）
+- (Class)cellClassForSpecifier:(PSSpecifier *)specifier {
+    NSString *n = [specifier propertyForKey:@"cellClass"];
+    if (n.length) {
+        Class c = NSClassFromString(n);
+        if (c) return c;
+    }
+    return [super cellClassForSpecifier:specifier];
+}
+
 - (NSArray *)specifiers {
     if (!_specifiers) {
-        NSMutableArray *specs = [NSMutableArray array];
+        @try {
+            NSMutableArray *specs = [NSMutableArray array];
 
-        PSSpecifier *top = [PSSpecifier groupSpecifierWithName:nil];
-        NSString *footer = ([self.mode isEqualToString:@"white"]
-                            ? @"勾选的 App 启用边缘手势返回，其余一律不生效。"
-                            : @"勾选的 App 不启用边缘手势返回，其余全部生效。");
-        [top setProperty:footer forKey:@"footerText"];
-        [specs addObject:top];
+            PSSpecifier *top = [PSSpecifier groupSpecifierWithName:nil];
+            NSString *footer = ([self.mode isEqualToString:@"white"]
+                                ? @"勾选的 App 启用边缘手势返回，其余一律不生效。"
+                                : @"勾选的 App 不启用边缘手势返回，其余全部生效。");
+            [top setProperty:footer forKey:@"footerText"];
+            [specs addObject:top];
 
-        for (NSDictionary *app in [self _installedUserApps]) {
-            NSString *bid = app[@"bundleID"];
-            NSString *name = app[@"name"];
-            NSString *path = app[@"path"];
-            PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name
-                                                          target:self
-                                                             set:@selector(_setAppEnabled:specifier:)
-                                                             get:@selector(_isAppEnabled:)
-                                                         detail:nil
-                                                             cell:PSSwitchCell
-                                                             edit:nil];
-            [s setProperty:bid forKey:@"appBundleID"];
-            [s setProperty:path forKey:@"appPath"];
-            [s setProperty:NSStringFromClass([ObackAppCell class]) forKey:@"cellClass"];
-            [specs addObject:s];
+            for (NSDictionary *app in [self _installedUserApps]) {
+                NSString *bid = app[@"bundleID"];
+                NSString *name = app[@"name"];
+                NSString *path = app[@"path"];
+                PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name
+                                                              target:self
+                                                                 set:@selector(_setAppEnabled:specifier:)
+                                                                 get:@selector(_isAppEnabled:)
+                                                             detail:nil
+                                                                 cell:PSSwitchCell
+                                                                 edit:nil];
+                [s setProperty:bid forKey:@"appBundleID"];
+                [s setProperty:path forKey:@"appPath"];
+                [s setProperty:NSStringFromClass([ObackAppCell class]) forKey:@"cellClass"];
+                [specs addObject:s];
+            }
+            _specifiers = specs;
+        } @catch (NSException *e) {
+            (void)e;
+            // 兜底：任何异常都返回一个空数组，避免 table view 因 nil specifiers 崩溃
+            _specifiers = [NSMutableArray array];
         }
-        _specifiers = specs;
     }
     return _specifiers;
 }
