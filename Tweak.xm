@@ -11,8 +11,8 @@ static void *kTDKey = &kTDKey;
 
 // 包一层 delegate：保留 App 原有 delegate，同时注入我们的 pop 动画/交互
 @interface ObackNavDelegate : NSObject <UINavigationControllerDelegate>
-@property (nonatomic, weak) id<UINavigationControllerDelegate> original;
-@property (nonatomic, weak) UINavigationController *nav;
+@property (nonatomic, assign) id<UINavigationControllerDelegate> original;
+@property (nonatomic, assign) UINavigationController *nav;
 @end
 
 @implementation ObackNavDelegate
@@ -57,7 +57,7 @@ static void *kTDKey = &kTDKey;
 
 // 包一层 transitioningDelegate：保留原有，注入我们的 dismiss 动画/交互
 @interface ObackTransitioningDelegate : NSObject <UIViewControllerTransitioningDelegate>
-@property (nonatomic, weak) id<UIViewControllerTransitioningDelegate> original;
+@property (nonatomic, assign) id<UIViewControllerTransitioningDelegate> original;
 @end
 
 @implementation ObackTransitioningDelegate

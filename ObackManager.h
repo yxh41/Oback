@@ -9,5 +9,5 @@
 
 @property (nonatomic, assign) ObackEdge currentEdge;                  // 本次手势触发边缘
 @property (nonatomic, assign) BOOL interacting;                          // 是否正在交互返回
-@property (nonatomic, strong) ObackInteractiveTransition *interactive; // 当前交互控制器
+@property (nonatomic, retain) ObackInteractiveTransition *interactive; // 当前交互控制器
 @end

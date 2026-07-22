@@ -49,10 +49,10 @@ static void OBApplyParallax(CGFloat percent,
 @end
 
 @interface ObackInteractiveTransition ()
-@property (nonatomic, strong) id<UIViewControllerContextTransitioning> ctx;
-@property (nonatomic, strong) UIView *fromView;
-@property (nonatomic, strong) UIView *toView;
-@property (nonatomic, strong) UIView *dimView;
+@property (nonatomic, retain) id<UIViewControllerContextTransitioning> ctx;
+@property (nonatomic, retain) UIView *fromView;
+@property (nonatomic, retain) UIView *toView;
+@property (nonatomic, retain) UIView *dimView;
 @end
 
 @implementation ObackAnimator

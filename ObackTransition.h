@@ -26,14 +26,14 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 // 非交互返回（例如点击系统返回按钮）使用的动画
 @interface ObackAnimator : NSObject <UIViewControllerAnimatedTransitioning>
 @property (nonatomic, assign) ObackEdge edge;
-@property (nonatomic, strong) ObackParams *params;
+@property (nonatomic, retain) ObackParams *params;
 - (instancetype)initWithEdge:(ObackEdge)edge params:(ObackParams *)params;
 @end
 
 // 手势拖动时按百分比驱动同一套视差动画
 @interface ObackInteractiveTransition : NSObject <UIViewControllerInteractiveTransitioning>
 @property (nonatomic, assign) ObackEdge edge;
-@property (nonatomic, strong) ObackParams *params;
+@property (nonatomic, retain) ObackParams *params;
 - (instancetype)initWithEdge:(ObackEdge)edge params:(ObackParams *)params;
 - (void)updateWithPercent:(CGFloat)percent;  // 0~1
 - (void)finish;   // 提交返回
