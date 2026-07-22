@@ -26,7 +26,7 @@ static void *kAttachedKey = &kAttachedKey;
 - (void)start {
     if (_started) return;
     _started = YES;
-    [self attachToWindow:UIApplication.sharedApplication.keyWindow];
+    [self attachToWindow:[self currentKeyWindow]];
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(windowBecameKey:)
                                                  name:UIWindowDidBecomeKeyNotification
@@ -163,6 +163,24 @@ static void *kAttachedKey = &kAttachedKey;
 }
 
 #pragma mark - 辅助
+
+// iOS 13+ 多场景后 keyWindow 已废弃，需遍历 connectedScenes 取前台活跃窗口
+- (UIWindow *)currentKeyWindow {
+    UIWindow *window = nil;
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            UIWindowScene *ws = (UIWindowScene *)scene;
+            for (UIWindow *w in ws.windows) {
+                if (w.isKeyWindow) { window = w; break; }
+            }
+            if (window) break;
+            // 启动早期 scene 未激活时，退而取该场景任意 window
+            if (!window && ws.windows.firstObject) window = ws.windows.firstObject;
+        }
+    }
+    return window;
+}
 
 // 找到当前最上层的可见 VC（处理 present / nav / tab）
 - (UIViewController *)topMost:(UIViewController *)vc {
