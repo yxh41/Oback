@@ -55,7 +55,21 @@ jobs:
           echo "ROOTLESS_DEB=$ROOTLESS_DEB"
           [ -n "$ROOTLESS_DEB" ] || { echo "No rootless .deb produced"; exit 1; }
 
+      - name: Surface build errors as annotations
+        if: always()
+        run: |
+          if [ -f ci-build.log ]; then
+            grep -nE "error:|fatal error|make(\[[0-9]+\])?: \*\*\*|Stop\.|No such file|SDK not found|not found|undefined symbol|ld: " ci-build.log \
+              | sed 's/\r//' | head -60 \
+              | while IFS= read -r line; do
+                  # 去掉可能破坏 workflow 命令的冒号序列，再作为 annotation 输出
+                  safe=$(printf '%s' "$line" | sed 's/::/:/g')
+                  echo "::error::$safe"
+                done
+          fi
+
       - name: Convert to roothide (.deb) via RootHidePatcher/patch.sh
+        if: success()
         run: |
           set -o pipefail
           curl -fsSL https://raw.githubusercontent.com/roothide/RootHidePatcher/master/patch.sh -o /tmp/patch.sh
@@ -67,11 +81,17 @@ jobs:
           ls -la packages/oback_roothide.deb
           dpkg-deb -I packages/oback_roothide.deb | head -20
 
-      - name: Show logs on failure
-        if: failure()
+      - name: Surface patch errors as annotations
+        if: always()
         run: |
-          echo "===== ci-build.log ====="; cat ci-build.log 2>/dev/null
-          echo "===== ci-patch.log ====="; cat ci-patch.log 2>/dev/null
+          if [ -f ci-patch.log ]; then
+            grep -nE "error|fatal|No such file|not found|denied|Stop" ci-patch.log \
+              | sed 's/\r//' | head -40 \
+              | while IFS= read -r line; do
+                  safe=$(printf '%s' "$line" | sed 's/::/:/g')
+                  echo "::error::$safe"
+                done
+          fi
 
       - name: Upload roothide .deb
         if: success()
