@@ -95,6 +95,11 @@ static void *kTDKey = &kTDKey;
 %hook UINavigationController
 
 - (void)setDelegate:(id)delegate {
+    // 当前 App 不在生效范围（白/黑名单）时，直接透传原方法，不做任何包装
+    if (![ObackPreferences isAllowed]) {
+        %orig;
+        return;
+    }
     // 避免递归：已是我们自己的转发器时直接调用原方法（透传原参数）
     if ([delegate isKindOfClass:[ObackNavDelegate class]]) {
         %orig;
@@ -126,6 +131,11 @@ static void *kTDKey = &kTDKey;
 %hook UIViewController
 
 - (void)presentViewController:(UIViewController *)vc animated:(BOOL)animated completion:(void (^)(void))completion {
+    // 当前 App 不在生效范围时，直接透传原方法
+    if (![ObackPreferences isAllowed]) {
+        %orig;
+        return;
+    }
     // 给被 present 的 VC 注入我们的 dismiss 转场（跳过 alert）
     if (vc && ![vc isKindOfClass:[UIAlertController class]]) {
         ObackTransitioningDelegate *td = [[ObackTransitioningDelegate alloc] init];
@@ -141,6 +151,16 @@ static void *kTDKey = &kTDKey;
 %end
 
 %ctor {
+    NSString *bid = NSBundle.mainBundle.bundleIdentifier;
+    // 系统进程不注入手势逻辑，避免干扰/闪退（设置、桌面、backboardd 等）
+    NSSet *systemBundles = [NSSet setWithObjects:
+        @"com.apple.Preferences",
+        @"com.apple.SpringBoard",
+        @"com.apple.backboardd",
+        nil];
+    if ([systemBundles containsObject:bid]) {
+        return;
+    }
     %init(Oback);
     // 每个 App 启动完成后启动手势管理器
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification

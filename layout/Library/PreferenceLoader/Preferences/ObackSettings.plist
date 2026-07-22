@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>entry</key>
+    <dict>
+        <key>label</key>
+        <string>Oback</string>
+        <key>bundle</key>
+        <string>ObackSettings</string>
+        <key>footerText</key>
+        <string>OPPO 风格边缘手势返回（roothide / iOS 16.4.1）</string>
+    </dict>
+</dict>
+</plist>
