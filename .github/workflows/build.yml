@@ -7,6 +7,10 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+# 允许 workflow 把编译日志回推到仓库，供本地 SSH 拉取诊断
+permissions:
+  contents: write
+
 env:
   THEOS: ${{ github.workspace }}/theos
 
@@ -54,13 +58,28 @@ jobs:
 
       - name: Build roothide package
         run: |
+          set -o pipefail
           echo "=== Building roothide .deb ==="
           make clean
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide THEOS_ENV=silent 2>&1 || make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide 2>&1 | tee ci-build.log
           echo "Build done:"
-          ls -lh packages/
+          ls -lh packages/ || true
+
+      - name: Push build log back for diagnosis
+        if: always()
+        run: |
+          if [ -f ci-build.log ]; then
+            echo "===== ci-build.log (tail) ====="
+            tail -n 120 ci-build.log
+            git config user.email "ci@users.noreply.github.com"
+            git config user.name "ci-bot"
+            git add -f ci-build.log
+            git commit -m "ci: capture build log [skip ci]" || echo "nothing to commit"
+            git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:main || echo "push failed"
+          fi
 
       - name: Upload .deb
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: oback-deb
