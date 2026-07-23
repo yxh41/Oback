@@ -382,15 +382,21 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 
 // 找到当前最上层的可见 VC（处理 present / nav / tab）
 - (UIViewController *)topMost:(UIViewController *)vc {
+    return [self topMost:vc depth:0];
+}
+
+- (UIViewController *)topMost:(UIViewController *)vc depth:(NSUInteger)depth {
     if (!vc) return nil;
-    if (vc.presentedViewController) return [self topMost:vc.presentedViewController];
-    if ([vc isKindOfClass:[UINavigationController class]]) return [self topMost:[(UINavigationController *)vc topViewController]];
-    if ([vc isKindOfClass:[UITabBarController class]])    return [self topMost:[(UITabBarController *)vc selectedViewController]];
+    if (depth > 20) return vc;   // 深度护栏：防御被其他 tweak 改坏的异常 VC 层级（含循环引用）导致无限递归爆栈
+    if (vc.presentedViewController) return [self topMost:vc.presentedViewController depth:depth + 1];
+    if ([vc isKindOfClass:[UINavigationController class]]) return [self topMost:[(UINavigationController *)vc topViewController] depth:depth + 1];
+    if ([vc isKindOfClass:[UITabBarController class]])    return [self topMost:[(UITabBarController *)vc selectedViewController] depth:depth + 1];
     return vc;
 }
 
 // 命中测试找最近的 UIScrollView（用于冲突规避）
 - (UIScrollView *)scrollViewAtPoint:(CGPoint)point inView:(UIView *)view {
+    if (!view) return nil;
     UIView *hit = [view hitTest:point withEvent:nil];
     while (hit) {
         if ([hit isKindOfClass:[UIScrollView class]]) return (UIScrollView *)hit;

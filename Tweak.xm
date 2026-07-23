@@ -1,10 +1,35 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <mach-o/dyld.h>
 #import "ObackManager.h"
 #import "ObackTransition.h"
 #import "ObackPreferences.h"
 
 static void *kNavDelegateKey = &kNavDelegateKey;
+
+#pragma mark - 冲突插件退避
+// 已知与 Oback 在系统进程/App 内交互、会因此触发对方插件 nil 崩溃（安全模式）的共存 tweak。
+// 命中即本进程完全不激活 Oback（setDelegate 透传 + 不启动手势），避免双 tweak 打架把对方逼崩。
+// 检测在运行时（App 启动后所有 dylib 已加载）惰性解析一次并缓存，避免 %ctor 阶段顺序问题导致漏检。
+static BOOL _obackBackOffResolved = NO;
+static BOOL _obackBackOff = NO;
+
+static BOOL oback_shouldBackOff(void) {
+    if (_obackBackOffResolved) return _obackBackOff;
+    _obackBackOffResolved = YES;
+    NSArray<NSString *> *incompatible = @[ @"AppTool" ];
+    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+        const char *img = _dyld_get_image_name(i);
+        if (!img) continue;
+        NSString *name = [NSString stringWithUTF8String:img];
+        if (!name) continue;
+        for (NSString *n in incompatible) {
+            if ([[name lastPathComponent] hasPrefix:n]) { _obackBackOff = YES; return YES; }
+        }
+    }
+    _obackBackOff = NO;
+    return NO;
+}
 
 #pragma mark - UINavigationController delegate 转发器
 
@@ -97,6 +122,12 @@ static void *kNavDelegateKey = &kNavDelegateKey;
 %hook UINavigationController
 
 - (void)setDelegate:(id)delegate {
+    // 冲突插件退避：命中已知不兼容共存 tweak（如 AppTool）时完全透传，不做任何包装/禁用手势，
+    // 避免双 tweak 交互触发对方 nil 崩溃（安全模式）。这是 Oback 在自己可控范围内能做的最大规避。
+    if (oback_shouldBackOff()) {
+        %orig;
+        return;
+    }
     // 当前 App 不在生效范围（白/黑名单）时，直接透传原方法，不做任何包装
     if (![ObackPreferences isAllowed]) {
         %orig;
@@ -162,6 +193,10 @@ static void *kNavDelegateKey = &kNavDelegateKey;
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification *note){
+        if (oback_shouldBackOff()) {
+            NSLog(@"[Oback] 检测到不兼容共存插件，主动退避，不启动手势");
+            return;
+        }
         [[ObackManager shared] start];
     }];
 }
