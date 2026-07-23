@@ -157,6 +157,15 @@ static void *kTDKey = &kTDKey;
         @"com.apple.Preferences",
         @"com.apple.SpringBoard",
         @"com.apple.backboardd",
+        // 包管理器：其「确认安装/Depiction」等页面用自定义 present 转场，
+        // 我们的 presentViewController: 劫持会把它渲染成黑屏（e414382 引入，非崩溃、可上滑回桌面）。
+        // 直接不注入这些 App，彻底规避。
+        @"org.coolstar.Sileo",
+        @"com.sileo.sileo",
+        @"xyz.willy.Zebra",
+        @"com.saurik.cydia",
+        @"org.telesphoreos.installer",
+        @"com.aboutsy.saily",
         nil];
     if ([systemBundles containsObject:bid]) {
         return;
