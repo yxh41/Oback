@@ -16,9 +16,12 @@
 static NSString *const kDomain = @"com.zlhkf.oback";
 
 #pragma mark - 自定义 cell：图标 + 名称 + bundle id 副标题 + 开关
-// 关键：父类用 PSTableCell（基类，宽容），不用 PSSwitchTableCell（iOS16/roothide 下布局脆弱，
-// 子类化 + Subtitle 样式 + cellClassForSpecifier 强换类会在渲染期崩）。
-// 开关走 accessoryView，框架自动定位到右侧，不碰 PSTableCell 内部布局。
+// 关键结论（真机多轮验证）：在 roothide / iOS 16.4.1 下，只要 specifier 的 cell 类型是
+// PSSwitchCell 且用 cellClassForSpecifier: 强换成自定义类，框架会按「开关 cell」做 KVC 接线
+// （_switch / control / get / set），自定义类不认这些消息 → 消息转发 → 闪退。
+// 故：① specifier cell 类型改用中性、无控件接线的 PSTitleValueCell（框架不做开关接线）；
+//     ② 开关走 accessoryView，框架自动定位右侧，cell 自行管理；
+//     ③ 加 setValue:forUndefinedKey: 防御，吞掉框架任何未预期 KVC，双保险。
 
 @interface ObackAppSwitchCell : PSTableCell
 @property (nonatomic, strong) UISwitch *switchView;
@@ -31,6 +34,11 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     self = [super initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:reuseIdentifier specifier:specifier];
     return self;
 }
+
+// 防御：roothide/iOS16 的 PSListController 可能对非开关型 cell 发送自定义类不认识的 KVC
+// 消息（如 setTitleValue: / setValue: 等）。吞掉未定义 key，避免再次闪退。
+- (void)setValue:(id)value forUndefinedKey:(NSString *)key {}
+- (id)valueForUndefinedKey:(NSString *)key { return nil; }
 
 - (void)setSpecifier:(PSSpecifier *)specifier {
     [super setSpecifier:specifier];
@@ -280,17 +288,19 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     NSString *name = app[@"name"];
     NSString *appPath = app[@"path"];
 
-    // 注意：set/get 设为 nil。开关的「初始状态 + 状态存储」完全由自定义 cell
-    // （ObackAppSwitchCell）在 setSpecifier: / _onSwitchChanged: 内自行处理，
-    // 不依赖框架的 PSSwitchCell 开关接线，规避 iOS16/roothide 下的渲染崩溃。
+    // 注意：cell 类型用中性、无控件接线的 PSTitleValueCell（绝不用 PSSwitchCell）。
+    // PSSwitchCell 会让框架做开关接线，而我们换成自定义 cell 类后会因不认那些消息而闪退。
+    // 开关的「初始状态 + 状态存储」完全由自定义 cell（ObackAppSwitchCell）在
+    // setSpecifier: / _onSwitchChanged: 内自行处理，set/get 置 nil。
     PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name
                                                   target:self
                                                      set:nil
                                                      get:nil
                                                  detail:nil
-                                                     cell:PSSwitchCell
+                                                     cell:PSTitleValueCell
                                                      edit:nil];
     [s setProperty:bid forKey:@"appBundleID"];
+    [s setProperty:bid forKey:@"value"]; // PSTitleValueCell 的右侧/副值；与下方 detailTextLabel 设成同一值，避免被框架覆盖
     [s setProperty:[self _storeKey] forKey:@"storeKey"];
     [s setProperty:@"ObackAppSwitchCell" forKey:@"cellClass"];
 
