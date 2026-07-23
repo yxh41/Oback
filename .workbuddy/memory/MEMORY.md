@@ -52,9 +52,16 @@
 - **加固经验**：bc0e014 给 modal dismiss 的 completion 写 `__weak UIViewController *weakTop = top`，5acd91a 改成直接强引用 `top`（无环），编译通过。
 - **⚠️ 改代码自检**：任何新增/修改的 `.m`/`.xm`/`.h`，提交前 grep 一遍 `__weak` / `@property (weak`，有就删掉换成强引用或 `assign`。CI 默认 `-Werror`，任何 MRC 违例都会编译失败不出包、用户装旧版=「还崩/没效果但无新日志」。
 
-## 🌙 跨电脑续作交接（2026-07-23 晚，更新至 5acd91a）
-- 最新主线 commit = `5acd91a`（已 push `main`，版本 `0.1.0+5acd91a`）。本仓库 `.workbuddy/memory/` 已通过 `.gitignore` 放行进 git，另一台电脑 `git pull` 后可见完整项目记忆与交接状态（README.md 末尾也有同题人肉可读章）。
-- 待真机验证：`5acd91a`（= bc0e014 黑屏/无法操作加固 + MRC __weak 编译修复）。核心修复：① `_dimView` 遮罩关触摸拦截；② modal dismiss 转场加 `interacting` 闸门（与 nav 对齐）；③ dismiss 完成安全还原 delegate；④ 补转场完成/取消诊断日志。回家第一件事：装 `0.1.0+5acd91a` 验证返回后不黑屏、界面可操作；若仍复现，取 `/var/mobile/oback_debug.log` 发我（新日志含 `interactive transition finished/cancelled`）。
-- 诊断日志：`/var/mobile/oback_debug.log`（删旧 → 复现 → Filza 取回发我）。
+## ⚠️ modal dismiss 自定义视差转场 = 黑屏/无法操作元凶（commit 8243bb8 根治）
+- **现象/根因**：手势 dismiss modal 时，把底层 **presenting 页面 view 强行 `[container insertSubview:_toView atIndex:0]` 塞进 dismiss 转场容器**并做视差位移（`OBApplyParallax` 移动 toView）。iOS 的 modal(pagesheet) 里底层 presenting 由 UIKit 的 `UIPresentationController` 管理、不该被塞进 dismiss 容器；强行介入 → 底层 App 界面**层级错乱** → 黑屏（presenting 不在窗口）/ 无法操作（被容器残留覆盖或错位）。`oback_debug(3).log` 实锤：微信 16:12 段 `presenting=1` 连发 20+ 次 dismiss 且层级错乱。
+- **对照**：nav pop 路径的 toView 是标准堆栈 VC、UIKit 管理干净 → 视差安全（日志实锤 nav pop `finished=1` 正常）。黑屏/无法操作只在 modal 路径出现。
+- **根治（8243bb8）**：modal dismiss **不再注入自定义视差转场**，直接走系统原生 `dismissViewControllerAnimated:YES`（无跟手视差，100% 稳定）；nav 返回的 OPPO 视差完整保留。
+- **铁律**：tweak 手势返回里，**modal(`presentingViewController`) dismiss 绝不自己把 presenting 页面 view 塞进转场容器做位移/视差**。要么走系统原生 dismiss，要么（方案B，未实施）只移动**被 dismiss 的 fromView(sheet)**、**绝不碰 toView(presenting)**。
+- **方案B（备选，未实施）**：若日后想恢复 modal 跟手视差，只移动 fromView（被 dismiss 的 sheet 滑走露出底下），不动 toView（presenting 由 UIKit 管理），修好层级破坏；`ObackTransitioningDelegate`(Tweak.xm) 已留作 dead code 可复用。
+
+## 🌙 跨电脑续作交接（2026-07-23 晚，更新至 8243bb8）
+- 最新主线 commit = `8243bb8`（已 push `main`，版本 `0.1.0+8243bb8`）。本仓库 `.workbuddy/memory/` 已通过 `.gitignore` 放行进 git，另一台电脑 `git pull` 后可见完整项目记忆与交接状态（README.md 末尾也有同题人肉可读章）。
+- 待真机验证：`8243bb8` 已根治黑屏/无法操作 = modal dismiss 改走系统原生转场（不再注入自定义视差，见上方「⚠️ modal dismiss 自定义视差转场」铁律）；nav 返回的 OPPO 视差保留。回家第一件事：装 `0.1.0+8243bb8` 验证 ① 3X3/微信/Sileo 返回不再黑屏、界面可操作；② modal 弹出页边缘滑返回 = 系统动画（无跟手视差，预期内）；③ nav push 页面返回仍带视差+胶囊。
+- 诊断日志：`/var/mobile/oback_debug.log`（删旧 → 复现 → Filza 取回发我）。多版本混测时靠「是否出现某次提交才加的日志行」区分新旧版现场。
 - 构建：push `main` 自动 GitHub Actions 出 roothide `.deb`；或 macOS + roothide theos 本地 `make package`。
-- 改代码前必读上方「⚠️」各硬规则节（presentViewController 劫持禁用 / 自定义 cell 类禁用 / PSApplicationCell 未声明 / setAction: 未声明 / willDisplayCell [super] 必崩 / triggerWidth≥35 / control 用 sed 注入 / **MRC 禁止 `__weak`**）。
+- 改代码前必读上方「⚠️」各硬规则节（presentViewController 劫持禁用 / 自定义 cell 类禁用 / PSApplicationCell 未声明 / setAction: 未声明 / willDisplayCell [super] 必崩 / triggerWidth≥35 / control 用 sed 注入 / MRC 禁止 `__weak` / **modal dismiss 禁止注入自定义视差转场**）。
