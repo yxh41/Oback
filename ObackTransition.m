@@ -108,7 +108,7 @@ static void OBApplyParallax(CGFloat percent,
     [container bringSubviewToFront:fromView];
 
     [self applyShadowTo:fromView];
-    OBApplyParallax(0, fromView, toView, dim, self.edge, self.params);
+    OBApplyParallax(0, fromView, toView, dim, self.edge, self.params, self.parallaxToView);
 
     [UIView animateWithDuration:[self transitionDuration:ctx]
                           delay:0
