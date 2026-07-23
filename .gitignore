@@ -12,7 +12,8 @@ packages/
 .idea/
 .vscode/
 
-# WorkBuddy 内部记忆（默认不进仓库，但项目记忆 memory/ 需跨电脑同步，单独放行）
-.workbuddy/
-!.workbuddy/memory/
+# WorkBuddy 内部（默认不进仓库，但项目记忆 memory/ 需跨电脑同步，单独放行）
+# 注意：必须用 .workbuddy/*（只忽略一级条目），不能用 .workbuddy/（整目录树被忽略后子目录否定规则不生效）
+.workbuddy/*
+!.workbuddy/memory
 !.workbuddy/memory/**
