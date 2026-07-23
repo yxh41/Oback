@@ -47,8 +47,12 @@ static void OBApplyParallax(CGFloat percent,
     p.shadowEnabled    = YES;
     p.shadowOpacity    = 0.25;
     p.duration         = 0.32;
-    p.commitRatio      = 0.40;
-    p.commitVelocity   = 500.0;
+    // 提交阈值：偏灵敏（贴近 OPPO/系统边缘返回手感）。
+    // 旧值 commitRatio=0.40 太严 —— 真机日志(oback_debug(4).log)显示用户自然内滑大多只到
+    // 0.34~0.38 就被判取消(6/7 次取消)，导致"主功能体验不好"。降到 0.30 让部分拖动即可提交；
+    // commitVelocity 同步下调到 400，让一般甩动(flick)也能可靠提交。
+    p.commitRatio      = 0.30;
+    p.commitVelocity   = 400.0;
     return p;
 }
 @end
