@@ -2,18 +2,14 @@
 //  ObackAppListController.m
 //  Oback 设置页 —— App 选择器（黑白名单）
 //
-//  枚举设备上已安装、且在桌面上有图标的 App，按「用户应用 / 系统程序」分组展示。
-//  注意：iOS 11+ 起 LSApplicationWorkspace.allInstalledApplications 对非授权进程
-//  返回空数组（需特定 entitlement），roothide 注入的设置 App 拿不到。
-//  故这里改为扫描文件系统，零私有框架依赖，iOS 16 仍有效。
+//  枚举设备已装、桌面有图标的 App，按「用户应用 / 系统程序」分组，每行用系统原生
+//  PSApplicationCell 显示图标 + 名称 + 副标题（按 applicationIdentifier 自动加载，
+//  零自定义 cell 类，roothide/iOS16.4.1 下稳定）。
+//  交互改为「点按某行 = 加入/移出名单」（无每行开关，因自定义 cell 类必崩）；
+//  选中行借 willDisplayCell 显示勾选（√），顶部显示「已选 N 个」。
 //
-//  ⚠️ 稳定性铁律（本环境实测 4 次闪退后定论）：
-//  roothide / iOS 16.4.1 / PreferenceLoader 下，用 cellClassForSpecifier: 把 specifier
-//  换成【自定义 cell 类】必崩——框架按 specifier 的 cell 类型向 cell 发送该类型专有方法，
-//  自定义类不认 → 未识别 selector → 消息转发 → SIGABRT 闪退。setValue:forUndefinedKey:
-//  只能挡 KVC，挡不住直接消息，故无效。
-//  因此本文件一律使用系统原生 cell 类型（PSSwitchCell），【绝不】自定义 cell 类、绝不重写
-//  cellClassForSpecifier:。图标/灰色副标题在此环境无法稳定实现，bundle id 直接并入标题。
+//  ⚠️ 稳定性铁律：本文件一律用系统原生 cell 类型（PSApplicationCell / PSGroupCell），
+//  【绝不】自定义 cell 类、绝不 cellClassForSpecifier: 换类。
 
 #import "ObackAppListController.h"
 #import <Preferences/PSSpecifier.h>
@@ -103,10 +99,15 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     return _allApps;
 }
 
-#pragma mark 搜索与列表生成
+#pragma mark 存储与列表生成
 
 - (NSString *)_storeKey {
     return ([self.mode isEqualToString:@"white"] ? @"whitelistApps" : @"blacklistApps");
+}
+
+- (NSArray *)_selectedApps {
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    return [d arrayForKey:[self _storeKey]] ?: @[];
 }
 
 - (void)viewDidLoad {
@@ -154,27 +155,47 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     [specs addObject:group];
 }
 
-// 系统原生 PSSwitchCell（稳定，不带自定义 cell 类）。标题行直接并入 bundle id。
+// 系统原生 PSApplicationCell：按 applicationIdentifier 自动加载图标 + 名称 + 副标题。
+// 点按 = 切换该 App 的名单归属（action 选择器）。
 - (void)_addAppSpecifier:(NSDictionary *)app toSpecifiers:(NSMutableArray *)specs {
     NSString *bid = app[@"bundleID"];
     NSString *name = app[@"name"];
-    NSString *title = [NSString stringWithFormat:@"%@ (%@)", name, bid];
 
-    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:title
+    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name
                                                   target:self
-                                                     set:@selector(_setAppEnabled:specifier:)
-                                                     get:@selector(_isAppEnabled:)
+                                                     set:nil
+                                                     get:nil
                                                  detail:nil
-                                                     cell:PSSwitchCell
+                                                     cell:PSApplicationCell
                                                      edit:nil];
+    [s setProperty:bid forKey:@"applicationIdentifier"];
     [s setProperty:bid forKey:@"appBundleID"];
+    [s setAction:@selector(_toggleApp:)];
     [specs addObject:s];
+}
+
+// 点按切换：加入 / 移出当前名单（whitelistApps / blacklistApps）
+- (void)_toggleApp:(PSSpecifier *)spec {
+    NSString *bid = [spec propertyForKey:@"appBundleID"];
+    if (!bid) return;
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    NSMutableArray *arr = [[d arrayForKey:[self _storeKey]] mutableCopy] ?: [NSMutableArray array];
+    if ([arr containsObject:bid]) [arr removeObject:bid];
+    else [arr addObject:bid];
+    [d setObject:arr forKey:[self _storeKey]];
+    [d synchronize];
+    [self reloadSpecifiers];
 }
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
         @try {
             NSMutableArray *specs = [NSMutableArray array];
+
+            // 顶部：已选数量
+            NSUInteger cnt = [[self _selectedApps] count];
+            [self _addGroupHeader:[NSString stringWithFormat:@"已选 %lu 个应用", (unsigned long)cnt]
+                           footer:@"" toSpecifiers:specs];
 
             NSDictionary *apps = [self _installedApps];
             NSArray *userApps = [self _filteredApps:apps[@"user"]];
@@ -208,28 +229,16 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     return _specifiers;
 }
 
-#pragma mark 开关存取（原生 PSSwitchCell 接线）
+#pragma mark 选中态勾选（不自定义 cell 类，借 willDisplayCell 设 accessoryType）
 
-- (void)_setAppEnabled:(NSNumber *)value specifier:(PSSpecifier *)spec {
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    [super tableView:tableView willDisplayCell:cell forRowAtIndexPath:indexPath];
+    PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
     NSString *bid = [spec propertyForKey:@"appBundleID"];
-    if (!bid) return;
-    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
-    NSMutableArray *arr = [[d arrayForKey:[self _storeKey]] mutableCopy] ?: [NSMutableArray array];
-    if ([value boolValue]) {
-        if (![arr containsObject:bid]) [arr addObject:bid];
-    } else {
-        [arr removeObject:bid];
+    if (bid.length) {
+        BOOL selected = [[self _selectedApps] containsObject:bid];
+        cell.accessoryType = selected ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
     }
-    [d setObject:arr forKey:[self _storeKey]];
-    [d synchronize];
-}
-
-- (id)_isAppEnabled:(PSSpecifier *)spec {
-    NSString *bid = [spec propertyForKey:@"appBundleID"];
-    if (!bid) return @NO;
-    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
-    NSArray *arr = [d arrayForKey:[self _storeKey]];
-    return @([arr containsObject:bid]);
 }
 
 @end
