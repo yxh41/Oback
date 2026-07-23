@@ -3,13 +3,15 @@
 //  Oback 设置页 —— App 选择器（黑白名单）
 //
 //  枚举设备已装、桌面有图标的 App，按「用户应用 / 系统程序」分组，每行用系统原生
-//  PSApplicationCell 显示图标 + 名称 + 副标题（按 applicationIdentifier 自动加载，
-//  零自定义 cell 类，roothide/iOS16.4.1 下稳定）。
+//  PSTitleValueCell 显示图标 + 名称，图标从 .app 包直接读取
+//  （UIImage imageWithContentsOfFile:，无私有 API、零自定义 cell 类，roothide/iOS16.4.1 下稳定）。
+//  注：PSApplicationCell 在本项目的 theos 头文件集合（theos/headers）未声明，
+//  直接用会因 -Werror 编译失败、不出 .deb，故改用 PSTitleValueCell + 手动图标加载。
 //  交互改为「点按某行 = 加入/移出名单」（无每行开关，因自定义 cell 类必崩）；
 //  选中行借 willDisplayCell 显示勾选（√），顶部显示「已选 N 个」。
 //
-//  ⚠️ 稳定性铁律：本文件一律用系统原生 cell 类型（PSApplicationCell / PSGroupCell），
-//  【绝不】自定义 cell 类、绝不 cellClassForSpecifier: 换类。
+//  ⚠️ 稳定性铁律：本文件一律用系统原生 cell 类型（PSTitleValueCell / PSGroupCell / PSSwitchCell），
+//  【绝不】自定义 cell 类、绝不 cellClassForSpecifier: 换类。新增 cell 类型前先确认 theos/headers 已声明。
 
 #import "ObackAppListController.h"
 #import <Preferences/PSSpecifier.h>
@@ -155,7 +157,8 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     [specs addObject:group];
 }
 
-// 系统原生 PSApplicationCell：按 applicationIdentifier 自动加载图标 + 名称 + 副标题。
+// 系统原生 PSTitleValueCell（theos/headers 已声明，编译稳定）：
+// 图标从 .app 包直接读（imageWithContentsOfFile:），名称作标题。
 // 点按 = 切换该 App 的名单归属（action 选择器）。
 - (void)_addAppSpecifier:(NSDictionary *)app toSpecifiers:(NSMutableArray *)specs {
     NSString *bid = app[@"bundleID"];
@@ -166,12 +169,59 @@ static NSString *const kDomain = @"com.zlhkf.oback";
                                                      set:nil
                                                      get:nil
                                                  detail:nil
-                                                     cell:PSApplicationCell
+                                                     cell:PSTitleValueCell
                                                      edit:nil];
-    [s setProperty:bid forKey:@"applicationIdentifier"];
+    // 手动加载 App 图标（不依赖 PSApplicationCell / 无私有 API）
+    UIImage *icon = [self _iconImageForApp:app];
+    if (icon) [s setProperty:icon forKey:PSIconImageKey];
     [s setProperty:bid forKey:@"appBundleID"];
     [s setAction:@selector(_toggleApp:)];
     [specs addObject:s];
+}
+
+// 从 .app 包直接读取图标文件（无私有 API，iOS16 受限环境下也稳）。
+- (UIImage *)_iconImageForApp:(NSDictionary *)app {
+    NSString *appPath = app[@"path"];
+    if (![appPath isKindOfClass:[NSString class]] || !appPath.length) return nil;
+    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:[appPath stringByAppendingPathComponent:@"Info.plist"]];
+    if (![info isKindOfClass:[NSDictionary class]]) return nil;
+
+    NSMutableArray<NSString *> *candidates = [NSMutableArray array];
+    void (^addName)(id) = ^(id n) {
+        if ([n isKindOfClass:[NSString class]] && [n length]) {
+            [candidates addObject:n];
+            [candidates addObject:[NSString stringWithFormat:@"%@@2x", n]];
+            [candidates addObject:[NSString stringWithFormat:@"%@@3x", n]];
+        }
+    };
+
+    // 现代：CFBundleIconName
+    addName(info[@"CFBundleIconName"]);
+    // CFBundleIcons -> PrimaryIcon（CFBundleIconName / CFBundleIconFiles）
+    id icons = info[@"CFBundleIcons"];
+    if ([icons isKindOfClass:[NSDictionary class]]) {
+        id primary = icons[@"CFBundlePrimaryIcon"];
+        if ([primary isKindOfClass:[NSDictionary class]]) {
+            addName(primary[@"CFBundleIconName"]);
+            id files = primary[@"CFBundleIconFiles"];
+            if ([files isKindOfClass:[NSArray class]]) {
+                for (id f in files) addName(f);
+            }
+        }
+    }
+    // 旧式：CFBundleIconFiles
+    id legacy = info[@"CFBundleIconFiles"];
+    if ([legacy isKindOfClass:[NSArray class]]) {
+        for (id f in legacy) addName(f);
+    }
+
+    for (NSString *cand in candidates) {
+        for (NSString *name in @[cand, [cand stringByAppendingString:@".png"]]) {
+            UIImage *img = [UIImage imageWithContentsOfFile:[appPath stringByAppendingPathComponent:name]];
+            if (img) return img;
+        }
+    }
+    return nil;
 }
 
 // 点按切换：加入 / 移出当前名单（whitelistApps / blacklistApps）
