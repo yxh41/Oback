@@ -57,6 +57,12 @@ jobs:
           echo "Makefile TARGET now:"
           grep '^TARGET' Makefile
 
+      - name: Patch package version with git hash
+        run: |
+          OBACK_HASH=$(git rev-parse --short=7 HEAD 2>/dev/null || echo dev)
+          sed -i '' "s|^Version:.*|Version: 0.1.0+$OBACK_HASH|" control
+          echo "Patched control Version -> $(grep '^Version:' control)"
+
       - name: Build roothide .deb
         run: |
           set -o pipefail

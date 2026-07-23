@@ -1,6 +1,6 @@
 Package: com.zlhkf.oback
 Name: Oback
-Version: $(OBACK_VERSION)
+Version: 0.1.0
 Architecture: iphoneos-arm64
 Description: OPPO 风格边缘手势返回，带视差/阴影/缩放动画（roothide）
 Maintainer: zlhkf <zlhkf@example.com>

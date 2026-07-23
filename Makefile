@@ -5,10 +5,6 @@
 # iphoneos-arm64e 的 roothide .deb（路径即 /var/jb 布局），无需 RootHidePatcher/patch.sh。
 # 注意：必须用 roothide/theos，标准 theos/theos 没有 roothide scheme。
 
-# 包版本号自动带 commit 短哈希，方便一眼区分装的是不是最新构建
-# （无 git 环境时回退为 dev，避免构建失败）
-OBACK_VERSION := 0.1.0+$(shell git rev-parse --short=7 HEAD 2>/dev/null || echo dev)
-
 TARGET := iphone:clang:16.5:15.0
 ARCHS := arm64 arm64e
 THEOS_PACKAGE_SCHEME := roothide
