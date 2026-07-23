@@ -6,6 +6,11 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
     ObackEdgeRight = 1,  // 右边缘内滑 -> 当前页左移，上一页从右侧探出
 };
 
+// 模态 dismiss 转场转发器：仅在手势触发时注入，保留 App 原有转场，避免干扰其自带 modal 动画
+@interface ObackTransitioningDelegate : NSObject <UIViewControllerTransitioningDelegate>
+@property (nonatomic, assign) id<UIViewControllerTransitioningDelegate> original;
+@end
+
 // 动画/手势参数（可被设置面板实时覆盖）
 @interface ObackParams : NSObject
 @property (nonatomic, assign) CGFloat triggerWidth;     // 边缘触发宽度 (pt)

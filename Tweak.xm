@@ -5,7 +5,6 @@
 #import "ObackPreferences.h"
 
 static void *kNavDelegateKey = &kNavDelegateKey;
-static void *kTDKey = &kTDKey;
 
 #pragma mark - UINavigationController delegate 转发器
 
@@ -21,9 +20,10 @@ static void *kTDKey = &kTDKey;
                                   animationControllerForOperation:(UINavigationControllerOperation)operation
                                                fromViewController:(UIViewController *)from
                                                  toViewController:(UIViewController *)to {
-    if (operation == UINavigationControllerOperationPop) {
+    // 仅在我们手势驱动返回时接管 pop 动画；普通返回按钮走 App 原生转场（避免破坏/黑屏）
+    if (operation == UINavigationControllerOperationPop && [ObackManager shared].interacting) {
         return [[ObackAnimator alloc] initWithEdge:[ObackManager shared].currentEdge
-                                               params:[ObackPreferences params]];
+                                           params:[ObackPreferences params]];
     }
     if (_original && [_original respondsToSelector:_cmd])
         return [_original navigationController:nav animationControllerForOperation:operation
@@ -55,11 +55,7 @@ static void *kTDKey = &kTDKey;
 
 #pragma mark - UIViewController transitioning delegate 转发器
 
-// 包一层 transitioningDelegate：保留原有，注入我们的 dismiss 动画/交互
-@interface ObackTransitioningDelegate : NSObject <UIViewControllerTransitioningDelegate>
-@property (nonatomic, assign) id<UIViewControllerTransitioningDelegate> original;
-@end
-
+// ObackTransitioningDelegate 的 @interface 已移至 ObackTransition.h（Tweak.xm 与 ObackManager.m 共用）
 @implementation ObackTransitioningDelegate
 
 - (id<UIViewControllerAnimatedTransitioning>)animationControllerForDismissedController:(UIViewController *)dismissed {
@@ -128,38 +124,20 @@ static void *kTDKey = &kTDKey;
 
 %end
 
-%hook UIViewController
-
-- (void)presentViewController:(UIViewController *)vc animated:(BOOL)animated completion:(void (^)(void))completion {
-    // 当前 App 不在生效范围时，直接透传原方法
-    if (![ObackPreferences isAllowed]) {
-        %orig;
-        return;
-    }
-    // 给被 present 的 VC 注入我们的 dismiss 转场（跳过 alert）
-    if (vc && ![vc isKindOfClass:[UIAlertController class]]) {
-        ObackTransitioningDelegate *td = [[ObackTransitioningDelegate alloc] init];
-        td.original = vc.transitioningDelegate;
-        vc.transitioningDelegate = td;
-        objc_setAssociatedObject(vc, kTDKey, td, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    %orig;
-}
-
-%end
-
 %end
 
 %ctor {
     NSString *bid = NSBundle.mainBundle.bundleIdentifier;
-    // 系统进程不注入手势逻辑，避免干扰/闪退（设置、桌面、backboardd 等）
-    NSSet *systemBundles = [NSSet setWithObjects:
-        @"com.apple.Preferences",
-        @"com.apple.SpringBoard",
-        @"com.apple.backboardd",
-        // 包管理器：其「确认安装/Depiction」等页面用自定义 present 转场，
-        // 我们的 presentViewController: 劫持会把它渲染成黑屏（e414382 引入，非崩溃、可上滑回桌面）。
-        // 直接不注入这些 App，彻底规避。
+    // 不注入任何 Apple 系统进程（SpringBoard/设置/海报/Spotlight/各种 extension 等）。
+    // 系统进程 bundle id 大小写不固定（如 SpringBoard 实为 com.apple.springboard），
+    // 用前缀匹配最稳，避免误注入导致系统 UI 异常/黑屏。
+    if ([bid hasPrefix:@"com.apple."]) {
+        NSLog(@"[Oback] %@ 是系统进程，不注入", bid);
+        return;
+    }
+    // 包管理器：其「确认安装/Depiction」等页面用自定义 present 转场，
+    // 我们的转场会把它渲染成黑屏（非崩溃、可上滑回桌面）。直接不注入。
+    NSSet *pkgManagers = [NSSet setWithObjects:
         @"org.coolstar.Sileo",
         @"com.sileo.sileo",
         @"xyz.willy.Zebra",
@@ -167,8 +145,8 @@ static void *kTDKey = &kTDKey;
         @"org.telesphoreos.installer",
         @"com.aboutsy.saily",
         nil];
-    if ([systemBundles containsObject:bid]) {
-        NSLog(@"[Oback] %@ 在排除名单，不注入", bid);
+    if ([pkgManagers containsObject:bid]) {
+        NSLog(@"[Oback] %@ 是包管理器，不注入", bid);
         return;
     }
     NSLog(@"[Oback] 已注入 %@, 启动手势管理器", bid);

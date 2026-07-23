@@ -32,7 +32,7 @@ static void OBApplyParallax(CGFloat percent,
 @implementation ObackParams
 + (instancetype)defaults {
     ObackParams *p = [[ObackParams alloc] init];
-    p.triggerWidth     = 24.0;
+    p.triggerWidth     = 40.0;   // 边缘触发宽度：24 太窄（用户常从 25~32pt 起滑，判为"不在边缘"），放宽到 40
     p.leftEnabled      = YES;
     p.rightEnabled     = YES;
     p.hapticEnabled    = YES;
