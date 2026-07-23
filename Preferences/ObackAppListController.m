@@ -286,7 +286,8 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 #pragma mark 选中态勾选（不自定义 cell 类，借 willDisplayCell 设 accessoryType）
 
 - (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
-    [super tableView:tableView willDisplayCell:cell forRowAtIndexPath:indexPath];
+    // ⚠️ 不要调用 [super tableView:willDisplayCell:...]：本环境的 PSListController 未实现该方法，
+    // super 调用会触发 unrecognized selector 闪退（崩溃日志实测）。只做我们自己的勾选逻辑。
     PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
     NSString *bid = [spec propertyForKey:@"appBundleID"];
     if (bid.length) {
@@ -298,12 +299,14 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 #pragma mark 点按行切换名单（不依赖 setAction:，roothide/headers 的 PSSpecifier 未声明该方法）
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    [super tableView:tableView didSelectRowAtIndexPath:indexPath];
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
     NSString *bid = [spec propertyForKey:@"appBundleID"];
     if (bid.length) {
         [self _toggleApp:spec];
+    } else if ([super respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
+        // PSListController 未实现该方法时跳过，避免踩与 willDisplayCell 相同的 unrecognized selector 坑。
+        [super tableView:tableView didSelectRowAtIndexPath:indexPath];
     }
 }
 
