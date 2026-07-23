@@ -45,9 +45,16 @@
 - **正确做法**：`control` 保持静态 `Version: 0.1.0`；在 CI（build.yml）构建前用 `sed -i '' "s|^Version:.*|Version: 0.1.0+$HASH|" control` 直接注入 git 短哈希（`HASH=$(git rev-parse --short=7 HEAD)`）。已落地 `2e74dec`，构建成功且 notice 注解确认版本 = `0.1.0+<短哈希>`。本地构建保持 `0.1.0`。
 - 验证技巧：在 build.yml 构建步骤末尾 `echo "::notice::Oback package version = $(dpkg-deb -f "$ROOTHIDE_DEB" Version)"`，可通过匿名可读的 check-run notice 注解确认实际打出的版本号（普通 stdout 匿名访问 403 读不到）。
 
-## 🌙 跨电脑续作交接（2026-07-23 晚）
-- 最新主线 commit = `1dc096d`（已 push `main`，版本 `0.1.0+1dc096d`）。本仓库 `.workbuddy/memory/` 已通过 `.gitignore` 放行进 git，另一台电脑 `git pull` 后可见完整项目记忆与交接状态（README.md 末尾也有同题人肉可读章）。
-- 用户尚未真机验证 `1dc096d`（修了黑屏 + `triggerWidth` 40）；回家第一件事：装 `0.1.0+1dc096d` 验证边缘返回+胶囊+不黑屏。
+## ⚠️ MRC 铁律：tweak 是手动引用计数，绝对禁止 `__weak`（commit 5acd91a 实测）
+- **现象/根因**：CI 编译 `ObackManager.m` 报 `error: cannot create __weak reference in file using manual reference counting`（行 253）。tweak 入口 `.xm`/`.m` **未开 `-fobjc-arc`**，整个工程是 **MRC（手动引用计数）**。`__weak` 在 MRC 文件里**直接编译失败**（并非 warning，`-Werror` 下必挂、不出 .deb）。`@property (weak)` 在 MRC 下合成同样报错。
+- **为什么之前没踩**：之前写 block（如 dismiss completion）习惯用 `__weak` 防循环引用，是 ARC 思维惯性；MRC 下这套写法立刻编译失败。
+- **正确写法**：MRC 下若要 block 引用对象且担心循环引用，改**强引用 + 确认无反向持有**（block 由系统 API（如 `dismissViewControllerAnimated:completion:`）短暂持有，被引用对象不反向持有该 block 即无环，也不会泄漏）；或 MRC 下用 `__block`（不 retain）。**绝不要写 `__weak`**。`.h` 的 property 统一用 `assign`/`retain`（本工程已统一 `assign`，如 `ObackTransitioningDelegate.original`）。
+- **加固经验**：bc0e014 给 modal dismiss 的 completion 写 `__weak UIViewController *weakTop = top`，5acd91a 改成直接强引用 `top`（无环），编译通过。
+- **⚠️ 改代码自检**：任何新增/修改的 `.m`/`.xm`/`.h`，提交前 grep 一遍 `__weak` / `@property (weak`，有就删掉换成强引用或 `assign`。CI 默认 `-Werror`，任何 MRC 违例都会编译失败不出包、用户装旧版=「还崩/没效果但无新日志」。
+
+## 🌙 跨电脑续作交接（2026-07-23 晚，更新至 5acd91a）
+- 最新主线 commit = `5acd91a`（已 push `main`，版本 `0.1.0+5acd91a`）。本仓库 `.workbuddy/memory/` 已通过 `.gitignore` 放行进 git，另一台电脑 `git pull` 后可见完整项目记忆与交接状态（README.md 末尾也有同题人肉可读章）。
+- 待真机验证：`5acd91a`（= bc0e014 黑屏/无法操作加固 + MRC __weak 编译修复）。核心修复：① `_dimView` 遮罩关触摸拦截；② modal dismiss 转场加 `interacting` 闸门（与 nav 对齐）；③ dismiss 完成安全还原 delegate；④ 补转场完成/取消诊断日志。回家第一件事：装 `0.1.0+5acd91a` 验证返回后不黑屏、界面可操作；若仍复现，取 `/var/mobile/oback_debug.log` 发我（新日志含 `interactive transition finished/cancelled`）。
 - 诊断日志：`/var/mobile/oback_debug.log`（删旧 → 复现 → Filza 取回发我）。
 - 构建：push `main` 自动 GitHub Actions 出 roothide `.deb`；或 macOS + roothide theos 本地 `make package`。
-- 改代码前必读上方「⚠️」各硬规则节（presentViewController 劫持禁用 / 自定义 cell 类禁用 / PSApplicationCell 未声明 / setAction: 未声明 / willDisplayCell [super] 必崩 / triggerWidth≥35 / control 用 sed 注入）。
+- 改代码前必读上方「⚠️」各硬规则节（presentViewController 劫持禁用 / 自定义 cell 类禁用 / PSApplicationCell 未声明 / setAction: 未声明 / willDisplayCell [super] 必崩 / triggerWidth≥35 / control 用 sed 注入 / **MRC 禁止 `__weak`**）。
