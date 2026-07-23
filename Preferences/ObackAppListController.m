@@ -23,6 +23,7 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     NSDictionary *_allApps; // @{ @"user": [...], @"system": [...] }
     NSString *_searchText;
     NSSet *_homeScreenSet;   // 主屏可见的 bundle id 集合；nil = 读不到布局，回退显示全部
+    NSMutableDictionary *_iconCache; // bid -> UIImage，避免每次 reload 重新读盘导致点按变慢
 }
 
 #pragma mark App 枚举
@@ -193,6 +194,18 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     }]];
 }
 
+// 把「已在名单里」的 App 排到各组最前面（满足「选中的 App 置顶」）
+- (NSArray *)_sortSelectedFirst:(NSArray *)apps {
+    NSSet *sel = [NSSet setWithArray:[self _selectedApps]];
+    if (sel.count == 0) return apps;
+    return [apps sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        BOOL as = [sel containsObject:a[@"bundleID"]];
+        BOOL bs = [sel containsObject:b[@"bundleID"]];
+        if (as != bs) return as ? NSOrderedAscending : NSOrderedDescending;
+        return [a[@"name"] compare:b[@"name"] options:NSCaseInsensitiveSearch];
+    }];
+}
+
 - (void)_addGroupHeader:(NSString *)title footer:(NSString *)footer toSpecifiers:(NSMutableArray *)specs {
     // ⚠️ 组标题必须用 specifier 的 name（第一个参数），不能用 setProperty:forKey:@"label"
     // —— PSGroupCell 读的是 name，设 label 会导致标题整片空白（之前「用户/系统」分类与顶部计数都不显示就是这原因）。
@@ -234,7 +247,22 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 }
 
 // 从 .app 包直接读取图标文件（无私有 API，iOS16 受限环境下也稳）。
+// 结果按 bundle id 缓存，避免每次 reload 都重新读盘导致点按选择变慢。
 - (UIImage *)_iconImageForApp:(NSDictionary *)app {
+    NSString *bid = app[@"bundleID"];
+    if ([bid isKindOfClass:[NSString class]] && bid.length) {
+        UIImage *cached = _iconCache[bid];
+        if (cached) return cached;
+    }
+    UIImage *img = [self _loadIconImageForApp:app];
+    if (img && [bid isKindOfClass:[NSString class]] && bid.length) {
+        if (!_iconCache) _iconCache = [NSMutableDictionary dictionary];
+        _iconCache[bid] = img;
+    }
+    return img;
+}
+
+- (UIImage *)_loadIconImageForApp:(NSDictionary *)app {
     NSString *appPath = app[@"path"];
     if (![appPath isKindOfClass:[NSString class]] || !appPath.length) return nil;
     NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:[appPath stringByAppendingPathComponent:@"Info.plist"]];
@@ -282,7 +310,7 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 - (UIImage *)_scaledIcon:(UIImage *)img {
     if (!img) return nil;
     CGFloat scale = [[UIScreen mainScreen] scale] ?: 1.0;
-    CGFloat pt = 40.0;
+    CGFloat pt = 29.0; // 与系统「设置」App 列表图标同尺寸
     CGSize target = CGSizeMake(pt * scale, pt * scale);
     if (img.size.width <= target.width && img.size.height <= target.height) return img;
     UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:target];
@@ -301,6 +329,7 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     else [arr addObject:bid];
     [d setObject:arr forKey:[self _storeKey]];
     [d synchronize];
+    _specifiers = nil;   // 清空以触发重建，使「选中项置顶」排序生效
     [self reloadSpecifiers];
 }
 
@@ -315,8 +344,8 @@ static NSString *const kDomain = @"com.zlhkf.oback";
                            footer:@"" toSpecifiers:specs];
 
             NSDictionary *apps = [self _installedApps];
-            NSArray *userApps = [self _filteredApps:apps[@"user"]];
-            NSArray *systemApps = [self _filteredApps:apps[@"system"]];
+            NSArray *userApps = [self _sortSelectedFirst:[self _filteredApps:apps[@"user"]]];
+            NSArray *systemApps = [self _sortSelectedFirst:[self _filteredApps:apps[@"system"]]];
 
             if (userApps.count) {
                 [self _addGroupHeader:@"用户应用" footer:@"" toSpecifiers:specs];

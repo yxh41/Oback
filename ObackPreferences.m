@@ -47,7 +47,7 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     if (!bid) return NO;
 
     id wm = [d objectForKey:@"whitelistMode"];
-    BOOL whitelistMode = wm ? [wm boolValue] : YES;   // 未设置 → 默认白名单模式
+    BOOL whitelistMode = wm ? [wm boolValue] : NO;   // 未设置 → 默认全局生效（黑名单模式），符合"全局注入"设计
 
     if (whitelistMode) {
         NSArray *white = [d arrayForKey:@"whitelistApps"];

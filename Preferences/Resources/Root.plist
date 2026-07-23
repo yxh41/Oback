@@ -186,7 +186,7 @@
             <key>label</key>
             <string>生效范围</string>
             <key>footerText</key>
-            <string>开启「启用白名单」后，只有下方选中的 App 有手势返回，其余一律不生效（默认）。关闭则全局生效、下方黑名单内的 App 排除。</string>
+            <string>默认关闭 = 全局生效（所有 App 均可边缘返回），仅排除下方黑名单内的 App。开启后改为白名单模式：只有「选白名单程序」里的 App 生效，其余不生效。</string>
         </dict>
         <dict>
             <key>cell</key>
@@ -198,9 +198,9 @@
             <key>defaults</key>
             <string>com.zlhkf.oback</string>
             <key>default</key>
-            <true/>
+            <false/>
             <key>footnote</key>
-            <string>开：仅「选白名单程序」中的 App 生效。关：所有 App 生效，并排除「选黑名单程序」中的 App。</string>
+            <string>开：仅白名单内的 App 生效。关（默认）：所有 App 生效，排除黑名单内的 App。</string>
         </dict>
         <dict>
             <key>cell</key>
