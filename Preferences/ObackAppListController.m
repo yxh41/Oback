@@ -11,36 +11,76 @@
 #import "ObackAppListController.h"
 #import <Preferences/PSSpecifier.h>
 #import <Preferences/PSTableCell.h>
-#import <Preferences/PSSwitchTableCell.h>
 #import <UIKit/UIKit.h>
 
 static NSString *const kDomain = @"com.zlhkf.oback";
 
 #pragma mark - 自定义 cell：图标 + 名称 + bundle id 副标题 + 开关
-// 注意：不重写 layoutSubviews，避免与 PSSwitchTableCell 内部布局冲突导致闪退。
+// 关键：父类用 PSTableCell（基类，宽容），不用 PSSwitchTableCell（iOS16/roothide 下布局脆弱，
+// 子类化 + Subtitle 样式 + cellClassForSpecifier 强换类会在渲染期崩）。
+// 开关走 accessoryView，框架自动定位到右侧，不碰 PSTableCell 内部布局。
 
-@interface ObackAppSwitchCell : PSSwitchTableCell
+@interface ObackAppSwitchCell : PSTableCell
+@property (nonatomic, strong) UISwitch *switchView;
 @end
 
 @implementation ObackAppSwitchCell
 
 - (id)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier specifier:(PSSpecifier *)specifier {
-    // 使用 Subtitle 样式，让 detailTextLabel 显示 bundle id
+    // Subtitle 样式让 detailTextLabel 显示 bundle id
     self = [super initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:reuseIdentifier specifier:specifier];
-    if (self) {
-        NSString *bid = [specifier propertyForKey:@"appBundleID"];
-        if (bid.length) {
-            self.detailTextLabel.text = bid;
-        }
-
-        UIImage *icon = [specifier propertyForKey:@"appIcon"];
-        if (icon) {
-            self.imageView.image = icon;
-            self.imageView.layer.cornerRadius = 8.0;
-            self.imageView.clipsToBounds = YES;
-        }
-    }
     return self;
+}
+
+- (void)setSpecifier:(PSSpecifier *)specifier {
+    [super setSpecifier:specifier];
+
+    // 懒创建开关，挂到 accessoryView（框架自动定位到右侧）
+    if (!_switchView) {
+        _switchView = [[UISwitch alloc] init];
+        [_switchView addTarget:self action:@selector(_onSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+        self.accessoryView = _switchView;
+    }
+
+    NSString *bid = [specifier propertyForKey:@"appBundleID"];
+    if (bid.length) self.detailTextLabel.text = bid;
+
+    UIImage *icon = [specifier propertyForKey:@"appIcon"];
+    if (icon) {
+        self.imageView.image = [self _resizedIcon:icon];
+        self.imageView.layer.cornerRadius = 6.0;
+        self.imageView.clipsToBounds = YES;
+    }
+
+    NSString *storeKey = [specifier propertyForKey:@"storeKey"];
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    _switchView.on = [[d arrayForKey:storeKey] containsObject:bid];
+}
+
+// 把任意尺寸的 App 图标缩到固定 29pt，避免大图撑破行高（不重写 layoutSubviews，
+// 那是之前崩溃的诱因之一；直接约束 image 资源尺寸最稳）。
+- (UIImage *)_resizedIcon:(UIImage *)icon {
+    if (!icon) return nil;
+    CGSize target = CGSizeMake(29, 29);
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:target];
+    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        [icon drawInRect:CGRectMake(0, 0, target.width, target.height)];
+    }];
+}
+
+- (void)_onSwitchChanged:(UISwitch *)sw {
+    NSString *bid = [self.specifier propertyForKey:@"appBundleID"];
+    NSString *storeKey = [self.specifier propertyForKey:@"storeKey"];
+    if (!bid || !storeKey) return;
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    NSMutableArray *arr = [[d arrayForKey:storeKey] mutableCopy] ?: [NSMutableArray array];
+    if (sw.on) {
+        if (![arr containsObject:bid]) [arr addObject:bid];
+    } else {
+        [arr removeObject:bid];
+    }
+    [d setObject:arr forKey:storeKey];
+    [d synchronize];
 }
 
 @end
@@ -240,14 +280,18 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     NSString *name = app[@"name"];
     NSString *appPath = app[@"path"];
 
+    // 注意：set/get 设为 nil。开关的「初始状态 + 状态存储」完全由自定义 cell
+    // （ObackAppSwitchCell）在 setSpecifier: / _onSwitchChanged: 内自行处理，
+    // 不依赖框架的 PSSwitchCell 开关接线，规避 iOS16/roothide 下的渲染崩溃。
     PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name
                                                   target:self
-                                                     set:@selector(_setAppEnabled:specifier:)
-                                                     get:@selector(_isAppEnabled:)
+                                                     set:nil
+                                                     get:nil
                                                  detail:nil
                                                      cell:PSSwitchCell
                                                      edit:nil];
     [s setProperty:bid forKey:@"appBundleID"];
+    [s setProperty:[self _storeKey] forKey:@"storeKey"];
     [s setProperty:@"ObackAppSwitchCell" forKey:@"cellClass"];
 
     // 加载图标并挂到 specifier 上，cell 初始化时会读取
@@ -296,30 +340,6 @@ static NSString *const kDomain = @"com.zlhkf.oback";
         }
     }
     return _specifiers;
-}
-
-#pragma mark 开关存取
-
-- (void)_setAppEnabled:(NSNumber *)value specifier:(PSSpecifier *)spec {
-    NSString *bid = [spec propertyForKey:@"appBundleID"];
-    if (!bid) return;
-    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
-    NSMutableArray *arr = [[d arrayForKey:[self _storeKey]] mutableCopy] ?: [NSMutableArray array];
-    if ([value boolValue]) {
-        if (![arr containsObject:bid]) [arr addObject:bid];
-    } else {
-        [arr removeObject:bid];
-    }
-    [d setObject:arr forKey:[self _storeKey]];
-    [d synchronize];
-}
-
-- (id)_isAppEnabled:(PSSpecifier *)spec {
-    NSString *bid = [spec propertyForKey:@"appBundleID"];
-    if (!bid) return @NO;
-    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
-    NSArray *arr = [d arrayForKey:[self _storeKey]];
-    return @([arr containsObject:bid]);
 }
 
 @end
