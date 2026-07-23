@@ -184,6 +184,46 @@
             <key>cell</key>
             <string>PSGroupCell</string>
             <key>label</key>
+            <string>返回灵敏度</string>
+            <key>footerText</key>
+            <string>调节边缘返回的触发灵敏度。两个阈值都越低 → 越容易返回（更跟手，但快速横滑列表时可能误触）；越高 → 越需明显拖动或甩动才返回。建议保持默认，按真机手感微调。</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSSliderCell</string>
+            <key>label</key>
+            <string>提交位移阈值</string>
+            <key>key</key>
+            <string>commitRatio</string>
+            <key>defaults</key>
+            <string>com.zlhkf.oback</string>
+            <key>default</key>
+            <real>0.3</real>
+            <key>min</key>
+            <real>0.1</real>
+            <key>max</key>
+            <real>0.5</real>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSSliderCell</string>
+            <key>label</key>
+            <string>提交速度阈值</string>
+            <key>key</key>
+            <string>commitVelocity</string>
+            <key>defaults</key>
+            <string>com.zlhkf.oback</string>
+            <key>default</key>
+            <real>400</real>
+            <key>min</key>
+            <real>100</real>
+            <key>max</key>
+            <real>1000</real>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSGroupCell</string>
+            <key>label</key>
             <string>生效范围</string>
             <key>footerText</key>
             <string>默认关闭 = 全局生效（所有 App 均可边缘返回），仅排除下方黑名单内的 App。开启后改为白名单模式：只有「选白名单程序」里的 App 生效，其余不生效。</string>
