@@ -1,5 +1,8 @@
 #import <UIKit/UIKit.h>
 
+// 诊断日志（实现见 ObackManager.m，写共享文件 /var/mobile/oback_debug.log + syslog）
+void OBLog(NSString *fmt, ...);
+
 // 触发边缘
 typedef NS_ENUM(NSInteger, ObackEdge) {
     ObackEdgeLeft  = 0,  // 左边缘内滑 -> 当前页右移，上一页从左侧探出

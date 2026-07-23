@@ -1,5 +1,10 @@
 #import "ObackTransition.h"
 
+// 私有扩展：补一个「已完成」标记，避免 completeTransition 被重复调用（UIKit 会告警/异常）
+@interface ObackInteractiveTransition ()
+@property (nonatomic, assign) BOOL completed;
+@end
+
 // 核心：根据百分比把"当前页"和"上一页"摆到位，模拟 OPPO 视差
 static void OBApplyParallax(CGFloat percent,
                             UIView *fromView,
@@ -81,6 +86,7 @@ static void OBApplyParallax(CGFloat percent,
     UIView *dim = [[UIView alloc] initWithFrame:container.bounds];
     dim.backgroundColor = [UIColor blackColor];
     dim.alpha = 0;
+    dim.userInteractionEnabled = NO;   // 关键：遮罩绝不拦截触摸，即便残留也只是黑、不会"无法操作"
     [container insertSubview:dim aboveSubview:toView];
     [container bringSubviewToFront:fromView];
 
@@ -95,6 +101,7 @@ static void OBApplyParallax(CGFloat percent,
     } completion:^(BOOL finished) {
         [dim removeFromSuperview];
         [ctx completeTransition:![ctx transitionWasCancelled]];
+        OBLog(@"animator done (cancelled=%d finished=%d)", [ctx transitionWasCancelled], finished);
     }];
 }
 
@@ -120,15 +127,19 @@ static void OBApplyParallax(CGFloat percent,
 
 - (void)startInteractiveTransition:(id<UIViewControllerContextTransitioning>)ctx {
     _ctx = ctx;
+    _completed = NO;
     UIView *container = ctx.containerView;
     _fromView = [ctx viewControllerForKey:UITransitionContextFromViewControllerKey].view;
     _toView   = [ctx viewControllerForKey:UITransitionContextToViewControllerKey].view;
+    OBLog(@"interactive transition begin (fromView=%@ toViewInWindow=%d)",
+          _fromView, (_toView && _toView.window) ? 1 : 0);
 
     if (_toView.superview != container) [container insertSubview:_toView atIndex:0];
 
     _dimView = [[UIView alloc] initWithFrame:container.bounds];
     _dimView.backgroundColor = [UIColor blackColor];
     _dimView.alpha = 0;
+    _dimView.userInteractionEnabled = NO;   // 关键：遮罩绝不拦截触摸
     [container insertSubview:_dimView aboveSubview:_toView];
     [container bringSubviewToFront:_fromView];
 
@@ -155,8 +166,10 @@ static void OBApplyParallax(CGFloat percent,
                      animations:^{
         OBApplyParallax(1, _fromView, _toView, _dimView, self.edge, self.params);
     } completion:^(BOOL finished) {
+        if (_completed) return; _completed = YES;
         [_dimView removeFromSuperview];
         [_ctx completeTransition:YES];
+        OBLog(@"interactive transition finished (finished=%d)", finished);
     }];
 }
 
@@ -167,8 +180,10 @@ static void OBApplyParallax(CGFloat percent,
                      animations:^{
         OBApplyParallax(0, _fromView, _toView, _dimView, self.edge, self.params);
     } completion:^(BOOL finished) {
+        if (_completed) return; _completed = YES;
         [_dimView removeFromSuperview];
         [_ctx completeTransition:NO];
+        OBLog(@"interactive transition cancelled (finished=%d)", finished);
     }];
 }
 

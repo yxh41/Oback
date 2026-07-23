@@ -14,7 +14,7 @@ static NSString *OBLogPath(void) {
     return dir ? [dir stringByAppendingPathComponent:@"oback_debug.log"] : shared;
 }
 
-static void OBLog(NSString *fmt, ...) {
+void OBLog(NSString *fmt, ...) {
     va_list ap; va_start(ap, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
@@ -246,10 +246,17 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         OBLog(@"beginTransition: dismiss modal (注入视差转场)");
         // 仅在手势触发时注入我们的 dismiss 转场，避免干扰 App 自带 modal 转场（此前全局注入导致黑屏）
         ObackTransitioningDelegate *td = [[ObackTransitioningDelegate alloc] init];
-        td.original = top.transitioningDelegate;
+        id origDelegate = top.transitioningDelegate;
+        td.original = origDelegate;
         top.transitioningDelegate = td;
         _currentTD = td;
-        [top dismissViewControllerAnimated:YES completion:nil];
+        __weak UIViewController *weakTop = top;
+        [top dismissViewControllerAnimated:YES completion:^{
+            UIViewController *t = weakTop;
+            if (t) t.transitioningDelegate = origDelegate; // 还原，避免 dangling assign + 后续 dismiss 被劫持
+            OBLog(@"modal dismiss 完成, delegate 已还原");
+            _currentTD = nil;
+        }];
     } else {
         OBLog(@"beginTransition: 无操作(不可返回)");
         if (_indicator) [self dismissIndicatorCommitted:NO params:p window:win];
@@ -276,6 +283,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 
 - (void)endTransition:(UIPanGestureRecognizer *)pan {
     if (!self.interacting || !self.interactive) return;
+    OBLog(@"endTransition called (percent=%.2f)", _currentPercent);
     UIWindow *win = (UIWindow *)pan.view;
     CGPoint v = [pan velocityInView:win];
     CGFloat dir = (self.currentEdge == ObackEdgeLeft) ? 1.0 : -1.0;
