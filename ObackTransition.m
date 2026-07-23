@@ -6,12 +6,16 @@
 @end
 
 // 核心：根据百分比把"当前页"和"上一页"摆到位，模拟 OPPO 视差
+// parallaxToView=YES  → nav pop：上一页(presenting/toView)探出+放大（视差），当前页平移。
+// parallaxToView=NO   → 弹窗 dismiss 方案B：只动被 dismiss 的 fromView(sheet 滑出+轻微缩小)，
+//                       绝不碰底层 presenting(toView)（黑屏根因），也不加深遮罩（避免已可见背景闪暗）。
 static void OBApplyParallax(CGFloat percent,
                             UIView *fromView,
                             UIView *toView,
                             UIView *dimView,
                             ObackEdge edge,
-                            ObackParams *p) {
+                            ObackParams *p,
+                            BOOL parallaxToView) {
     CGFloat w = fromView.window ? fromView.window.bounds.size.width
                                 : [UIScreen mainScreen].bounds.size.width;
     if (w <= 0) w = [UIScreen mainScreen].bounds.size.width;
@@ -19,19 +23,27 @@ static void OBApplyParallax(CGFloat percent,
     percent = MAX(0.0, MIN(1.0, percent));
     CGFloat dir = (edge == ObackEdgeLeft) ? 1.0 : -1.0;
 
-    // 当前页：整体平移
-    CGFloat fromX = dir * percent * w;
-    fromView.transform = CGAffineTransformMakeTranslation(fromX, 0);
+    // 当前页/被 dismiss 的 sheet：始终按方向平移；方案B 下额外给一点点缩小增强"飞出"感
+    CGFloat fromScale = 1.0;
+    if (!parallaxToView) fromScale = 1.0 - 0.08 * percent;
+    fromView.transform = CGAffineTransformConcat(
+        CGAffineTransformMakeTranslation(dir * percent * w, 0),
+        CGAffineTransformMakeScale(fromScale, fromScale));
 
-    // 上一页：从对侧探出 + 轻微放大（视差）
-    CGFloat toX = -dir * p.parallaxOffset * w * (1.0 - percent);
-    CGFloat scale = p.previousScaleMin + (1.0 - p.previousScaleMin) * percent;
-    toView.transform = CGAffineTransformConcat(
-        CGAffineTransformMakeTranslation(toX, 0),
-        CGAffineTransformMakeScale(scale, scale));
-
-    // 上一页初始被压暗，随拖动变亮
-    if (dimView) dimView.alpha = (1.0 - percent) * p.dimAlpha;
+    if (parallaxToView) {
+        // 上一页：从对侧探出 + 轻微放大（视差）
+        CGFloat toX = -dir * p.parallaxOffset * w * (1.0 - percent);
+        CGFloat scale = p.previousScaleMin + (1.0 - p.previousScaleMin) * percent;
+        toView.transform = CGAffineTransformConcat(
+            CGAffineTransformMakeTranslation(toX, 0),
+            CGAffineTransformMakeScale(scale, scale));
+        // 上一页初始被压暗，随拖动变亮
+        if (dimView) dimView.alpha = (1.0 - percent) * p.dimAlpha;
+    } else {
+        // 方案B：底层 presenting 绝不碰（黑屏根因）；不加深遮罩，避免已可见背景闪暗
+        toView.transform = CGAffineTransformIdentity;
+        if (dimView) dimView.alpha = 0.0;
+    }
 }
 
 @implementation ObackParams
@@ -70,6 +82,7 @@ static void OBApplyParallax(CGFloat percent,
     if (self = [super init]) {
         _edge = edge;
         _params = params ?: [ObackParams defaults];
+        _parallaxToView = YES;   // 默认 nav pop 视差（安全且已验证）；弹窗 dismiss 由调用方置 NO
     }
     return self;
 }
@@ -101,7 +114,7 @@ static void OBApplyParallax(CGFloat percent,
                           delay:0
                         options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState
                      animations:^{
-        OBApplyParallax(1, fromView, toView, dim, self.edge, self.params);
+        OBApplyParallax(1, fromView, toView, dim, self.edge, self.params, self.parallaxToView);
     } completion:^(BOOL finished) {
         [dim removeFromSuperview];
         [ctx completeTransition:![ctx transitionWasCancelled]];
@@ -125,6 +138,7 @@ static void OBApplyParallax(CGFloat percent,
     if (self = [super init]) {
         _edge = edge;
         _params = params ?: [ObackParams defaults];
+        _parallaxToView = YES;   // 默认 nav pop 视差；弹窗 dismiss 由调用方置 NO
     }
     return self;
 }
@@ -151,6 +165,10 @@ static void OBApplyParallax(CGFloat percent,
     [self updateWithPercent:0];
 }
 
+- (void)updateWithPercent:(CGFloat)percent {
+    OBApplyParallax(percent, _fromView, _toView, _dimView, self.edge, self.params, self.parallaxToView);
+}
+
 - (void)applyShadowTo:(UIView *)v {
     v.layer.shadowColor = [UIColor blackColor].CGColor;
     v.layer.shadowOpacity = self.params.shadowEnabled ? self.params.shadowOpacity : 0.0;
@@ -159,16 +177,12 @@ static void OBApplyParallax(CGFloat percent,
     v.layer.masksToBounds = NO;
 }
 
-- (void)updateWithPercent:(CGFloat)percent {
-    OBApplyParallax(percent, _fromView, _toView, _dimView, self.edge, self.params);
-}
-
 - (void)finish {
     [UIView animateWithDuration:self.params.duration
                           delay:0
                         options:UIViewAnimationOptionCurveEaseOut
                      animations:^{
-        OBApplyParallax(1, _fromView, _toView, _dimView, self.edge, self.params);
+        OBApplyParallax(1, _fromView, _toView, _dimView, self.edge, self.params, self.parallaxToView);
     } completion:^(BOOL finished) {
         if (_completed) return; _completed = YES;
         [_dimView removeFromSuperview];
@@ -182,7 +196,7 @@ static void OBApplyParallax(CGFloat percent,
                           delay:0
                         options:UIViewAnimationOptionCurveEaseOut
                      animations:^{
-        OBApplyParallax(0, _fromView, _toView, _dimView, self.edge, self.params);
+        OBApplyParallax(0, _fromView, _toView, _dimView, self.edge, self.params, self.parallaxToView);
     } completion:^(BOOL finished) {
         if (_completed) return; _completed = YES;
         [_dimView removeFromSuperview];

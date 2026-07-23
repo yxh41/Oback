@@ -86,9 +86,12 @@ static BOOL oback_shouldBackOff(void) {
 - (id<UIViewControllerAnimatedTransitioning>)animationControllerForDismissedController:(UIViewController *)dismissed {
     // 仅在手势驱动返回时接管 dismiss 动画；普通关闭按钮等系统 dismiss 走 App 原生动画，
     // 避免对 fullScreen / 系统自带 modal 强行套自定义转场导致黑屏（此前无条件返回是黑屏根因之一）
-    if ([ObackManager shared].interacting)
-        return [[ObackAnimator alloc] initWithEdge:[ObackManager shared].currentEdge
-                                           params:[ObackPreferences params]];
+    if ([ObackManager shared].interacting) {
+        ObackAnimator *a = [[ObackAnimator alloc] initWithEdge:[ObackManager shared].currentEdge
+                                                      params:[ObackPreferences params]];
+        a.parallaxToView = [ObackManager shared].currentParallaxToView;  // 弹窗 dismiss 置 NO(方案B: 只动 sheet)
+        return a;
+    }
     if (_original && [_original respondsToSelector:_cmd])
         return [_original animationControllerForDismissedController:dismissed];
     return nil;

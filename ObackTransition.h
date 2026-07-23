@@ -35,6 +35,8 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 @interface ObackAnimator : NSObject <UIViewControllerAnimatedTransitioning>
 @property (nonatomic, assign) ObackEdge edge;
 @property (nonatomic, retain) ObackParams *params;
+// YES=nav pop 视差(移动上一页)；NO=弹窗 dismiss 方案B(只动被 dismiss 的 sheet，绝不碰底层 presenting，避免黑屏)
+@property (nonatomic, assign) BOOL parallaxToView;
 - (instancetype)initWithEdge:(ObackEdge)edge params:(ObackParams *)params;
 @end
 
@@ -42,6 +44,8 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 @interface ObackInteractiveTransition : NSObject <UIViewControllerInteractiveTransitioning>
 @property (nonatomic, assign) ObackEdge edge;
 @property (nonatomic, retain) ObackParams *params;
+// 同 ObackAnimator.parallaxToView 含义
+@property (nonatomic, assign) BOOL parallaxToView;
 - (instancetype)initWithEdge:(ObackEdge)edge params:(ObackParams *)params;
 - (void)updateWithPercent:(CGFloat)percent;  // 0~1
 - (void)finish;   // 提交返回
