@@ -40,10 +40,61 @@ static void OBLog(NSString *fmt, ...) {
 @end
 
 static void *kAttachedKey = &kAttachedKey;
+static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指移动的距离 (pt)
+
+#pragma mark - 边缘方向指示胶囊（OPPO 风格：跟随手指、带方向箭头）
+
+@interface ObackEdgeIndicator : UIView
+- (instancetype)initWithEdge:(ObackEdge)edge;
+@end
+
+@implementation ObackEdgeIndicator {
+    ObackEdge _edge;
+    CAShapeLayer *_chevron;
+}
+- (instancetype)initWithEdge:(ObackEdge)edge {
+    if (self = [super initWithFrame:CGRectMake(0, 0, 56, 32)]) {
+        _edge = edge;
+        // 默认：白色半透明胶囊 + 柔和阴影
+        self.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.9];
+        self.layer.cornerRadius = 16;
+        self.layer.shadowColor = [UIColor blackColor].CGColor;
+        self.layer.shadowOpacity = 0.2;
+        self.layer.shadowRadius = 6;
+        self.layer.shadowOffset = CGSizeZero;
+        self.userInteractionEnabled = NO;
+
+        // 方向 chevron（深色，保证在白底/暗底都可见）
+        _chevron = [CAShapeLayer layer];
+        _chevron.lineWidth = 3.0;
+        _chevron.lineCap = kCALineCapRound;
+        _chevron.lineJoin = kCALineJoinRound;
+        _chevron.strokeColor = [UIColor colorWithWhite:0.25 alpha:1.0].CGColor;
+        _chevron.fillColor = nil;
+        CGFloat cx = 28, cy = 16;
+        UIBezierPath *path = [UIBezierPath bezierPath];
+        if (edge == ObackEdgeLeft) {
+            [path moveToPoint:CGPointMake(cx + 6, cy - 7)];
+            [path addLineToPoint:CGPointMake(cx - 6, cy)];
+            [path addLineToPoint:CGPointMake(cx + 6, cy + 7)];
+        } else {
+            [path moveToPoint:CGPointMake(cx - 6, cy - 7)];
+            [path addLineToPoint:CGPointMake(cx + 6, cy)];
+            [path addLineToPoint:CGPointMake(cx - 6, cy + 7)];
+        }
+        _chevron.path = path.CGPath;
+        [self.layer addSublayer:_chevron];
+    }
+    return self;
+}
+@end
 
 @implementation ObackManager {
     BOOL   _started;
     CGFloat _currentPercent;
+    UIView *_indicator;          // 边缘方向指示胶囊
+    CGPoint _indicatorAnchor;    // 手势起点（胶囊初始垂直位置）
+    CGFloat _indicatorStartX;    // 手势起点 x（用于计算跟随位移）
 }
 
 + (instancetype)shared {
@@ -181,6 +232,12 @@ static void *kAttachedKey = &kAttachedKey;
     self.interactive = [[ObackInteractiveTransition alloc] initWithEdge:self.currentEdge params:p];
     self.interacting = YES;
 
+    // 显示边缘方向胶囊（跟随手指、带方向箭头）
+    CGPoint loc = [pan locationInView:win];
+    _indicatorAnchor = loc;
+    _indicatorStartX = loc.x;
+    [self showIndicatorWithEdge:self.currentEdge atPoint:loc inWindow:win];
+
     if (nav && nav.viewControllers.count > 1) {
         OBLog(@"beginTransition: pop nav (childCount=%lu)", (unsigned long)nav.viewControllers.count);
         [nav popViewControllerAnimated:YES];
@@ -189,6 +246,7 @@ static void *kAttachedKey = &kAttachedKey;
         [top dismissViewControllerAnimated:YES completion:nil];
     } else {
         OBLog(@"beginTransition: 无操作(不可返回)");
+        if (_indicator) [self dismissIndicatorCommitted:NO params:p window:win];
         self.interacting = NO;
         self.interactive = nil;
     }
@@ -206,6 +264,7 @@ static void *kAttachedKey = &kAttachedKey;
     p = MAX(0.0, MIN(1.0, p));
     _currentPercent = p;
     [self.interactive updateWithPercent:p];
+    [self updateIndicatorWithPan:pan window:win];
 }
 
 - (void)endTransition:(UIPanGestureRecognizer *)pan {
@@ -217,12 +276,77 @@ static void *kAttachedKey = &kAttachedKey;
 
     ObackParams *p = [ObackPreferences params];
     BOOL commit = (_currentPercent > p.commitRatio) || (vel > p.commitVelocity);
+    if (_indicator) [self dismissIndicatorCommitted:commit params:p window:win];
     if (commit) [self.interactive finish];
     else        [self.interactive cancel];
 
     self.interacting = NO;
     self.interactive = nil;
     _currentPercent = 0;
+}
+
+#pragma mark - 边缘方向胶囊
+
+// 胶囊初始停靠位置：贴住触发边缘、垂直对齐手势起点
+- (CGPoint)indicatorHomeCenterForEdge:(ObackEdge)edge basePoint:(CGPoint)loc window:(UIWindow *)win {
+    CGFloat halfW = 28.0;
+    CGFloat x = (edge == ObackEdgeLeft) ? (halfW - 8.0)
+                                        : (win.bounds.size.width - halfW + 8.0);
+    return CGPointMake(x, loc.y);
+}
+
+- (void)showIndicatorWithEdge:(ObackEdge)edge atPoint:(CGPoint)loc inWindow:(UIWindow *)win {
+    if (_indicator) { [_indicator removeFromSuperview]; _indicator = nil; }
+    ObackEdgeIndicator *ind = [[ObackEdgeIndicator alloc] initWithEdge:edge];
+    ind.center = [self indicatorHomeCenterForEdge:edge basePoint:loc window:win];
+    ind.alpha = 0.0;
+    ind.transform = CGAffineTransformMakeScale(0.85, 0.85);
+    [win addSubview:ind];
+    [win bringSubviewToFront:ind];
+    _indicator = ind;
+    OBLog(@"indicator shown (edge=%@ y=%.0f)", edge == ObackEdgeLeft ? @"左" : @"右", loc.y);
+    [UIView animateWithDuration:0.15 delay:0 options:UIViewAnimationOptionCurveEaseOut
+                     animations:^{ ind.alpha = 0.9; } completion:nil];
+}
+
+- (void)updateIndicatorWithPan:(UIPanGestureRecognizer *)pan window:(UIWindow *)win {
+    if (!_indicator) return;
+    CGFloat fingerX = [pan locationInView:win].x;
+    CGFloat dx = fingerX - _indicatorStartX;
+    CGFloat dir = (self.currentEdge == ObackEdgeLeft) ? 1.0 : -1.0;
+    CGFloat travel = MIN(fabs(dx), kIndicatorMaxTravel) * dir;   // 跟随手指，最多移动 kIndicatorMaxTravel
+    CGPoint home = [self indicatorHomeCenterForEdge:self.currentEdge basePoint:_indicatorAnchor window:win];
+    CGFloat s = 0.85 + 0.15 * MIN(1.0, _currentPercent / 0.3);   // 拉动越大，胶囊越饱满
+    _indicator.center = CGPointMake(home.x + travel, home.y);
+    _indicator.transform = CGAffineTransformMakeScale(s, s);
+    _indicator.alpha = 0.9;
+    [win bringSubviewToFront:_indicator];
+}
+
+- (void)dismissIndicatorCommitted:(BOOL)committed params:(ObackParams *)p window:(UIWindow *)win {
+    UIView *ind = _indicator;
+    _indicator = nil;
+    if (!ind) return;
+    if (committed) {
+        // 提交返回：放大淡出
+        [UIView animateWithDuration:MAX(0.18, p.duration * 0.6) delay:0
+                             options:UIViewAnimationOptionCurveEaseIn
+                          animations:^{
+            ind.alpha = 0.0;
+            ind.transform = CGAffineTransformMakeScale(1.35, 1.35);
+        } completion:^(BOOL f) { [ind removeFromSuperview]; }];
+    } else {
+        // 取消：弹回边缘并缩小消失
+        CGPoint home = [self indicatorHomeCenterForEdge:self.currentEdge
+                                              basePoint:_indicatorAnchor window:win];
+        [UIView animateWithDuration:MAX(0.22, p.duration * 0.7) delay:0
+                             options:UIViewAnimationOptionCurveEaseOut
+                          animations:^{
+            ind.center = home;
+            ind.alpha = 0.0;
+            ind.transform = CGAffineTransformMakeScale(0.6, 0.6);
+        } completion:^(BOOL f) { [ind removeFromSuperview]; }];
+    }
 }
 
 #pragma mark - 辅助
