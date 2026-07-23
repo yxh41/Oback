@@ -175,10 +175,11 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     // 注意：用字面量 @"iconImage" 而非 extern 常量 PSIconImageKey，
     // 因为 PSIconImageKey 在本仓库 CI 的 theos 头文件集合里可能未声明，
     // 直接用会因 -Werror 编译失败、不出 .deb。
+    // 点按切换不靠 specifier 的 setAction:（roothide/headers 的 PSSpecifier 未声明该方法），
+    // 改由控制器 tableView:didSelectRowAtIndexPath: 处理。
     UIImage *icon = [self _iconImageForApp:app];
     if (icon) [s setProperty:icon forKey:@"iconImage"];
     [s setProperty:bid forKey:@"appBundleID"];
-    [s setAction:@selector(_toggleApp:)];
     [specs addObject:s];
 }
 
@@ -291,6 +292,18 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     if (bid.length) {
         BOOL selected = [[self _selectedApps] containsObject:bid];
         cell.accessoryType = selected ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+    }
+}
+
+#pragma mark 点按行切换名单（不依赖 setAction:，roothide/headers 的 PSSpecifier 未声明该方法）
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [super tableView:tableView didSelectRowAtIndexPath:indexPath];
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
+    NSString *bid = [spec propertyForKey:@"appBundleID"];
+    if (bid.length) {
+        [self _toggleApp:spec];
     }
 }
 
