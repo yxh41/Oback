@@ -2,6 +2,38 @@
 #import "ObackPreferences.h"
 #import <objc/runtime.h>
 
+#pragma mark - 诊断日志（落地文件 + syslog，便于真机定位手势为何不触发）
+
+static NSString *OBLogPath(void) {
+    // 优先写到所有 App 共享的 /var/mobile（roothide 下 App 可写，可被 Filza 一次抓取）
+    NSString *shared = @"/var/mobile/oback_debug.log";
+    if ([[NSFileManager defaultManager] isWritableFileAtPath:@"/var/mobile"]) return shared;
+    // 兜底：退回各自沙盒 Documents
+    NSString *dir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                         NSUserDomainMask, YES) firstObject];
+    return dir ? [dir stringByAppendingPathComponent:@"oback_debug.log"] : shared;
+}
+
+static void OBLog(NSString *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    NSString *line = [NSString stringWithFormat:@"[%@] Oback: %@\n",
+                      [NSDate date], msg];
+    // 落文件（共享路径，便于一次抓取）
+    NSString *path = OBLogPath();
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (fh) {
+        [fh seekToEndOfFile];
+        [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+        [fh closeFile];
+    } else {
+        [line writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+    // 同时进 syslog（可用 syslog 工具实时看）
+    NSLog(@"%@", line);
+}
+
 #pragma mark - 仅识别横向的 pan（避免纵向滑动误触发返回）
 @interface ObackPanGestureRecognizer : UIPanGestureRecognizer
 @property (nonatomic, assign) CGPoint startPoint;
@@ -26,7 +58,15 @@ static void *kAttachedKey = &kAttachedKey;
 - (void)start {
     if (_started) return;
     _started = YES;
+    OBLog(@"start called, bid=%@, keyWindow=%@", NSBundle.mainBundle.bundleIdentifier,
+          [self currentKeyWindow]);
+    OBLog(@"debug log path = %@", OBLogPath());
     [self attachToWindow:[self currentKeyWindow]];
+    // 兜底：部分 App 启动初期 keyWindow 尚未就绪，延迟重试一次挂载
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self attachToWindow:[self currentKeyWindow]];
+    });
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(windowBecameKey:)
                                                  name:UIWindowDidBecomeKeyNotification
@@ -46,35 +86,46 @@ static void *kAttachedKey = &kAttachedKey;
     pan.maximumNumberOfTouches = 1;
     [win addGestureRecognizer:pan];
     objc_setAssociatedObject(win, kAttachedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    OBLog(@"attached pan gesture to window %@ (bounds=%.0fx%.0f)", win,
+          win.bounds.size.width, win.bounds.size.height);
 }
 
 #pragma mark - UIGestureRecognizerDelegate
 
 // 只在"落在边缘 + 可返回 + 不在黑名单"时，手势才接管，否则放行给 App 自身
 - (BOOL)gestureRecognizerShouldBegin:(UIPanGestureRecognizer *)pan {
-    if (self.interacting) return NO;
-    if (![ObackPreferences isAllowed]) return NO;
+    if (self.interacting) { OBLog(@"shouldBegin=NO (已在交互中)"); return NO; }
+    BOOL allowed = [ObackPreferences isAllowed];
+    if (!allowed) { OBLog(@"shouldBegin=NO (isAllowed=NO, bid=%@)", NSBundle.mainBundle.bundleIdentifier); return NO; }
 
     ObackParams *p = [ObackPreferences params];
     UIWindow *win = (UIWindow *)pan.view;
     CGPoint loc = [pan locationInView:win];
     CGFloat w = win.bounds.size.width;
-    if (w <= 0) return NO;
+    if (w <= 0) { OBLog(@"shouldBegin=NO (window width=0)"); return NO; }
 
     ObackEdge edge = ObackEdgeLeft;
     BOOL isEdge = NO;
     if (p.leftEnabled && loc.x <= p.triggerWidth)            { edge = ObackEdgeLeft;  isEdge = YES; }
     else if (p.rightEnabled && loc.x >= w - p.triggerWidth)  { edge = ObackEdgeRight; isEdge = YES; }
-    if (!isEdge) return NO;
+    if (!isEdge) {
+        OBLog(@"shouldBegin=NO (不在边缘: x=%.1f w=%.1f triggerW=%.1f left=%d right=%d)",
+              loc.x, w, p.triggerWidth, p.leftEnabled, p.rightEnabled);
+        return NO;
+    }
 
     UIViewController *top = [self topMost:win.rootViewController];
-    if (!top) return NO;
+    if (!top) { OBLog(@"shouldBegin=NO (无顶层 VC)"); return NO; }
 
     UINavigationController *nav = top.navigationController;
     if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
 
     BOOL poppable = (nav && nav.viewControllers.count > 1) || (top.presentingViewController != nil);
-    if (!poppable) return NO;
+    if (!poppable) {
+        OBLog(@"shouldBegin=NO (不可返回: nav.childCount=%lu presenting=%d)",
+              (unsigned long)nav.viewControllers.count, top.presentingViewController != nil);
+        return NO;
+    }
 
     // 边缘内滑与下方横向滚动列表冲突时，让位给滚动（左右边缘通用）
     UIScrollView *sv = [self scrollViewAtPoint:loc inView:win];
@@ -83,13 +134,22 @@ static void *kAttachedKey = &kAttachedKey;
         BOOL canScrollHoriz = (maxX > 1.0);
         if (canScrollHoriz) {
             // 左边缘内滑且列表还能向左滚 -> 放行给滚动
-            if (edge == ObackEdgeLeft && sv.contentOffset.x > 1.0) return NO;
+            if (edge == ObackEdgeLeft && sv.contentOffset.x > 1.0) {
+                OBLog(@"shouldBegin=NO (让位横向滚动, 左边缘)");
+                return NO;
+            }
             // 右边缘内滑且列表还能向右滚 -> 放行给滚动
-            if (edge == ObackEdgeRight && sv.contentOffset.x < maxX - 1.0) return NO;
+            if (edge == ObackEdgeRight && sv.contentOffset.x < maxX - 1.0) {
+                OBLog(@"shouldBegin=NO (让位横向滚动, 右边缘)");
+                return NO;
+            }
         }
     }
 
     self.currentEdge = edge;
+    OBLog(@"shouldBegin=YES (edge=%@ nav.childCount=%lu presenting=%d)",
+          edge == ObackEdgeLeft ? @"左" : @"右",
+          (unsigned long)nav.viewControllers.count, top.presentingViewController != nil);
     if (p.hapticEnabled) {
         UIImpactFeedbackGenerator *g = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
         [g impactOccurred];
@@ -122,10 +182,13 @@ static void *kAttachedKey = &kAttachedKey;
     self.interacting = YES;
 
     if (nav && nav.viewControllers.count > 1) {
+        OBLog(@"beginTransition: pop nav (childCount=%lu)", (unsigned long)nav.viewControllers.count);
         [nav popViewControllerAnimated:YES];
     } else if (top.presentingViewController) {
+        OBLog(@"beginTransition: dismiss modal");
         [top dismissViewControllerAnimated:YES completion:nil];
     } else {
+        OBLog(@"beginTransition: 无操作(不可返回)");
         self.interacting = NO;
         self.interactive = nil;
     }

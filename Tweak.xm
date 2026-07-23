@@ -168,8 +168,10 @@ static void *kTDKey = &kTDKey;
         @"com.aboutsy.saily",
         nil];
     if ([systemBundles containsObject:bid]) {
+        NSLog(@"[Oback] %@ 在排除名单，不注入", bid);
         return;
     }
+    NSLog(@"[Oback] 已注入 %@, 启动手势管理器", bid);
     %init(Oback);
     // 每个 App 启动完成后启动手势管理器
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
