@@ -22,6 +22,7 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 @implementation ObackAppListController {
     NSDictionary *_allApps; // @{ @"user": [...], @"system": [...] }
     NSString *_searchText;
+    NSSet *_homeScreenSet;   // 主屏可见的 bundle id 集合；nil = 读不到布局，回退显示全部
 }
 
 #pragma mark App 枚举
@@ -69,6 +70,9 @@ static NSString *const kDomain = @"com.zlhkf.oback";
         NSString *bid = info[@"CFBundleIdentifier"];
         if (!bid.length) return;
 
+        // 仅保留主屏幕可见的 App（_homeScreenSet 为 nil 表示读不到布局，则显示全部）
+        if (_homeScreenSet && ![_homeScreenSet containsObject:bid]) return;
+
         // 只保留在桌面上有图标的 App
         id iconName = info[@"CFBundleIconName"];
         id iconFiles = info[@"CFBundleIconFiles"];
@@ -94,11 +98,56 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 
 - (NSDictionary *)_installedApps {
     if (!_allApps) {
+        if (!_homeScreenSet) _homeScreenSet = [self _homeScreenBundleIDs];
         NSArray *userApps = [self _scanAppsAtPath:@"/var/containers/Bundle/Application"];
         NSArray *systemApps = [self _scanAppsAtPath:@"/Applications"];
         _allApps = @{@"user": userApps, @"system": systemApps};
     }
     return _allApps;
+}
+
+#pragma mark 仅显示主屏幕可见的 App（按 SpringBoard IconState 过滤）
+
+// 读取 SpringBoard 主屏幕布局，收集所有「在主屏可见」的 bundle id（含 Dock 与文件夹内的）。
+// 读不到（无权限/文件缺失/解析异常）时返回 nil，调用方据此回退为「显示全部」，避免把列表搞空。
+- (NSSet *)_homeScreenBundleIDs {
+    @try {
+        NSDictionary *state = nil;
+        NSArray *paths = @[
+            @"/var/mobile/Library/SpringBoard/IconState.plist",
+            @"/var/mobile/Library/SpringBoard/IconSupportState.plist"
+        ];
+        for (NSString *p in paths) {
+            state = [NSDictionary dictionaryWithContentsOfFile:p];
+            if (state) break;
+        }
+        if (!state) return nil;
+
+        NSMutableSet *set = [NSMutableSet set];
+        NSMutableArray *stack = [NSMutableArray array];
+        id iconLists = state[@"iconLists"];
+        if ([iconLists isKindOfClass:[NSArray class]]) [stack addObject:iconLists];
+        id buttonBar = state[@"buttonBar"];
+        if ([buttonBar isKindOfClass:[NSArray class]]) [stack addObject:buttonBar];
+
+        while (stack.count) {
+            id node = [stack lastObject];
+            [stack removeLastObject];
+            if ([node isKindOfClass:[NSArray class]]) {
+                for (id item in node) [stack addObject:item];
+            } else if ([node isKindOfClass:[NSDictionary class]]) {
+                // 文件夹：递归其内部页面（iconLists / lists）
+                id inner = node[@"iconLists"] ?: node[@"lists"];
+                if ([inner isKindOfClass:[NSArray class]]) [stack addObject:inner];
+            } else if ([node isKindOfClass:[NSString class]]) {
+                [set addObject:node];
+            }
+        }
+        return (set.count ? set : nil);
+    } @catch (NSException *e) {
+        (void)e;
+        return nil;
+    }
 }
 
 #pragma mark 存储与列表生成
@@ -145,14 +194,15 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 }
 
 - (void)_addGroupHeader:(NSString *)title footer:(NSString *)footer toSpecifiers:(NSMutableArray *)specs {
-    PSSpecifier *group = [PSSpecifier preferenceSpecifierNamed:@""
+    // ⚠️ 组标题必须用 specifier 的 name（第一个参数），不能用 setProperty:forKey:@"label"
+    // —— PSGroupCell 读的是 name，设 label 会导致标题整片空白（之前「用户/系统」分类与顶部计数都不显示就是这原因）。
+    PSSpecifier *group = [PSSpecifier preferenceSpecifierNamed:(title.length ? title : @"")
                                                         target:self
                                                            set:nil
                                                            get:nil
                                                         detail:nil
                                                            cell:PSGroupCell
                                                            edit:nil];
-    if (title.length) [group setProperty:title forKey:@"label"];
     if (footer.length) [group setProperty:footer forKey:@"footerText"];
     [specs addObject:group];
 }
@@ -222,10 +272,23 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     for (NSString *cand in candidates) {
         for (NSString *name in @[cand, [cand stringByAppendingString:@".png"]]) {
             UIImage *img = [UIImage imageWithContentsOfFile:[appPath stringByAppendingPathComponent:name]];
-            if (img) return img;
+            if (img) return [self _scaledIcon:img];
         }
     }
     return nil;
+}
+
+// 把图标缩放到合适的行内尺寸（默认不缩放时 PSTitleValueCell 会把原图撑得过大）
+- (UIImage *)_scaledIcon:(UIImage *)img {
+    if (!img) return nil;
+    CGFloat scale = [[UIScreen mainScreen] scale] ?: 1.0;
+    CGFloat pt = 40.0;
+    CGSize target = CGSizeMake(pt * scale, pt * scale);
+    if (img.size.width <= target.width && img.size.height <= target.height) return img;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:target];
+    return [r imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull ctx) {
+        [img drawInRect:CGRectMake(0, 0, target.width, target.height)];
+    }];
 }
 
 // 点按切换：加入 / 移出当前名单（whitelistApps / blacklistApps）
