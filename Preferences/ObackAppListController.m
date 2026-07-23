@@ -194,18 +194,6 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     }]];
 }
 
-// 把「已在名单里」的 App 排到各组最前面（满足「选中的 App 置顶」）
-- (NSArray *)_sortSelectedFirst:(NSArray *)apps {
-    NSSet *sel = [NSSet setWithArray:[self _selectedApps]];
-    if (sel.count == 0) return apps;
-    return [apps sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
-        BOOL as = [sel containsObject:a[@"bundleID"]];
-        BOOL bs = [sel containsObject:b[@"bundleID"]];
-        if (as != bs) return as ? NSOrderedAscending : NSOrderedDescending;
-        return [a[@"name"] compare:b[@"name"] options:NSCaseInsensitiveSearch];
-    }];
-}
-
 - (void)_addGroupHeader:(NSString *)title footer:(NSString *)footer toSpecifiers:(NSMutableArray *)specs {
     // ⚠️ 组标题必须用 specifier 的 name（第一个参数），不能用 setProperty:forKey:@"label"
     // —— PSGroupCell 读的是 name，设 label 会导致标题整片空白（之前「用户/系统」分类与顶部计数都不显示就是这原因）。
@@ -306,13 +294,16 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     return nil;
 }
 
-// 把图标缩放到合适的行内尺寸（默认不缩放时 PSTitleValueCell 会把原图撑得过大）
+// 把图标缩放到合适的行内尺寸（与系统「设置」App 列表图标同尺寸 29pt）。
+// ⚠️ 单位陷阱：UIGraphicsImageRenderer 的 initWithSize: 收的是【点(pt)】，会按设备 scale 自动出视网膜图；
+// 之前误把 target 写成 pt*scale(像素) 且用像素去和 img.size(点) 比较，导致比较阈值变成 87pt、
+// 目标尺寸也变成 87pt —— 大图标几乎都"<=阈值"被原样返回、即便缩放也是缩到 87pt，所以图标显得很大。
+// 修正：阈值与目标统一用 29pt(点)，渲染器自行处理 scale。
 - (UIImage *)_scaledIcon:(UIImage *)img {
     if (!img) return nil;
-    CGFloat scale = [[UIScreen mainScreen] scale] ?: 1.0;
     CGFloat pt = 29.0; // 与系统「设置」App 列表图标同尺寸
-    CGSize target = CGSizeMake(pt * scale, pt * scale);
-    if (img.size.width <= target.width && img.size.height <= target.height) return img;
+    if (img.size.width <= pt && img.size.height <= pt) return img;
+    CGSize target = CGSizeMake(pt, pt); // 点；渲染器按设备 scale 出图
     UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:target];
     return [r imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull ctx) {
         [img drawInRect:CGRectMake(0, 0, target.width, target.height)];
@@ -338,27 +329,43 @@ static NSString *const kDomain = @"com.zlhkf.oback";
         @try {
             NSMutableArray *specs = [NSMutableArray array];
 
-            // 顶部：已选数量
+            // 顶部：已选数量（下方即「已选应用」独立成列）
             NSUInteger cnt = [[self _selectedApps] count];
             [self _addGroupHeader:[NSString stringWithFormat:@"已选 %lu 个应用", (unsigned long)cnt]
-                           footer:@"" toSpecifiers:specs];
+                           footer:(cnt ? @"（以下为已加入本名单的应用，与下方列表分开）" : @"（尚未选择任何应用）") toSpecifiers:specs];
 
             NSDictionary *apps = [self _installedApps];
-            NSArray *userApps = [self _sortSelectedFirst:[self _filteredApps:apps[@"user"]]];
-            NSArray *systemApps = [self _sortSelectedFirst:[self _filteredApps:apps[@"system"]]];
+            NSArray *userApps = [self _filteredApps:apps[@"user"]];
+            NSArray *systemApps = [self _filteredApps:apps[@"system"]];
+            NSSet *sel = [NSSet setWithArray:[self _selectedApps]];
 
-            if (userApps.count) {
-                [self _addGroupHeader:@"用户应用" footer:@"" toSpecifiers:specs];
-                for (NSDictionary *app in userApps) {
-                    [self _addAppSpecifier:app toSpecifiers:specs];
-                }
+            // 选中项【单独成列】：用户+系统的已选项合并、按名称排序，列在顶部「已选 N 个应用」之下，
+            // 不再混入「用户应用/系统程序」原列表（之前是在原列表内置顶，不符合预期）。
+            NSMutableArray *selApps = [NSMutableArray array];
+            NSMutableArray *unselUser = [NSMutableArray array];
+            NSMutableArray *unselSystem = [NSMutableArray array];
+            for (NSDictionary *app in userApps) {
+                if ([sel containsObject:app[@"bundleID"]]) [selApps addObject:app];
+                else [unselUser addObject:app];
+            }
+            for (NSDictionary *app in systemApps) {
+                if ([sel containsObject:app[@"bundleID"]]) [selApps addObject:app];
+                else [unselSystem addObject:app];
+            }
+            [selApps sortUsingDescriptors:@[[NSSortDescriptor sortDescriptorWithKey:@"name" ascending:YES]]];
+            if (selApps.count) {
+                for (NSDictionary *app in selApps) [self _addAppSpecifier:app toSpecifiers:specs];
             }
 
-            if (systemApps.count) {
+            // 用户应用（仅未选中）
+            if (unselUser.count) {
+                [self _addGroupHeader:@"用户应用" footer:@"" toSpecifiers:specs];
+                for (NSDictionary *app in unselUser) [self _addAppSpecifier:app toSpecifiers:specs];
+            }
+            // 系统程序（仅未选中）
+            if (unselSystem.count) {
                 [self _addGroupHeader:@"系统程序" footer:@"" toSpecifiers:specs];
-                for (NSDictionary *app in systemApps) {
-                    [self _addAppSpecifier:app toSpecifiers:specs];
-                }
+                for (NSDictionary *app in unselSystem) [self _addAppSpecifier:app toSpecifiers:specs];
             }
 
             // 搜索无结果时给个提示分组

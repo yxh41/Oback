@@ -193,10 +193,8 @@ static BOOL oback_shouldBackOff(void) {
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification *note){
-        if (oback_shouldBackOff()) {
-            NSLog(@"[Oback] 检测到不兼容共存插件，主动退避，不启动手势");
-            return;
-        }
+        // 注：手势(核心功能)始终启动；与 AppTool 的冲突只通过 setDelegate: 透传来规避，
+        // 不在此处停掉手势，否则会连主功能一起关掉。
         [[ObackManager shared] start];
     }];
 }
