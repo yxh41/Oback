@@ -69,6 +69,9 @@ jobs:
           [ -n "$ROOTHIDE_DEB" ] || { echo "No roothide .deb produced"; exit 1; }
           ls -la "$ROOTHIDE_DEB"
           dpkg-deb -I "$ROOTHIDE_DEB" | head -20
+          # 打印实际打出的版本号（验证 control 的 $(OBACK_VERSION) 替换是否生效）
+          BUILT_VER=$(dpkg-deb -f "$ROOTHIDE_DEB" Version 2>/dev/null)
+          echo "::notice::Oback package version = ${BUILT_VER:-UNKNOWN}"
 
       - name: Echo build errors as annotations
         if: failure()
