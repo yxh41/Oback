@@ -250,10 +250,9 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         td.original = origDelegate;
         top.transitioningDelegate = td;
         _currentTD = td;
-        __weak UIViewController *weakTop = top;
         [top dismissViewControllerAnimated:YES completion:^{
-            UIViewController *t = weakTop;
-            if (t) t.transitioningDelegate = origDelegate; // 还原，避免 dangling assign + 后续 dismiss 被劫持
+            // MRC 下无 __weak，这里直接用 top：block 由 dismiss 短暂持有，top 不反向持有 block，无循环引用风险
+            top.transitioningDelegate = origDelegate; // 还原，避免 dangling assign + 后续 dismiss 被劫持
             OBLog(@"modal dismiss 完成, delegate 已还原");
             _currentTD = nil;
         }];
