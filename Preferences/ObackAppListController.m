@@ -171,9 +171,12 @@ static NSString *const kDomain = @"com.zlhkf.oback";
                                                  detail:nil
                                                      cell:PSTitleValueCell
                                                      edit:nil];
-    // 手动加载 App 图标（不依赖 PSApplicationCell / 无私有 API）
+    // 手动加载 App 图标（不依赖 PSApplicationCell / 无私有 API）。
+    // 注意：用字面量 @"iconImage" 而非 extern 常量 PSIconImageKey，
+    // 因为 PSIconImageKey 在本仓库 CI 的 theos 头文件集合里可能未声明，
+    // 直接用会因 -Werror 编译失败、不出 .deb。
     UIImage *icon = [self _iconImageForApp:app];
-    if (icon) [s setProperty:icon forKey:PSIconImageKey];
+    if (icon) [s setProperty:icon forKey:@"iconImage"];
     [s setProperty:bid forKey:@"appBundleID"];
     [s setAction:@selector(_toggleApp:)];
     [specs addObject:s];
