@@ -79,4 +79,12 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     return [self _bundleId:bid inList:raw];
 }
 
+// 调试日志总开关：设置面板「调试日志」(key=debugLog)，默认开（保持既有诊断能力）；
+// 日用机可关闭以节省磁盘写盘。
++ (BOOL)debugLogEnabled {
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    id v = [d objectForKey:@"debugLog"];
+    return v ? [v boolValue] : YES;   // 未设置 → 默认开
+}
+
 @end

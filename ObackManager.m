@@ -15,6 +15,7 @@ static NSString *OBLogPath(void) {
 }
 
 void OBLog(NSString *fmt, ...) {
+    if (![ObackPreferences debugLogEnabled]) return;   // 调试日志关闭 → 完全不写盘/不 NSLog（最省）
     va_list ap; va_start(ap, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);

@@ -6,4 +6,5 @@
 + (ObackParams *)params;
 + (BOOL)isAllowed;        // 统一判断：当前 App 是否允许生效（白名单/黑名单模式）
 + (BOOL)isBlacklisted;    // 原黑名单逻辑（isAllowed 内部复用）
++ (BOOL)debugLogEnabled;  // 调试日志总开关（设置面板「调试日志」），默认开
 @end
