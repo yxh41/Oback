@@ -14,6 +14,8 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 @property (nonatomic, assign) id<UIViewControllerTransitioningDelegate> original;
 @end
 
+@class ObackAnimator;   // 供 ObackInteractiveTransition 反向引用（下方声明）
+
 // 动画/手势参数（可被设置面板实时覆盖）
 @interface ObackParams : NSObject
 @property (nonatomic, assign) CGFloat triggerWidth;     // 边缘触发宽度 (pt)
@@ -40,7 +42,14 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 @property (nonatomic, retain) ObackParams *params;
 // YES=nav pop 视差(移动上一页)；NO=弹窗 dismiss 方案B(只动被 dismiss 的 sheet，绝不碰底层 presenting，避免黑屏)
 @property (nonatomic, assign) BOOL parallaxToView;
+// 速度感知弹簧核心：中断式动画器由 interruptibleAnimatorForTransition: 构建并缓存
+@property (nonatomic, retain) UIViewPropertyAnimator *propertyAnimator;
+// 松手速度/进度，由 ObackManager 在 endTransition 写入，finish 时经 applyReleaseVelocity 用于动量继承
+@property (nonatomic, assign) CGFloat releaseVelocity;
+@property (nonatomic, assign) CGFloat releasePercent;
 - (instancetype)initWithEdge:(ObackEdge)edge params:(ObackParams *)params;
+// 在 finish/cancel 前调用：用真实松手速度更新弹簧初速度（速度感知弹簧的关键；取消时速度已清零→温和回弹）
+- (void)applyReleaseVelocity;
 @end
 
 // 手势拖动时按百分比驱动同一套视差动画
@@ -52,6 +61,8 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 @property (nonatomic, retain) ObackParams *params;
 // 同 ObackAnimator.parallaxToView 含义
 @property (nonatomic, assign) BOOL parallaxToView;
+// 反向引用当前动画器，finish/cancel 时用来更新弹簧速度（assign：避免与动画器互相 retain 成环，MRC 无 __weak）
+@property (nonatomic, assign) ObackAnimator *animator;
 - (instancetype)initWithEdge:(ObackEdge)edge params:(ObackParams *)params;
 - (void)updateWithPercent:(CGFloat)percent;  // 0~1
 - (void)finish;   // 提交返回

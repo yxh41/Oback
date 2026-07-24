@@ -424,10 +424,13 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     CGFloat dir = (self.currentEdge == ObackEdgeLeft) ? 1.0 : -1.0;
     CGFloat vel = dir * v.x;   // 前向(朝返回方向)为正
 
-    // 记录松手时的前向速度/进度，供 ObackAnimator 做动量继承的弹性收尾（animateTransition 在 finish/cancel
-    // 后异步读取；本值在本次手势结束到下个手势 beginTransition 期间保持有效，不会被误清）。
+    // 记录松手时的前向速度/进度：
+    // - 写回 manager 自身（供诊断 / 下次 beginTransition 清零逻辑参考）
+    // - 同步写入当前动画器，finish 时经 applyReleaseVelocity 真正用于动量继承的弹簧初速度
     self.releaseVelocity = vel;
     self.releasePercent  = _currentPercent;
+    self.currentAnimator.releaseVelocity = vel;
+    self.currentAnimator.releasePercent  = _currentPercent;
 
     // 动量投影：按当前速度再投影约 0.12s 的惯性滑行距离，避免"快滑却因瞬时位移小被取消"。
     // 真机日志显示用户多为快速内滑(percent 仅 0.23~0.37 就松手)，纯位移阈值会误判取消。
@@ -446,19 +449,27 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // 仍指向该 td；释放会留下野指针。td 的生命周期由被 dismiss 的 VC 关联对象保证（见 beginTransition）。
     // 仅当本次手势确实触发了交互转场才 finish/cancel；纯点按未触发则什么都不碰，安全复位。
     if (_transitionTriggered) {
-        if (commit) [self.interactive finish];   // 走标准 finishInteractiveTransition（带视差）
-        else        [self.interactive cancel];   // 走标准 cancelInteractiveTransition
+        if (commit) [self.interactive finish];   // 提交：applyReleaseVelocity 已带真实速度→动量继承
+        else {
+            self.currentAnimator.releaseVelocity = 0;  // 取消：温和回弹，不带入前向速度
+            [self.interactive cancel];           // 走标准 cancelInteractiveTransition
+        }
     } else if (commit) {
         // 快滑但几乎无净位移（手势 Began→Ended 之间无有效横向移动，p 从未 >0.001），
         // 交互转场未启动；但速度已达提交阈值(commit=1) → 用户意图明确"一滑即回"。
         // 直接走系统动画 pop/dismiss（非交互，最干净），避免"胶囊飞出却没反应"的困惑。
         // 实测 oback_debug(10).log 第296行即此场景：percent=0.00 vel=723 projected=0.22 commit=1 triggered=0。
+        // 关键修复：先置 interacting=NO，让 delegate 返回 nil 交互控制器 → 真正非交互转场，
+        // 由系统动画自动完成（最干净），避免"交互控制器已返回却永不 finish"导致停滞冻结。
+        self.currentAnimator = nil;
+        self.interacting = NO;
         OBLog(@"endTransition: 快滑零位移，非交互直接返回 (vel=%.0f edge=%@)", vel,
               self.currentEdge == ObackEdgeLeft ? @"左" : @"右");
         [self triggerTransitionInWindow:win];
     }
     self.interacting = NO;
     self.interactive = nil;
+    self.currentAnimator = nil;   // assign 弱引用，显式清更安全
     _currentPercent = 0;
     _transitionTriggered = NO;
 }
@@ -478,6 +489,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     if (_transitionTriggered && self.interactive) [self.interactive cancel];
     self.interacting = NO;
     self.interactive = nil;
+    self.currentAnimator = nil;   // assign 弱引用，显式清更安全
     _currentPercent = 0;
     _transitionTriggered = NO;
 }

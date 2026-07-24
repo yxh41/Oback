@@ -46,10 +46,14 @@ static BOOL oback_shouldBackOff(void) {
                                   animationControllerForOperation:(UINavigationControllerOperation)operation
                                                fromViewController:(UIViewController *)from
                                                  toViewController:(UIViewController *)to {
+    [ObackManager shared].currentAnimator = nil;   // 先清，避免残留上一轮动画器
     // 仅在我们手势驱动返回时接管 pop 动画；普通返回按钮走 App 原生转场（避免破坏/黑屏）
     if (operation == UINavigationControllerOperationPop && [ObackManager shared].interacting) {
-        return [[ObackAnimator alloc] initWithEdge:[ObackManager shared].currentEdge
-                                           params:[ObackPreferences params]];
+        ObackAnimator *a = [[ObackAnimator alloc] initWithEdge:[ObackManager shared].currentEdge
+                                                      params:[ObackPreferences params]];
+        [ObackManager shared].interactive.animator = a;   // 反向引用，finish/cancel 时改弹簧速度
+        [ObackManager shared].currentAnimator = a;
+        return a;
     }
     if (_original && [_original respondsToSelector:_cmd])
         return [_original navigationController:nav animationControllerForOperation:operation
@@ -85,12 +89,15 @@ static BOOL oback_shouldBackOff(void) {
 @implementation ObackTransitioningDelegate
 
 - (id<UIViewControllerAnimatedTransitioning>)animationControllerForDismissedController:(UIViewController *)dismissed {
+    [ObackManager shared].currentAnimator = nil;   // 先清，避免残留上一轮动画器
     // 仅在手势驱动返回时接管 dismiss 动画；普通关闭按钮等系统 dismiss 走 App 原生动画，
     // 避免对 fullScreen / 系统自带 modal 强行套自定义转场导致黑屏（此前无条件返回是黑屏根因之一）
     if ([ObackManager shared].interacting) {
         ObackAnimator *a = [[ObackAnimator alloc] initWithEdge:[ObackManager shared].currentEdge
                                                       params:[ObackPreferences params]];
         a.parallaxToView = [ObackManager shared].currentParallaxToView;  // 弹窗 dismiss 置 NO(方案B: 只动 sheet)
+        [ObackManager shared].interactive.animator = a;   // 反向引用，finish/cancel 时改弹簧速度
+        [ObackManager shared].currentAnimator = a;
         return a;
     }
     if (_original && [_original respondsToSelector:_cmd])
