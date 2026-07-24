@@ -129,7 +129,8 @@ static void OBApplyParallax(CGFloat percent,
 // 中断式动画器：速度感知弹簧的核心。系统对交互转场会暂停它并按 updateWithPercent 设定 fractionComplete，
 // finish 时 ObackInteractiveTransition 调 [animator applyReleaseVelocity] 更新弹簧初速度后由系统续完。
 - (id<UIViewImplicitlyAnimating>)interruptibleAnimatorForTransition:(id<UIViewControllerContextTransitioning>)ctx {
-    if (_propertyAnimator) return _propertyAnimator;
+    OBLog(@"interruptible ENTER (pa=%p)", _propertyAnimator);
+    if (_propertyAnimator) { OBLog(@"interruptible cached return pa=%p", _propertyAnimator); return _propertyAnimator; }
 
     UIView *container = ctx.containerView;
     UIViewController *from = [ctx viewControllerForKey:UITransitionContextFromViewControllerKey];
@@ -168,7 +169,8 @@ static void OBApplyParallax(CGFloat percent,
         OBLog(@"animator done (cancelled=%d)", cancelled);
         blockSelf = nil;   // 打破循环引用（MRC 无 __weak）
     }];
-    _propertyAnimator = anim;
+    self.propertyAnimator = anim;   // retain 属性赋值（anim 为 autorelease，直接赋 ivar 会在 drain 后野指针）
+    OBLog(@"interruptible built pa=%p", _propertyAnimator);
     return anim;
 }
 
@@ -258,11 +260,10 @@ static void OBApplyParallax(CGFloat percent,
 
 - (void)finish {
     // 提交前先用真实松手速度更新弹簧初速度（动量继承），再交给系统续完
-    // 诊断：先打 self.animator / propertyAnimator 状态，回退到 currentAnimator 以防反向引用为 nil
+    // 诊断：先打 self / self.animator / currentAnimator / propertyAnimator 指针，定位反向引用为何为 nil
     ObackAnimator *anim = self.animator ?: [ObackManager shared].currentAnimator;
-    OBLog(@"oback-intc finish (animator=%@ pa=%@)",
-          anim ? @"set" : @"nil",
-          (anim && anim.propertyAnimator) ? @"set" : @"nil");
+    OBLog(@"oback-intc finish (self=%p self.animator=%p current=%p pa=%p)",
+          self, self.animator, [ObackManager shared].currentAnimator, anim.propertyAnimator);
     [anim applyReleaseVelocity];
     [super finishInteractiveTransition];
 }
@@ -270,9 +271,8 @@ static void OBApplyParallax(CGFloat percent,
 - (void)cancel {
     // 取消前更新弹簧（ObackManager 已把速度清零→温和回弹），再交给系统回弹
     ObackAnimator *anim = self.animator ?: [ObackManager shared].currentAnimator;
-    OBLog(@"oback-intc cancel (animator=%@ pa=%@)",
-          anim ? @"set" : @"nil",
-          (anim && anim.propertyAnimator) ? @"set" : @"nil");
+    OBLog(@"oback-intc cancel (self=%p self.animator=%p current=%p pa=%p)",
+          self, self.animator, [ObackManager shared].currentAnimator, anim.propertyAnimator);
     [anim applyReleaseVelocity];
     [super cancelInteractiveTransition];
 }

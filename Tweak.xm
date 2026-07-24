@@ -46,24 +46,31 @@ static BOOL oback_shouldBackOff(void) {
                                   animationControllerForOperation:(UINavigationControllerOperation)operation
                                                fromViewController:(UIViewController *)from
                                                  toViewController:(UIViewController *)to {
+    BOOL interacting = [ObackManager shared].interacting;
+    OBLog(@"nav-anim query (op=%ld interacting=%d)", (long)operation, interacting);
     [ObackManager shared].currentAnimator = nil;   // 先清，避免残留上一轮动画器
     // 仅在我们手势驱动返回时接管 pop 动画；普通返回按钮走 App 原生转场（避免破坏/黑屏）
-    if (operation == UINavigationControllerOperationPop && [ObackManager shared].interacting) {
+    if (operation == UINavigationControllerOperationPop && interacting) {
         ObackAnimator *a = [[ObackAnimator alloc] initWithEdge:[ObackManager shared].currentEdge
                                                       params:[ObackPreferences params]];
         [ObackManager shared].interactive.animator = a;   // 反向引用，finish/cancel 时改弹簧速度
         [ObackManager shared].currentAnimator = a;
+        OBLog(@"nav-anim -> ObackAnimator a=%p interactive=%p", a, [ObackManager shared].interactive);
         return a;
     }
+    id ret = nil;
     if (_original && [_original respondsToSelector:_cmd])
-        return [_original navigationController:nav animationControllerForOperation:operation
+        ret = [_original navigationController:nav animationControllerForOperation:operation
                             fromViewController:from toViewController:to];
-    return nil;
+    OBLog(@"nav-anim -> %@ (original/nil path)", ret ? NSStringFromClass([ret class]) : @"nil");
+    return ret;
 }
 
 - (id<UIViewControllerInteractiveTransitioning>)navigationController:(UINavigationController *)nav
                          interactionControllerForAnimationController:(id<UIViewControllerAnimatedTransitioning>)animator {
-    if ([ObackManager shared].interacting && [animator isKindOfClass:[ObackAnimator class]])
+    BOOL interacting = [ObackManager shared].interacting;
+    OBLog(@"nav-intc query (animator=%@ interacting=%d)", NSStringFromClass([animator class]), interacting);
+    if (interacting && [animator isKindOfClass:[ObackAnimator class]])
         return [ObackManager shared].interactive;
     if (_original && [_original respondsToSelector:_cmd])
         return [_original navigationController:nav interactionControllerForAnimationController:animator];
