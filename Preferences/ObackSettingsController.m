@@ -3,27 +3,28 @@
 //  Oback 设置页主控制器 —— 由 Root.plist 描述所有开关/滑块/文本框，
 //  域统一为 com.zlhkf.oback（与 ObackPreferences.m 的 initWithSuiteName 一致）。
 //
-//  滑块样式（仿截图）：每行左侧显示参数名称，右侧实时显示当前数值+单位，
-//  用户拖动滑块时右侧数值即时更新，一眼就知道在调什么、调了多少。
+//  滑块样式（仿截图）：每行右侧显示当前数值+单位（小字、靠上），
+//  用户拖动滑块时即时跟手更新。
 //
 
 #import "ObackSettingsController.h"
 #import <UIKit/UIKit.h>
 #import <Preferences/PSSpecifier.h>
+#import <objc/runtime.h>
 
-// ── 每个滑块 key 对应的 (格式化串, 单位后缀) ──────────────────────────────
-static NSDictionary *_obSliderFormats(void) {
+// ── 每个滑块 key 对应的单位后缀 ──────────────────────────────
+static NSDictionary *_obSliderUnits(void) {
     static NSDictionary *d = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         d = @{
-            @"triggerWidth":    @[@"%.0f", @" pt"],      // 触发宽度 → "40 pt"
-            @"parallaxOffset":  @[@"%.2f", @""],          // 视差位移 → "0.30"
-            @"previousScaleMin": @[@"%.2f", @""],          // 上一页缩放 → "0.92"
-            @"dimAlpha":        @[@"%.2f", @""],          // 遮罩浓度 → "0.35"
-            @"duration":        @[@"%.2f", @" s"],        // 动画时长 → "0.32 s"
-            @"commitRatio":     @[@"%.2f", @""],          // 提交位移阈值 → "0.30"
-            @"commitVelocity":  @[@"%.0f", @""]           // 提交速度阈值 → "400"
+            @"triggerWidth":    @" pt",
+            @"parallaxOffset":  @"",
+            @"previousScaleMin": @"",
+            @"dimAlpha":        @"",
+            @"duration":        @" s",
+            @"commitRatio":     @"",
+            @"commitVelocity":  @"",
         };
     });
     return d;
@@ -40,7 +41,7 @@ static NSDictionary *_obSliderFormats(void) {
     return _specifiers;
 }
 
-#pragma mark - PSSliderCell delegate（min/max/current 文字）
+#pragma mark - PSSliderCell delegate（端点文字）
 
 // 端点值保持简洁：>=1 整数，<1 两位小数
 - (NSString *)slider:(id)slider titleForMinimumValue:(float)value {
@@ -50,24 +51,23 @@ static NSDictionary *_obSliderFormats(void) {
     return [self _obFormatValue:value];
 }
 
-// 当前值——除了返回给滑块自用的文字外，同时刷新我们的右侧数值标签（实时跟手）
+// 当前值也格式化一下（PSSliderCell 自身也可能显示）
 - (NSString *)slider:(id)slider titleForCurrentValue:(float)value {
-    NSString *key = [self _obKeyForSlider:slider];
-    if (key) [self _obUpdateValueLabelForKey:key value:value];
     return [self _obFormatValue:value];
 }
 
-#pragma mark - 右侧实时数值标签（截图样式核心）
+#pragma mark - 右侧实时数值标签 + UISlider 监听
 
-/*  布局示意（仿用户截图）：
+/*  布局示意：
  *
- *  ┌──────────────────────────────────────────────┐
- *  │ 触发宽度                        40 pt       │  ← 标签名(左) + 数值+单位(右)
- *  │  [───●─────────────────────────]             │  ← PSSliderCell 自带滑块
- *  └──────────────────────────────────────────────┘
+ *  ┌──────────────────────────────────────────┐
+ *  │ 触发宽度 (pt)                   40 pt   │  ← label 行(小字,靠上)
+ *  │  [───●──────────────────────────]        │  ← PSSliderCell 滑块
+ *  └──────────────────────────────────────────┘
  *
- *  在 willDisplayCell: 里给每个 PSSliderCell 的 contentView
- *  右上角挂一个 UILabel，通过 slider:titleForCurrentValue: 实时更新。
+ *  willDisplayCell: 里做两件事：
+ *  1. 找到 PSSliderCell 内嵌的 UISlider，从 .value 读真值初始化标签
+ *  2. 给 UISlider 加 UIControlEventValueChanged → _obSliderChanged: 跟手更新
  */
 
 - (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -76,20 +76,26 @@ static NSDictionary *_obSliderFormats(void) {
     if (!spec) return;
 
     NSString *key = [spec propertyForKey:@"key"];
-    NSArray *fmt = _obSliderFormats()[key];
-    if (!fmt) return;   // 非滑块行，跳过
+    if (!_obSliderUnits()[key]) return;   // 非滑块行，跳过
 
-    // 从 UserDefaults 读当前真实值
-    float value = [[NSUserDefaults standardUserDefaults] floatForKey:key];
-    NSString *text = [self _obTextForKey:key value:value];
+    // ── 在 PSSliderCell 内部找到 UISlider ──
+    UISlider *slider = nil;
+    for (UIView *sub in cell.contentView.subviews) {
+        if ([sub isKindOfClass:[UISlider class]]) { slider = (UISlider *)sub; break; }
+        // 某些版本 PSSliderCell 可能包一层容器
+        for (UIView *deep in sub.subviews) {
+            if ([deep isKindOfClass:[UISlider class]]) { slider = (UISlider *)deep; break; }
+        }
+        if (slider) break;
+    }
+    if (!slider) return;
 
-    // 复用或创建右侧数值标签
+    // ── 创建/复用右侧数值标签（小字、靠上、紧凑） ──
     UILabel *lbl = _valueLabels[key];
     if (!lbl || !lbl.superview) {
-        lbl = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 72, 28)];
+        lbl = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 60, 18)];
         lbl.textAlignment = NSTextAlignmentRight;
-        lbl.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-        // iOS 13+ secondaryLabelColor / 兼容旧版 darkGrayColor
+        lbl.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
         if (@available(iOS 13.0, *)) {
             lbl.textColor = [UIColor secondaryLabelColor];
         } else {
@@ -99,66 +105,49 @@ static NSDictionary *_obSliderFormats(void) {
         [cell.contentView addSubview:lbl];
         if (!_valueLabels) _valueLabels = [NSMutableDictionary dictionary];
         _valueLabels[key] = lbl;
-    }
-    lbl.text = text;
 
-    // 定位到 cell 右上角（避开 accessory 区域）
-    CGFloat margin = (cell.accessoryView || cell.accessoryType != UITableViewCellAccessoryNone) ? 48 : 12;
+        // 监听 slider 值变化（跟手更新，比 slider:titleForCurrentValue: 可靠得多）
+        [slider addTarget:self action:@selector(_obSliderChanged:) forControlEvents:UIControlEventValueChanged];
+        // 用关联对象把 key 绑到 slider 上，_obSliderChanged: 可直接取
+        objc_setAssociatedObject(slider, "ob_key", key, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    }
+
+    // 从 slider.value 读真值（滑块位置永远是对的，不依赖 UserDefaults 默认值注册）
+    [self _obRefreshLabel:lbl key:key value:slider.value];
+
+    // 定位：右上角，垂直偏上（在滑块上方，不抢滑块视觉空间）
+    CGFloat margin = 16;
     CGFloat w = cell.contentView.bounds.size.width;
     if (w > 0) {
-        lbl.frame = CGRectMake(w - 72 - margin,
-                               (cell.contentView.bounds.size.height - 28) * 0.5,
-                               72, 28);
+        lbl.frame = CGRectMake(w - 60 - margin,
+                               2,   // 贴顶，与 label 文字基线对齐
+                               60, 18);
     }
+}
+
+// UISlider UIControlEventValueChanged 回调 —— 直接跟手更新标签
+- (void)_obSliderChanged:(UISlider *)sender {
+    NSString *key = objc_getAssociatedObject(sender, "ob_key");
+    if (!key) return;
+    UILabel *lbl = _valueLabels[key];
+    if (!lbl) return;
+    [self _obRefreshLabel:lbl key:key value:sender.value];
 }
 
 #pragma mark - 内部辅助
 
-// 简单格式化（仅用于滑块端点/自身文字）：>=1 整数，<1 两位小数（字面量格式串，安全）
+// 格式化：>=1 整数，<1 两位小数
 - (NSString *)_obFormatValue:(float)v {
     return (v >= 1.0f)
         ? [NSString stringWithFormat:@"%.0f", v]
         : [NSString stringWithFormat:@"%.2f", v];
 }
 
-// 组合「数值 + 单位」显示文本（用 NSNumberFormatter 绕过 -Wformat-security 检查）
-- (NSString *)_obTextForKey:(NSString *)key value:(float)value {
-    NSArray *fmt = _obSliderFormats()[key];
-    if (!fmt) return [self _obFormatValue:value];
-
-    NSNumberFormatter *nf = [[NSNumberFormatter alloc] init];
-    nf.numberStyle = NSNumberFormatterDecimalStyle;
-    nf.maximumFractionDigits = (value >= 1.0f) ? 0 : 2;
-    nf.minimumFractionDigits = (value >= 1.0f) ? 0 : 2;
-    NSString *num = [nf stringFromNumber:@(value)];
-    return [num stringByAppendingString:fmt[1]];
-}
-
-// 通过遍历 specifiers 找到包含该 UISlider 的那一行的 key
-// （PSSliderCell 把 UISlider 作为子视图嵌入；slider 参数即该 UISlider 实例）
-- (NSString *)_obKeyForSlider:(UISlider *)slider {
-    if (!slider || ![slider isKindOfClass:[UISlider class]]) return nil;
-    for (PSSpecifier *spec in self.specifiers) {
-        if (![[spec propertyForKey:@"cell"] isEqualToString:@"PSSliderCell"]) continue;
-        UITableViewCell *cell = [self cachedCellForSpecifier:spec];
-        if (!cell) continue;
-        for (UIView *sub in cell.contentView.subviews) {
-            if ([sub isEqual:slider]) return [spec propertyForKey:@"key"];
-            if ([sub isKindOfClass:[UISlider class]]) {
-                for (UIView *deep in sub.subviews) {
-                    if ([deep isEqual:slider]) return [spec propertyForKey:@"key"];
-                }
-            }
-        }
-    }
-    return nil;   // 找不到就跳过（不影响功能）
-}
-
-// 刷新指定 key 的右侧数值标签
-- (void)_obUpdateValueLabelForKey:(NSString *)key value:(float)value {
-    UILabel *lbl = _valueLabels[key];
-    if (!lbl) return;
-    lbl.text = [self _obTextForKey:key value:value];
+// 刷新标签文字：数值 + 单位
+- (void)_obRefreshLabel:(UILabel *)lbl key:(NSString *)key value:(float)value {
+    NSString *unit = _obSliderUnits()[key] ?: @"";
+    NSString *num = [self _obFormatValue:value];
+    lbl.text = [num stringByAppendingString:unit];
 }
 
 @end
