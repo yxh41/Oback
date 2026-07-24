@@ -294,6 +294,22 @@
             <key>footnote</key>
             <string>关（默认）：不输出。开：在「调试日志」也开启的前提下，每次边缘起滑时把窗口内所有边缘返回手势的类名打进日志，用于定位「一次滑动返回两层」中的第二层（原生为 UIScreenEdgePanGestureRecognizer，其它类名即插件私有手势）。定位完请关闭。</string>
         </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSGroupCell</string>
+            <key>label</key>
+            <string>维护</string>
+            <key>footerText</key>
+            <string>将所有 Oback 设置恢复为默认值。已选的白名单 / 黑名单程序、以及灵敏度等各项调节都会被清空。</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSButtonCell</string>
+            <key>label</key>
+            <string>重置设置</string>
+            <key>action</key>
+            <string>resetSettings</string>
+        </dict>
     </array>
 </dict>
 </plist>
