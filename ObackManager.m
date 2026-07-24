@@ -277,6 +277,12 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         UIImpactFeedbackGenerator *g = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
         [g impactOccurred];
     }
+    // 实时补链：本 window 可能在我们初次(windowBecameKey)枚举之后才压入分组/子容器，
+    // 其边缘返回手势从未被链接 → 加固对它形同虚设。故每次确认接管时，对当前窗口重新
+    // 枚举并让所有边缘返回手势失败于我们的 pan（幂等无害：requireGestureRecognizerToFail
+    // 为成对依赖，设一次即持久；且依赖在每个 touch 事件重评估 → 当次滑动也会被持续压制，
+    // 因我们的 pan 在手指移动期间保持交互态不会失败，故对方边缘手势整段被阻塞，只弹一层）。
+    [self _linkNavPopGesturesInWindow:win];
     // 关键修复：胶囊在 shouldBegin=YES 时即显示，而非等 Began。左边缘会被系统原生
     // interactivePopGestureRecognizer（UIScreenEdgePanGestureRecognizer）抢走，导致我们的手势
     // 永远进不了 Began，胶囊若只在 Began 显示则左边缘永不出现（日志实证：左边缘 shouldBegin=YES
