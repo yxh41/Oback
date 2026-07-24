@@ -86,7 +86,7 @@
             <key>defaults</key>
             <string>com.zlhkf.oback</string>
             <key>default</key>
-            <real>24</real>
+            <real>40</real>
             <key>min</key>
             <real>8</real>
             <key>max</key>
