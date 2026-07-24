@@ -25,10 +25,11 @@ static BOOL oback_shouldBackOff(void) {
         NSString *name = [NSString stringWithUTF8String:img];
         if (!name) continue;
         for (NSString *n in incompatible) {
-            if ([[name lastPathComponent] hasPrefix:n]) { _obackBackOff = YES; return YES; }
+            if ([[name lastPathComponent] hasPrefix:n]) { _obackBackOff = YES; OBLog(@"oback backoff resolved = 1 (检测到 %@)", n); return YES; }
         }
     }
     _obackBackOff = NO;
+    OBLog(@"oback backoff resolved = 0 (无冲突插件)");
     return NO;
 }
 

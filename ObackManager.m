@@ -370,7 +370,17 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
 
     if (nav && nav.viewControllers.count > 1) {
-        OBLog(@"beginTransition: pop nav (childCount=%lu)", (unsigned long)nav.viewControllers.count);
+        id nd = nav.delegate;
+        OBLog(@"beginTransition: pop nav (childCount=%lu) delegateBefore=%@",
+              (unsigned long)nav.viewControllers.count,
+              nd ? NSStringFromClass([nd class]) : @"(nil)");
+        // 兜底：强制确保 ObackNavDelegate 转发器就位。
+        // 若 setDelegate: 因时机（早期设置未触发 hook）/ 退避门控 / 子类覆写等原因没装，
+        // 这里再 setDelegate: 一次触发 hook 重新包装；已是 ObackNavDelegate 则幂等透传。
+        [nav setDelegate:nd];
+        OBLog(@"pop nav delegateAfter=%@ isOback=%d",
+              nav.delegate ? NSStringFromClass([nav.delegate class]) : @"(nil)",
+              (int)[[nav.delegate class] isSubclassOfClass:NSClassFromString(@"ObackNavDelegate")]);
         self.currentParallaxToView = YES;   // nav pop 视差（移动上一页）
         [nav popViewControllerAnimated:YES];
     } else if (top.presentingViewController) {
