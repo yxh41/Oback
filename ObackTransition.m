@@ -122,6 +122,18 @@ static void OBApplyParallax(CGFloat percent,
     BOOL reduceMotion = UIAccessibilityIsReduceMotionEnabled();
     BOOL spring = self.params.springEnabled && !reduceMotion;
 
+    // 诊断：animateTransition 入口确定会执行（交互转场动画确实在跑），放此处可可靠确认走了弹簧还是线性分支。
+    // 注：完成 block 的 OBLog 在 UIPercentDrivenInteractiveTransition 内部收尾流程里不触发，故改用入口日志。
+    CGFloat _w = fromView.window ? fromView.window.bounds.size.width : [UIScreen mainScreen].bounds.size.width;
+    if (_w <= 0) _w = [UIScreen mainScreen].bounds.size.width;
+    CGFloat _rem = MAX(0.0, 1.0 - startP);
+    CGFloat _dur = spring ? MAX(0.22, MIN(0.46, self.params.duration * (0.55 + 0.45 * _rem)))
+                          : self.params.duration;
+    CGFloat _sv = (_w > 0) ? (vel / _w) : 0.0;   // 弹簧初速度（相对全程）
+    _sv = MAX(-2.0, MIN(2.0, _sv));
+    OBLog(@"animator start (edge=%@ spring=%d reduce=%d vel=%.0f startP=%.2f dur=%.2f sv=%.2f)",
+          self.edge == ObackEdgeLeft ? @"左" : @"右", spring, reduceMotion, vel, startP, _dur, _sv);
+
     void (^animations)(void) = ^{
         OBApplyParallax(1, fromView, toView, dim, self.edge, self.params, self.parallaxToView);
     };
@@ -134,17 +146,11 @@ static void OBApplyParallax(CGFloat percent,
 
     if (spring) {
         // ② 动量继承：前向速度换算为 spring 初速度（API 中 1 = 全程距离/秒）；按剩余进度动态时长。
-        CGFloat w = fromView.window ? fromView.window.bounds.size.width : [UIScreen mainScreen].bounds.size.width;
-        if (w <= 0) w = [UIScreen mainScreen].bounds.size.width;
-        CGFloat remaining = MAX(0.0, 1.0 - startP);
-        // 拉得越多（remaining 越小）收尾越快；范围 0.22~0.46s，配合 0.82 阻尼，松手即有"被吸过去"的高级感。
-        CGFloat dur = MAX(0.22, MIN(0.46, self.params.duration * (0.55 + 0.45 * remaining)));
-        CGFloat sv = (w > 0) ? (vel / w) : 0.0;   // 初速度（相对全程）
-        sv = MAX(-2.0, MIN(2.0, sv));
-        [UIView animateWithDuration:dur
+        // _dur / _sv 已在上方诊断处算出，直接复用，行为不变。
+        [UIView animateWithDuration:_dur
                               delay:0
              usingSpringWithDamping:0.82
-              initialSpringVelocity:sv
+              initialSpringVelocity:_sv
                             options:UIViewAnimationOptionBeginFromCurrentState
                          animations:animations
                          completion:completion];
