@@ -158,7 +158,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     [self _linkNavPopGesturesInWindow:win];
 }
 
-#pragma mark - 让原生左边缘返回手势失败于我们的手势（杜绝双返回）
+#pragma mark - 让其他左边缘返回手势失败于我们的手势（杜绝双返回）
 
 // 递归收集窗口 VC 树里所有 UINavigationController
 - (void)_enumerateNavControllersFrom:(UIViewController *)vc block:(void(^)(UINavigationController *nav))block {
@@ -170,23 +170,46 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         [self _enumerateNavControllersFrom:vc.presentedViewController block:block];
 }
 
-// 让窗口内所有 nav 的原生 interactivePopGestureRecognizer 失败于我们的 window pan。
-// 关键：requireGestureRecognizerToFail: 是「成对依赖」关系，App 即便随后把 enabled 重新置 YES，
-// 原生手势的 begin 仍被系统判定为必须先等我们的 pan 失败——从而从根上消除「一次滑动被两套手势各弹一层」。
+// 递归收集窗口视图树里所有 UIScreenEdgePanGestureRecognizer（含 App/插件自定义的左边缘返回手势）。
+// 注意：我们的 window pan 是 UIPanGestureRecognizer 子类（非 UIScreenEdgePanGestureRecognizer），
+// 故 isKindOfClass 过滤已天然排除它，无需额外判等。深度护栏避免超大视图树爆栈。
+- (void)_enumerateEdgeGesturesInView:(UIView *)view depth:(NSUInteger)depth
+                               block:(void(^)(UIScreenEdgePanGestureRecognizer *g))block {
+    if (!view || !block || depth > 40) return;
+    for (UIGestureRecognizer *g in view.gestureRecognizers) {
+        if ([g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) block((UIScreenEdgePanGestureRecognizer *)g);
+    }
+    for (UIView *sub in view.subviews)
+        [self _enumerateEdgeGesturesInView:sub depth:depth + 1 block:block];
+}
+
+// 让窗口内所有「边缘返回手势」失败于我们的 window pan。
+// 关键：requireGestureRecognizerToFail: 是「成对依赖」关系，App/插件即便随后把 enabled 重新置 YES，
+// 其手势的 begin 仍被系统判定为必须先等我们的 pan 失败——无论对手是系统原生 interactivePop，
+// 还是某越狱插件（如微信分组）添加的私有边缘返回手势，同一根手指都只认我们的单次 pop，
+// 从根上消除「一次滑动弹两层」（含插件场景）。
 - (void)_linkNavPopGesturesInWindow:(UIWindow *)win {
     if (!win) return;
     ObackPanGestureRecognizer *pan = objc_getAssociatedObject(win, kPanKey);
     if (!pan) { OBLog(@"linkNav: 本 window 无 Oback pan，跳过链接"); return; }
     CFTimeInterval t0 = CACurrentMediaTime();
     __block NSUInteger linked = 0;
+    // 第一道防线：直接关掉 nav 原生 interactivePop（左边缘专属）
     [self _enumerateNavControllersFrom:win.rootViewController block:^(UINavigationController *nav){
-        nav.interactivePopGestureRecognizer.enabled = NO;   // 第一道防线：直接关掉
+        nav.interactivePopGestureRecognizer.enabled = NO;
         @try { [nav.interactivePopGestureRecognizer requireGestureRecognizerToFail:pan]; }
-        @catch (NSException *e) { OBLog(@"linkNav: requireGestureRecognizerToFail 异常: %@", e); }
+        @catch (NSException *e) { OBLog(@"linkNav: nav requireGestureRecognizerToFail 异常: %@", e); }
+        linked++;
+    }];
+    // 第二道防线：枚举窗口里所有 UIScreenEdgePanGestureRecognizer（含插件自定义的边缘返回手势），
+    // 让它们全部失败于我们的 pan——plugin 私有的边缘手势也能压住，杜绝「一次滑动弹两层」。
+    [self _enumerateEdgeGesturesInView:win depth:0 block:^(UIScreenEdgePanGestureRecognizer *g){
+        @try { [g requireGestureRecognizerToFail:pan]; }
+        @catch (NSException *e) { OBLog(@"linkNav: edge requireGestureRecognizerToFail 异常: %@", e); }
         linked++;
     }];
     CFTimeInterval dt = (CACurrentMediaTime() - t0) * 1000.0;
-    OBLog(@"linkNav: 链接 %lu 个 nav 的 interactivePop (耗时 %.2f ms) @window=%@",
+    OBLog(@"linkNav: 链接 %lu 个返回手势 (耗时 %.2f ms) @window=%@",
           (unsigned long)linked, dt, NSStringFromClass([win class]));
 }
 
