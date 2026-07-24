@@ -261,7 +261,6 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     UINavigationController *nav = top.navigationController;
     if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
 
-    ObackParams *p = [ObackPreferences params];
     if (nav && nav.viewControllers.count > 1) {
         OBLog(@"beginTransition: pop nav (childCount=%lu)", (unsigned long)nav.viewControllers.count);
         self.currentParallaxToView = YES;   // nav pop 视差（移动上一页）
