@@ -6,6 +6,7 @@
 #import "ObackPreferences.h"
 
 static void *kNavDelegateKey = &kNavDelegateKey;
+extern void *kPanKey;   // 定义于 ObackManager.m：window 上挂载的 Oback 全屏 pan 手势
 
 #pragma mark - 冲突插件退避
 // 已知与 Oback 在系统进程/App 内交互、会因此触发对方插件 nil 崩溃（安全模式）的共存 tweak。
@@ -151,6 +152,17 @@ static BOOL oback_shouldBackOff(void) {
     fd.original = delegate;
     // 关闭系统自带左边缘返回，避免和我们手势双重触发
     self.interactivePopGestureRecognizer.enabled = NO;
+    // 让原生手势"失败于"我们的 window pan：即使 App 后续把 enabled 重新置 YES（微信常这么做），
+    // 原生手势的 begin 仍须等我们的手势先失败，从根上杜绝"一次滑动被两套手势各弹一层"的双返回。
+    UIWindow *win = self.view.window;
+    if (!win) win = self.topViewController.view.window;
+    if (win) {
+        id pan = objc_getAssociatedObject(win, kPanKey);
+        if (pan) {
+            @try { [self.interactivePopGestureRecognizer requireGestureRecognizerToFail:pan]; }
+            @catch (NSException *e) {}
+        }
+    }
     %orig(fd);
 }
 

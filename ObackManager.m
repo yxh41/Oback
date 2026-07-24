@@ -42,6 +42,7 @@ void OBLog(NSString *fmt, ...) {
 
 static void *kAttachedKey = &kAttachedKey;
 static void *kObackTDKey = &kObackTDKey;   // 让被 dismiss 的 VC 自己 retain 其 transition 转发器，避免野指针
+void *kPanKey = &kPanKey;                  // 暴露给 Tweak.xm：window 上挂载的 Oback 全屏 pan 手势（用于让原生 interactivePop 失败于它）
 static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指移动的距离 (pt)
 
 #pragma mark - 边缘方向指示胶囊（OPPO 风格：跟随手指、带方向箭头）
@@ -134,20 +135,51 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 }
 
 - (void)windowBecameKey:(NSNotification *)n {
-    if ([n.object isKindOfClass:[UIWindow class]]) [self attachToWindow:n.object];
+    if ([n.object isKindOfClass:[UIWindow class]]) {
+        [self attachToWindow:n.object];
+        [self _linkNavPopGesturesInWindow:(UIWindow *)n.object];  // 成为 key 时重新链接（nav 可能刚压入/呈现）
+    }
 }
 
 - (void)attachToWindow:(UIWindow *)win {
     if (!win) return;
-    if (objc_getAssociatedObject(win, kAttachedKey)) return;  // 每个 window 只挂一次
+    if (objc_getAssociatedObject(win, kAttachedKey)) { [self _linkNavPopGesturesInWindow:win]; return; }  // 已挂过：仍重新链接（nav 可能刚出现）
     ObackPanGestureRecognizer *pan = [[ObackPanGestureRecognizer alloc] initWithTarget:self
                                                                                  action:@selector(handlePan:)];
     pan.delegate = self;
     pan.maximumNumberOfTouches = 1;
     [win addGestureRecognizer:pan];
     objc_setAssociatedObject(win, kAttachedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(win, kPanKey, pan, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     OBLog(@"attached pan gesture to window %@ (bounds=%.0fx%.0f)", win,
           win.bounds.size.width, win.bounds.size.height);
+    [self _linkNavPopGesturesInWindow:win];
+}
+
+#pragma mark - 让原生左边缘返回手势失败于我们的手势（杜绝双返回）
+
+// 递归收集窗口 VC 树里所有 UINavigationController
+- (void)_enumerateNavControllersFrom:(UIViewController *)vc block:(void(^)(UINavigationController *nav))block {
+    if (!vc || !block) return;
+    if ([vc isKindOfClass:[UINavigationController class]]) block((UINavigationController *)vc);
+    for (UIViewController *child in vc.childViewControllers)
+        [self _enumerateNavControllersFrom:child block:block];
+    if (vc.presentedViewController)
+        [self _enumerateNavControllersFrom:vc.presentedViewController block:block];
+}
+
+// 让窗口内所有 nav 的原生 interactivePopGestureRecognizer 失败于我们的 window pan。
+// 关键：requireGestureRecognizerToFail: 是「成对依赖」关系，App 即便随后把 enabled 重新置 YES，
+// 原生手势的 begin 仍被系统判定为必须先等我们的 pan 失败——从而从根上消除「一次滑动被两套手势各弹一层」。
+- (void)_linkNavPopGesturesInWindow:(UIWindow *)win {
+    if (!win) return;
+    ObackPanGestureRecognizer *pan = objc_getAssociatedObject(win, kPanKey);
+    if (!pan) return;
+    [self _enumerateNavControllersFrom:win.rootViewController block:^(UINavigationController *nav){
+        nav.interactivePopGestureRecognizer.enabled = NO;   // 第一道防线：直接关掉
+        @try { [nav.interactivePopGestureRecognizer requireGestureRecognizerToFail:pan]; }
+        @catch (NSException *e) {}
+    }];
 }
 
 #pragma mark - UIGestureRecognizerDelegate
