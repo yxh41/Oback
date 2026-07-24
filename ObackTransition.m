@@ -164,7 +164,8 @@ static void OBApplyParallax(CGFloat percent,
     }];
     [anim addCompletion:^(UIViewAnimatingPosition finalPosition) {
         [dim removeFromSuperview];
-        BOOL cancelled = (finalPosition == UIViewAnimatingPositionStart);
+        // 以 interactiveCancelled 为准（finish=NO/cancel=YES），避免反向动画 finalPosition 误判
+        BOOL cancelled = blockSelf.interactiveCancelled || (finalPosition == UIViewAnimatingPositionStart);
         [ctx completeTransition:!cancelled];
         OBLog(@"animator done (cancelled=%d)", cancelled);
         blockSelf = nil;   // 打破循环引用（MRC 无 __weak）
@@ -251,30 +252,46 @@ static void OBApplyParallax(CGFloat percent,
     return self;
 }
 
-// 以下三个方法均走 UIPercentDrivenInteractiveTransition 标准实现：
-// 由它来驱动 ObackAnimator 的 animateTransition: 动画进度，并在 finish/cancel 时
-// 正确复位导航控制器的"交互中"状态（否则导航会一直卡在交互转场态 → 界面冻结、点不动）。
+#pragma mark - UIViewControllerInteractiveTransitioning
+// 必选方法。此处无需保存 context：动画器由 self.animator 持有，completeTransition 在其 completion 调用。
+// （不再继承 UIPercentDrivenInteractiveTransition：它内部靠驱动 animateTransition: 里的 UIView 动画，
+//  而本 tweak 的动画在 interruptibleAnimatorForTransition: 的 UIViewPropertyAnimator 里，二者并存时
+//  在微信等自定义 nav 下会导致动画器不被续跑→completeTransition 永不触发→界面冻结。）
+- (void)startInteractiveTransition:(id<UIViewControllerContextTransitioning>)transitionContext {
+}
+
+// 直接驱动中断式动画器的 fractionComplete（Apple 推荐：实现 interruptibleAnimatorForTransition: 时
+// 不要用 UIPercentDrivenInteractiveTransition，改为手动设 fractionComplete）。
 - (void)updateWithPercent:(CGFloat)percent {
-    [self updateInteractiveTransition:percent];
+    UIViewPropertyAnimator *pa = self.animator.propertyAnimator;
+    if (!pa) return;
+    if (pa.state == UIViewAnimatingStateInactive) {
+        [pa pauseAnimation];   // inactive -> 启动并立即暂停，进入可 scrub 态
+    }
+    pa.fractionComplete = percent;
 }
 
 - (void)finish {
-    // 提交前先用真实松手速度更新弹簧初速度（动量继承），再交给系统续完
-    // 诊断：先打 self / self.animator / currentAnimator / propertyAnimator 指针，定位反向引用为何为 nil
+    // 提交前先用真实松手速度更新弹簧初速度（动量继承），再续跑动画器到 end
     ObackAnimator *anim = self.animator ?: [ObackManager shared].currentAnimator;
-    OBLog(@"oback-intc finish (self=%p self.animator=%p current=%p pa=%p)",
-          self, self.animator, [ObackManager shared].currentAnimator, anim.propertyAnimator);
-    [anim applyReleaseVelocity];
-    [super finishInteractiveTransition];
+    UIViewPropertyAnimator *pa = anim.propertyAnimator;
+    OBLog(@"oback-intc finish (self=%p animator=%p pa=%p)", self, anim, pa);
+    if (pa && pa.state == UIViewAnimatingStateInactive) [pa pauseAnimation];
+    anim.interactiveCancelled = NO;
+    [anim applyReleaseVelocity];   // 更新弹簧初速度并 continueAnimation（续跑到 end -> completion 触发 completeTransition）
 }
 
 - (void)cancel {
-    // 取消前更新弹簧（ObackManager 已把速度清零→温和回弹），再交给系统回弹
+    // 取消：反向续跑动画器回到 start（弹簧回弹），completion 以 interactiveCancelled=YES 调 completeTransition:NO
     ObackAnimator *anim = self.animator ?: [ObackManager shared].currentAnimator;
-    OBLog(@"oback-intc cancel (self=%p self.animator=%p current=%p pa=%p)",
-          self, self.animator, [ObackManager shared].currentAnimator, anim.propertyAnimator);
-    [anim applyReleaseVelocity];
-    [super cancelInteractiveTransition];
+    UIViewPropertyAnimator *pa = anim.propertyAnimator;
+    OBLog(@"oback-intc cancel (self=%p animator=%p pa=%p)", self, anim, pa);
+    if (!pa) return;
+    if (pa.state == UIViewAnimatingStateInactive) [pa pauseAnimation];
+    if (pa.state == UIViewAnimatingStateActive)   [pa pauseAnimation];
+    anim.interactiveCancelled = YES;
+    pa.reversed = YES;   // 反向续跑 -> 回到 start -> completion 以 cancelled=YES 调 completeTransition:NO
+    [pa continueAnimationWithTimingParameters:pa.timingParameters];
 }
 
 @end

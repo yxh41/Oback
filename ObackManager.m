@@ -462,7 +462,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         if (commit) [self.interactive finish];   // 提交：applyReleaseVelocity 已带真实速度→动量继承
         else {
             self.currentAnimator.releaseVelocity = 0;  // 取消：温和回弹，不带入前向速度
-            [self.interactive cancel];           // 走标准 cancelInteractiveTransition
+            [self.interactive cancel];           // 反向续跑动画器回弹（直接驱动中断式动画器）
         }
     } else if (commit) {
         // 快滑但几乎无净位移（手势 Began→Ended 之间无有效横向移动，p 从未 >0.001），
@@ -494,7 +494,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     UIWindow *win = (UIWindow *)pan.view;
     ObackParams *p = [ObackPreferences params];
     if (_indicator) [self dismissIndicatorCommitted:NO params:p window:win];
-    // 仅当本次手势确实触发了转场才 cancel（走标准 cancelInteractiveTransition）；
+    // 仅当本次手势确实触发了转场才 cancel（直接驱动中断式动画器反向回弹）；
     // 未触发则什么都不碰，安全复位，避免误调用导致导航卡在交互态。
     if (_transitionTriggered && self.interactive) [self.interactive cancel];
     self.interacting = NO;

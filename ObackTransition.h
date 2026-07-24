@@ -54,21 +54,26 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 // 松手速度/进度，由 ObackManager 在 endTransition 写入，finish 时经 applyReleaseVelocity 用于动量继承
 @property (nonatomic, assign) CGFloat releaseVelocity;
 @property (nonatomic, assign) CGFloat releasePercent;
+// finish=NO / cancel=YES：供 completion 决定 completeTransition 方向（避免反向动画 finalPosition 误判导致取消却提交了 pop）
+@property (nonatomic, assign) BOOL interactiveCancelled;
 - (instancetype)initWithEdge:(ObackEdge)edge params:(ObackParams *)params;
 // 在 finish/cancel 前调用：用真实松手速度更新弹簧初速度（速度感知弹簧的关键；取消时速度已清零→温和回弹）
 - (void)applyReleaseVelocity;
 @end
 
-// 手势拖动时按百分比驱动同一套视差动画
-// 关键：必须是 UIPercentDrivenInteractiveTransition 子类，才能用标准的
-// updateInteractiveTransition: / finishInteractiveTransition / cancelInteractiveTransition
-// 驱动 UIKit 复位导航控制器的"交互中"状态；否则导航会一直卡在交互转场态 → 界面冻结。
-@interface ObackInteractiveTransition : UIPercentDrivenInteractiveTransition
+// 手势拖动时按百分比驱动同一套视差动画（中断式动画器）。
+// 因 ObackAnimator 实现了 interruptibleAnimatorForTransition:，按 Apple 推荐模式：
+// 交互控制器直接驱动其 UIViewPropertyAnimator 的 fractionComplete，并在 finish/cancel 时
+// 续跑/反向续跑它；completeTransition 由动画器 completion 自动调用（见 ObackAnimator）。
+// 不再继承 UIPercentDrivenInteractiveTransition —— 它内部靠驱动 animateTransition: 里的 UIView 动画，
+// 而本 tweak 的动画在中断式动画器里，二者并存时部分 App(如微信自定义 nav)下动画器不被续跑
+// → completeTransition 永不触发 → 界面冻结。直接驱动可消除该冲突。
+@interface ObackInteractiveTransition : NSObject <UIViewControllerInteractiveTransitioning>
 @property (nonatomic, assign) ObackEdge edge;
 @property (nonatomic, retain) ObackParams *params;
 // 同 ObackAnimator.parallaxToView 含义
 @property (nonatomic, assign) BOOL parallaxToView;
-// 反向引用当前动画器，finish/cancel 时用来更新弹簧速度（assign：避免与动画器互相 retain 成环，MRC 无 __weak）
+// 反向引用当前动画器，finish/cancel 时用来更新弹簧速度/续跑（assign：避免与动画器互相 retain 成环，MRC 无 __weak）
 @property (nonatomic, assign) ObackAnimator *animator;
 - (instancetype)initWithEdge:(ObackEdge)edge params:(ObackParams *)params;
 - (void)updateWithPercent:(CGFloat)percent;  // 0~1
