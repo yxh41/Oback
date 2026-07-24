@@ -174,7 +174,7 @@ static void OBApplyParallax(CGFloat percent,
     CGFloat w = [UIScreen mainScreen].bounds.size.width;
     CGFloat sv = (w > 0) ? (self.releaseVelocity / w) : 0.0;
     sv = MAX(-2.0, MIN(2.0, sv));   // 弹簧初速度（相对全程）
-    id<UITimingCurveProvider> tp;
+    NSObject<UITimingCurveProvider> *tp;
     if (spring) {
         tp = [[UISpringTimingParameters alloc] initWithDampingRatio:0.82
                                                        initialVelocity:CGVectorMake(sv, 0.0)];
@@ -184,7 +184,7 @@ static void OBApplyParallax(CGFloat percent,
     }
     OBLog(@"animator spring applied (spring=%d vel=%.0f startP=%.2f sv=%.2f)",
           spring, self.releaseVelocity, self.releasePercent, sv);
-    [_propertyAnimator continueAnimationWithTimingParameters:tp];
+    [(id)_propertyAnimator continueAnimationWithTimingParameters:tp];
     [tp release];   // MRC：alloc 所得；方法内部已拷贝 timing，此处释放所有权
 }
 
