@@ -21,6 +21,9 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     if ((v = [d objectForKey:@"leftEnabled"]))      p.leftEnabled      = [v boolValue];
     if ((v = [d objectForKey:@"rightEnabled"]))     p.rightEnabled     = [v boolValue];
     if ((v = [d objectForKey:@"hapticEnabled"]))    p.hapticEnabled    = [v boolValue];
+    if ((v = [d objectForKey:@"springEnabled"]))    p.springEnabled    = [v boolValue];
+    if ((v = [d objectForKey:@"cardCornerEnabled"])) p.cardCornerEnabled = [v boolValue];
+    if ((v = [d objectForKey:@"cardCornerValue"]))  p.cardCornerValue  = [v doubleValue];
     return p;
 }
 

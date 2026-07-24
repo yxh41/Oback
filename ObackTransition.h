@@ -28,6 +28,9 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 @property (nonatomic, assign) NSTimeInterval duration;   // 释放后补间时长 (s)
 @property (nonatomic, assign) CGFloat commitRatio;       // 提交返回的最小位移比例
 @property (nonatomic, assign) CGFloat commitVelocity;    // 提交返回的最小速度 (pt/s)
+@property (nonatomic, assign) BOOL    springEnabled;     // 释放后弹性补间(动量继承)，默认开
+@property (nonatomic, assign) BOOL    cardCornerEnabled; // 弹窗下拉时卡片圆角(模拟 iOS sheet 下拉)，默认关
+@property (nonatomic, assign) CGFloat cardCornerValue;   // 弹窗圆角最大值 (pt)
 + (instancetype)defaults;
 @end
 

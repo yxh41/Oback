@@ -335,6 +335,10 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 }
 
 - (void)beginTransition:(UIPanGestureRecognizer *)pan {
+    // 新手势开始：清空上一次松手速度/进度，避免遗留值串入本次动画
+    self.releaseVelocity = 0;
+    self.releasePercent  = 0;
+
     UIWindow *win = (UIWindow *)pan.view;
     UIViewController *top = [self topMost:win.rootViewController];
     if (!top) return;
@@ -420,6 +424,11 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     CGFloat dir = (self.currentEdge == ObackEdgeLeft) ? 1.0 : -1.0;
     CGFloat vel = dir * v.x;   // 前向(朝返回方向)为正
 
+    // 记录松手时的前向速度/进度，供 ObackAnimator 做动量继承的弹性收尾（animateTransition 在 finish/cancel
+    // 后异步读取；本值在本次手势结束到下个手势 beginTransition 期间保持有效，不会被误清）。
+    self.releaseVelocity = vel;
+    self.releasePercent  = _currentPercent;
+
     // 动量投影：按当前速度再投影约 0.12s 的惯性滑行距离，避免"快滑却因瞬时位移小被取消"。
     // 真机日志显示用户多为快速内滑(percent 仅 0.23~0.37 就松手)，纯位移阈值会误判取消。
     CGFloat projected = _currentPercent;
@@ -457,6 +466,9 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 // 手势意外失败(Failed/超时等)时的紧急清理：取消转场+消除胶囊，防止残留
 - (void)abortTransition:(UIPanGestureRecognizer *)pan {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(dismissIndicatorSafety) object:nil];
+    // 手势意外失败（无明确释放速度）：清速度为 0，让取消动画走温和回弹（不继承动量）
+    self.releaseVelocity = 0;
+    self.releasePercent  = 0;
     OBLog(@"abortTransition (state=%ld)", (long)pan.state);
     UIWindow *win = (UIWindow *)pan.view;
     ObackParams *p = [ObackPreferences params];

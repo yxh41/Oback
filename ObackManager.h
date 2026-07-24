@@ -12,4 +12,6 @@
 @property (nonatomic, retain) ObackInteractiveTransition *interactive; // 当前交互控制器
 @property (nonatomic, retain) id currentTD;                             // 本次手势驱动的 modal dismiss 转场转发器
 @property (nonatomic, assign) BOOL currentParallaxToView;               // 当前手势是否弹窗 dismiss(只动 sheet)
+@property (nonatomic, assign) CGFloat releaseVelocity;  // 松手时前向(朝返回方向)速度 (pt/s)，供 ObackAnimator 做动量继承
+@property (nonatomic, assign) CGFloat releasePercent;   // 松手时拖动进度 (0~1)，供 ObackAnimator 计算动态收尾时长
 @end
