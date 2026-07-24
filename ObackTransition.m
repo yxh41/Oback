@@ -1,6 +1,13 @@
 #import "ObackTransition.h"
 #import "ObackManager.h"   // 读取松手速度/进度做动量继承（ObackManager.h 已 import ObackTransition.h，无循环依赖）
 
+// 该 SDK 头未在本编译单元暴露 UIViewImplicitlyAnimating 协议的
+// continueAnimationWithTimingParameters: 声明，-Werror 会把它误判为 error。
+// 这里用分类声明让编译器识别（运行时该方法由系统实现，无冲突、无重复实现）。
+@interface UIViewPropertyAnimator (ObackContinue)
+- (void)continueAnimationWithTimingParameters:(id)parameters;
+@end
+
 // 核心：根据百分比把"当前页"和"上一页"摆到位，模拟 OPPO 视差
 // parallaxToView=YES  → nav pop：上一页(presenting/toView)探出+放大（视差），当前页平移。
 // parallaxToView=NO   → 弹窗 dismiss 方案B：只动被 dismiss 的 fromView(sheet 滑出+轻微缩小)，
@@ -184,7 +191,7 @@ static void OBApplyParallax(CGFloat percent,
     }
     OBLog(@"animator spring applied (spring=%d vel=%.0f startP=%.2f sv=%.2f)",
           spring, self.releaseVelocity, self.releasePercent, sv);
-    [(id)_propertyAnimator continueAnimationWithTimingParameters:tp];
+    [_propertyAnimator continueAnimationWithTimingParameters:tp];
     [tp release];   // MRC：alloc 所得；方法内部已拷贝 timing，此处释放所有权
 }
 
