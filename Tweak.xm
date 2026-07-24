@@ -8,9 +8,10 @@
 static void *kNavDelegateKey = &kNavDelegateKey;
 extern void *kPanKey;   // 定义于 ObackManager.m：window 上挂载的 Oback 全屏 pan 手势
 
-#pragma mark - 冲突插件退避
-// 已知与 Oback 在系统进程/App 内交互、会因此触发对方插件 nil 崩溃（安全模式）的共存 tweak。
-// 命中即本进程完全不激活 Oback（setDelegate 透传 + 不启动手势），避免双 tweak 打架把对方逼崩。
+#pragma mark - 冲突插件检测（仅诊断，不再阻断）
+// 已知与 Oback 可能共存的 tweak（如 AppTool）。以前命中即完全退避（setDelegate 透传），会掐掉
+// Oback 的 nav 自定义动画。现已解除退避——ObackNavDelegate 安全转发，fd 必为最外层，动画接管由
+// Oback 决定。此处仅保留运行时检测并打日志，供真机验证共存风险。
 // 检测在运行时（App 启动后所有 dylib 已加载）惰性解析一次并缓存，避免 %ctor 阶段顺序问题导致漏检。
 static BOOL _obackBackOffResolved = NO;
 static BOOL _obackBackOff = NO;
@@ -141,16 +142,18 @@ static BOOL oback_shouldBackOff(void) {
 %hook UINavigationController
 
 - (void)setDelegate:(id)delegate {
-    // 冲突插件退避：命中已知不兼容共存 tweak（如 AppTool）时完全透传，不做任何包装/禁用手势，
-    // 避免双 tweak 交互触发对方 nil 崩溃（安全模式）。这是 Oback 在自己可控范围内能做的最大规避。
-    if (oback_shouldBackOff()) {
-        %orig;
-        return;
-    }
-    // 当前 App 不在生效范围（白/黑名单）时，直接透传原方法，不做任何包装
+    // [2026-07-25 变更] 解除 AppTool 退避：此前命中 AppTool 时完全透传、永不包装 ObackNavDelegate，
+    // 导致 nav 自定义动画（视差/胶囊/动量）整个被掐掉。现改为即使检测到 AppTool 共存也正常包装 fd——
+    // ObackNavDelegate 已实现 forwardingTargetForSelector:，对未实现方法安全转发回原 delegate，
+    // 不会让 AppTool 收到 nil；且 fd 必为 nav.delegate 最外层，动画接管由 Oback 决定，AppTool 通过
+    // forwarding 仍能收到 delegate 消息。与 AppTool 共存的手势双触发/卡死/黑屏风险需真机验证。
+    // 当前 App 不在生效范围（白/黑名单）时，仍直接透传原方法，不做任何包装
     if (![ObackPreferences isAllowed]) {
         %orig;
         return;
+    }
+    if (oback_shouldBackOff()) {
+        OBLog(@"oback: 检测到 AppTool 共存，已解除退避，正常包装 fd（共存风险待真机验证）");
     }
     // 避免递归：已是我们自己的转发器时直接调用原方法（透传原参数）
     if ([delegate isKindOfClass:[ObackNavDelegate class]]) {
