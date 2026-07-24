@@ -175,7 +175,10 @@ static void OBApplyParallax(CGFloat percent,
 // 在 finish/cancel 前由 ObackInteractiveTransition 调用：用真实松手速度更新弹簧初速度，实现动量继承。
 // 取消时 ObackManager 已把 releaseVelocity 清零→温和回弹；提交时带入真实速度→快甩更快归位。
 - (void)applyReleaseVelocity {
-    if (!_propertyAnimator) return;
+    if (!_propertyAnimator) {
+        OBLog(@"applyReleaseVelocity SKIP (propertyAnimator=nil)");
+        return;
+    }
     BOOL reduceMotion = UIAccessibilityIsReduceMotionEnabled();
     BOOL spring = self.params.springEnabled && !reduceMotion;
     CGFloat w = [UIScreen mainScreen].bounds.size.width;
@@ -255,13 +258,22 @@ static void OBApplyParallax(CGFloat percent,
 
 - (void)finish {
     // 提交前先用真实松手速度更新弹簧初速度（动量继承），再交给系统续完
-    [self.animator applyReleaseVelocity];
+    // 诊断：先打 self.animator / propertyAnimator 状态，回退到 currentAnimator 以防反向引用为 nil
+    ObackAnimator *anim = self.animator ?: [ObackManager shared].currentAnimator;
+    OBLog(@"oback-intc finish (animator=%@ pa=%@)",
+          anim ? @"set" : @"nil",
+          (anim && anim.propertyAnimator) ? @"set" : @"nil");
+    [anim applyReleaseVelocity];
     [super finishInteractiveTransition];
 }
 
 - (void)cancel {
     // 取消前更新弹簧（ObackManager 已把速度清零→温和回弹），再交给系统回弹
-    [self.animator applyReleaseVelocity];
+    ObackAnimator *anim = self.animator ?: [ObackManager shared].currentAnimator;
+    OBLog(@"oback-intc cancel (animator=%@ pa=%@)",
+          anim ? @"set" : @"nil",
+          (anim && anim.propertyAnimator) ? @"set" : @"nil");
+    [anim applyReleaseVelocity];
     [super cancelInteractiveTransition];
 }
 
