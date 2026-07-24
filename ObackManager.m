@@ -136,8 +136,10 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 
 - (void)windowBecameKey:(NSNotification *)n {
     if ([n.object isKindOfClass:[UIWindow class]]) {
-        [self attachToWindow:n.object];
-        [self _linkNavPopGesturesInWindow:(UIWindow *)n.object];  // 成为 key 时重新链接（nav 可能刚压入/呈现）
+        UIWindow *win = (UIWindow *)n.object;
+        OBLog(@"windowBecameKey: %@ (isKeyNow=%d)", NSStringFromClass([win class]), win.isKeyWindow);
+        [self attachToWindow:win];
+        [self _linkNavPopGesturesInWindow:win];  // 成为 key 时重新链接（nav 可能刚压入/呈现）
     }
 }
 
@@ -174,12 +176,18 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 - (void)_linkNavPopGesturesInWindow:(UIWindow *)win {
     if (!win) return;
     ObackPanGestureRecognizer *pan = objc_getAssociatedObject(win, kPanKey);
-    if (!pan) return;
+    if (!pan) { OBLog(@"linkNav: 本 window 无 Oback pan，跳过链接"); return; }
+    CFTimeInterval t0 = CACurrentMediaTime();
+    __block NSUInteger linked = 0;
     [self _enumerateNavControllersFrom:win.rootViewController block:^(UINavigationController *nav){
         nav.interactivePopGestureRecognizer.enabled = NO;   // 第一道防线：直接关掉
         @try { [nav.interactivePopGestureRecognizer requireGestureRecognizerToFail:pan]; }
-        @catch (NSException *e) {}
+        @catch (NSException *e) { OBLog(@"linkNav: requireGestureRecognizerToFail 异常: %@", e); }
+        linked++;
     }];
+    CFTimeInterval dt = (CACurrentMediaTime() - t0) * 1000.0;
+    OBLog(@"linkNav: 链接 %lu 个 nav 的 interactivePop (耗时 %.2f ms) @window=%@",
+          (unsigned long)linked, dt, NSStringFromClass([win class]));
 }
 
 #pragma mark - UIGestureRecognizerDelegate
