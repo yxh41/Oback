@@ -41,7 +41,10 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 @end
 
 // 手势拖动时按百分比驱动同一套视差动画
-@interface ObackInteractiveTransition : NSObject <UIViewControllerInteractiveTransitioning>
+// 关键：必须是 UIPercentDrivenInteractiveTransition 子类，才能用标准的
+// updateInteractiveTransition: / finishInteractiveTransition / cancelInteractiveTransition
+// 驱动 UIKit 复位导航控制器的"交互中"状态；否则导航会一直卡在交互转场态 → 界面冻结。
+@interface ObackInteractiveTransition : UIPercentDrivenInteractiveTransition
 @property (nonatomic, assign) ObackEdge edge;
 @property (nonatomic, retain) ObackParams *params;
 // 同 ObackAnimator.parallaxToView 含义

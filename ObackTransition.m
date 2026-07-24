@@ -1,10 +1,5 @@
 #import "ObackTransition.h"
 
-// 私有扩展：补一个「已完成」标记，避免 completeTransition 被重复调用（UIKit 会告警/异常）
-@interface ObackInteractiveTransition ()
-@property (nonatomic, assign) BOOL completed;
-@end
-
 // 核心：根据百分比把"当前页"和"上一页"摆到位，模拟 OPPO 视差
 // parallaxToView=YES  → nav pop：上一页(presenting/toView)探出+放大（视差），当前页平移。
 // parallaxToView=NO   → 弹窗 dismiss 方案B：只动被 dismiss 的 fromView(sheet 滑出+轻微缩小)，
@@ -67,13 +62,6 @@ static void OBApplyParallax(CGFloat percent,
     p.commitVelocity   = 400.0;
     return p;
 }
-@end
-
-@interface ObackInteractiveTransition ()
-@property (nonatomic, retain) id<UIViewControllerContextTransitioning> ctx;
-@property (nonatomic, retain) UIView *fromView;
-@property (nonatomic, retain) UIView *toView;
-@property (nonatomic, retain) UIView *dimView;
 @end
 
 @implementation ObackAnimator
@@ -143,66 +131,19 @@ static void OBApplyParallax(CGFloat percent,
     return self;
 }
 
-- (void)startInteractiveTransition:(id<UIViewControllerContextTransitioning>)ctx {
-    _ctx = ctx;
-    _completed = NO;
-    UIView *container = ctx.containerView;
-    _fromView = [ctx viewControllerForKey:UITransitionContextFromViewControllerKey].view;
-    _toView   = [ctx viewControllerForKey:UITransitionContextToViewControllerKey].view;
-    OBLog(@"interactive transition begin (fromView=%@ toViewInWindow=%d)",
-          _fromView, (_toView && _toView.window) ? 1 : 0);
-
-    if (_toView.superview != container) [container insertSubview:_toView atIndex:0];
-
-    _dimView = [[UIView alloc] initWithFrame:container.bounds];
-    _dimView.backgroundColor = [UIColor blackColor];
-    _dimView.alpha = 0;
-    _dimView.userInteractionEnabled = NO;   // 关键：遮罩绝不拦截触摸
-    [container insertSubview:_dimView aboveSubview:_toView];
-    [container bringSubviewToFront:_fromView];
-
-    [self applyShadowTo:_fromView];
-    [self updateWithPercent:0];
-}
-
+// 以下三个方法均走 UIPercentDrivenInteractiveTransition 标准实现：
+// 由它来驱动 ObackAnimator 的 animateTransition: 动画进度，并在 finish/cancel 时
+// 正确复位导航控制器的"交互中"状态（否则导航会一直卡在交互转场态 → 界面冻结、点不动）。
 - (void)updateWithPercent:(CGFloat)percent {
-    OBApplyParallax(percent, _fromView, _toView, _dimView, self.edge, self.params, self.parallaxToView);
-}
-
-- (void)applyShadowTo:(UIView *)v {
-    v.layer.shadowColor = [UIColor blackColor].CGColor;
-    v.layer.shadowOpacity = self.params.shadowEnabled ? self.params.shadowOpacity : 0.0;
-    v.layer.shadowRadius = 12.0;
-    v.layer.shadowOffset = CGSizeMake((self.edge == ObackEdgeLeft ? -6.0 : 6.0), 0.0);
-    v.layer.masksToBounds = NO;
+    [self updateInteractiveTransition:percent];
 }
 
 - (void)finish {
-    [UIView animateWithDuration:self.params.duration
-                          delay:0
-                        options:UIViewAnimationOptionCurveEaseOut
-                     animations:^{
-        OBApplyParallax(1, _fromView, _toView, _dimView, self.edge, self.params, self.parallaxToView);
-    } completion:^(BOOL finished) {
-        if (_completed) return; _completed = YES;
-        [_dimView removeFromSuperview];
-        [_ctx completeTransition:YES];
-        OBLog(@"interactive transition finished (finished=%d)", finished);
-    }];
+    [self finishInteractiveTransition];
 }
 
 - (void)cancel {
-    [UIView animateWithDuration:self.params.duration
-                          delay:0
-                        options:UIViewAnimationOptionCurveEaseOut
-                     animations:^{
-        OBApplyParallax(0, _fromView, _toView, _dimView, self.edge, self.params, self.parallaxToView);
-    } completion:^(BOOL finished) {
-        if (_completed) return; _completed = YES;
-        [_dimView removeFromSuperview];
-        [_ctx completeTransition:NO];
-        OBLog(@"interactive transition cancelled (finished=%d)", finished);
-    }];
+    [self cancelInteractiveTransition];
 }
 
 @end
