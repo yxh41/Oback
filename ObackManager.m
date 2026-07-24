@@ -340,10 +340,18 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     if (_indicator) [self dismissIndicatorCommitted:commit params:p window:win];
     // 注意：这里不释放 currentTD —— 弹窗若 cancel 仍 present，其 transitioningDelegate(assign)
     // 仍指向该 td；释放会留下野指针。td 的生命周期由被 dismiss 的 VC 关联对象保证（见 beginTransition）。
-    // 仅当本次手势确实触发了转场才 finish/cancel；纯点按未触发则什么都不碰，安全复位。
+    // 仅当本次手势确实触发了交互转场才 finish/cancel；纯点按未触发则什么都不碰，安全复位。
     if (_transitionTriggered) {
-        if (commit) [self.interactive finish];   // 走标准 finishInteractiveTransition
+        if (commit) [self.interactive finish];   // 走标准 finishInteractiveTransition（带视差）
         else        [self.interactive cancel];   // 走标准 cancelInteractiveTransition
+    } else if (commit) {
+        // 快滑但几乎无净位移（手势 Began→Ended 之间无有效横向移动，p 从未 >0.001），
+        // 交互转场未启动；但速度已达提交阈值(commit=1) → 用户意图明确"一滑即回"。
+        // 直接走系统动画 pop/dismiss（非交互，最干净），避免"胶囊飞出却没反应"的困惑。
+        // 实测 oback_debug(10).log 第296行即此场景：percent=0.00 vel=723 projected=0.22 commit=1 triggered=0。
+        OBLog(@"endTransition: 快滑零位移，非交互直接返回 (vel=%.0f edge=%@)", vel,
+              self.currentEdge == ObackEdgeLeft ? @"左" : @"右");
+        [self triggerTransitionInWindow:win];
     }
     self.interacting = NO;
     self.interactive = nil;
