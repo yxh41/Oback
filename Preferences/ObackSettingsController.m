@@ -9,6 +9,7 @@
 
 #import "ObackSettingsController.h"
 #import <UIKit/UIKit.h>
+#import <Preferences/PSSpecifier.h>
 
 // ── 每个滑块 key 对应的 (格式化串, 单位后缀) ──────────────────────────────
 static NSDictionary *_obSliderFormats(void) {
@@ -75,13 +76,12 @@ static NSDictionary *_obSliderFormats(void) {
     if (!spec) return;
 
     NSString *key = [spec propertyForKey:@"key"];
-    NSDictionary *fmt = _obSliderFormats()[key];
+    NSArray *fmt = _obSliderFormats()[key];
     if (!fmt) return;   // 非滑块行，跳过
 
     // 从 UserDefaults 读当前真实值
     float value = [[NSUserDefaults standardUserDefaults] floatForKey:key];
-    NSString *text = [NSString stringWithFormat:@"%@%@", fmt[0], fmt[1]];
-    text = [[NSString alloc] initWithFormat:text, value];
+    NSString *text = [self _obTextForKey:key value:value];
 
     // 复用或创建右侧数值标签
     UILabel *lbl = _valueLabels[key];
@@ -114,10 +114,24 @@ static NSDictionary *_obSliderFormats(void) {
 
 #pragma mark - 内部辅助
 
+// 简单格式化（仅用于滑块端点/自身文字）：>=1 整数，<1 两位小数（字面量格式串，安全）
 - (NSString *)_obFormatValue:(float)v {
     return (v >= 1.0f)
         ? [NSString stringWithFormat:@"%.0f", v]
         : [NSString stringWithFormat:@"%.2f", v];
+}
+
+// 组合「数值 + 单位」显示文本（用 NSNumberFormatter 绕过 -Wformat-security 检查）
+- (NSString *)_obTextForKey:(NSString *)key value:(float)value {
+    NSArray *fmt = _obSliderFormats()[key];
+    if (!fmt) return [self _obFormatValue:value];
+
+    NSNumberFormatter *nf = [[NSNumberFormatter alloc] init];
+    nf.numberStyle = NSNumberFormatterDecimalStyle;
+    nf.maximumFractionDigits = (value >= 1.0f) ? 0 : 2;
+    nf.minimumFractionDigits = (value >= 1.0f) ? 0 : 2;
+    NSString *num = [nf stringFromNumber:@(value)];
+    return [num stringByAppendingString:fmt[1]];
 }
 
 // 通过遍历 specifiers 找到包含该 UISlider 的那一行的 key
@@ -128,11 +142,9 @@ static NSDictionary *_obSliderFormats(void) {
         if (![[spec propertyForKey:@"cell"] isEqualToString:@"PSSliderCell"]) continue;
         UITableViewCell *cell = [self cachedCellForSpecifier:spec];
         if (!cell) continue;
-        // PSSliderCell 的 UISlider 通常直接是子视图或子视图的子视图
         for (UIView *sub in cell.contentView.subviews) {
-            if (sub == slider || [sub isKindOfClass:[UISlider class]]) {
-                if ([sub isEqual:slider]) return [spec propertyForKey:@"key"];
-                // 再深一层找
+            if ([sub isEqual:slider]) return [spec propertyForKey:@"key"];
+            if ([sub isKindOfClass:[UISlider class]]) {
                 for (UIView *deep in sub.subviews) {
                     if ([deep isEqual:slider]) return [spec propertyForKey:@"key"];
                 }
@@ -146,9 +158,7 @@ static NSDictionary *_obSliderFormats(void) {
 - (void)_obUpdateValueLabelForKey:(NSString *)key value:(float)value {
     UILabel *lbl = _valueLabels[key];
     if (!lbl) return;
-    NSArray *fmt = _obSliderFormats()[key];
-    if (!fmt) return;
-    lbl.text = [[NSString stringWithFormat:@"%@%@", fmt[0], fmt[1]] initWithFormat:value];
+    lbl.text = [self _obTextForKey:key value:value];
 }
 
 @end
