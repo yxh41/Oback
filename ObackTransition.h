@@ -1,7 +1,14 @@
 #import <UIKit/UIKit.h>
 
 // 诊断日志（实现见 ObackManager.m，写共享文件 /var/mobile/oback_debug.log + syslog）
+// extern "C" 守卫：Tweak.xm 被 Theos 当 ObjC++ 编译，无此声明会按 C++ 链接查 mangled 名导致链接失败
+#ifdef __cplusplus
+extern "C" {
+#endif
 void OBLog(NSString *fmt, ...);
+#ifdef __cplusplus
+}
+#endif
 
 // 触发边缘
 typedef NS_ENUM(NSInteger, ObackEdge) {
