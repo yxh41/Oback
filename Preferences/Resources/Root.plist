@@ -280,6 +280,20 @@
             <key>footnote</key>
             <string>关：完全不写日志（最省）。开（默认）：记录手势触发/提交/取消，便于定位问题。</string>
         </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSSwitchCell</string>
+            <key>label</key>
+            <string>双返回诊断</string>
+            <key>key</key>
+            <string>doubleReturnDiag</string>
+            <key>defaults</key>
+            <string>com.zlhkf.oback</string>
+            <key>default</key>
+            <false/>
+            <key>footnote</key>
+            <string>关（默认）：不输出。开：在「调试日志」也开启的前提下，每次边缘起滑时把窗口内所有边缘返回手势的类名打进日志，用于定位「一次滑动返回两层」中的第二层（原生为 UIScreenEdgePanGestureRecognizer，其它类名即插件私有手势）。定位完请关闭。</string>
+        </dict>
     </array>
 </dict>
 </plist>

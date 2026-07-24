@@ -43,6 +43,7 @@ void OBLog(NSString *fmt, ...) {
 static void *kAttachedKey = &kAttachedKey;
 static void *kObackTDKey = &kObackTDKey;   // 让被 dismiss 的 VC 自己 retain 其 transition 转发器，避免野指针
 void *kPanKey = &kPanKey;                  // 暴露给 Tweak.xm：window 上挂载的 Oback 全屏 pan 手势（用于让原生 interactivePop 失败于它）
+static void *kDiagLastLogKey = &kDiagLastLogKey;  // 双返回诊断：同一 window 日志节流（每 2s 最多打一次手势清单）
 static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指移动的距离 (pt)
 
 #pragma mark - 边缘方向指示胶囊（OPPO 风格：跟随手指、带方向箭头）
@@ -211,6 +212,30 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     CFTimeInterval dt = (CACurrentMediaTime() - t0) * 1000.0;
     OBLog(@"linkNav: 链接 %lu 个返回手势 (耗时 %.2f ms) @window=%@",
           (unsigned long)linked, dt, NSStringFromClass([win class]));
+    [self _diagLogEdgeGesturesInWindow:win];   // 双返回诊断（开关关闭时无输出，且自带节流）
+}
+
+// 双返回诊断：列出本 window 视图树里所有「边缘返回手势」的精确类名 + 所属视图类。
+// 原生系统手势固定为 UIScreenEdgePanGestureRecognizer；任何**其它类名**都来自 App/越狱插件
+// 的私有边缘返回手势——若双返回仍在，对照日志里多出来的类名即可定位「第二层」到底是谁。
+// 注意：本函数完全受「调试日志」总开关门控（走 OBLog），且同一 window 每 2s 最多打一次，避免刷屏。
+- (void)_diagLogEdgeGesturesInWindow:(UIWindow *)win {
+    if (![ObackPreferences doubleReturnDiagEnabled]) return;
+    // 节流：同一 window 2s 内只打一次清单（每次边缘起滑都会触发补链，不节流会刷屏）
+    NSNumber *last = objc_getAssociatedObject(win, kDiagLastLogKey);
+    CFTimeInterval now = CACurrentMediaTime();
+    if (last && (now - [last doubleValue]) < 2.0) return;
+    objc_setAssociatedObject(win, kDiagLastLogKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    [self _enumerateEdgeGesturesInView:win depth:0 block:^(UIScreenEdgePanGestureRecognizer *g){
+        NSString *cls = NSStringFromClass([g class]);
+        UIView *v = g.view;
+        NSString *owner = v ? NSStringFromClass([v class]) : @"(无宿主视图)";
+        [names addObject:[NSString stringWithFormat:@"%@(宿主:%@)", cls, owner]];
+    }];
+    OBLog(@"diag[双返回]: window=%@ | 边缘返回手势共 %lu → %@",
+          NSStringFromClass([win class]), (unsigned long)names.count, names);
 }
 
 #pragma mark - UIGestureRecognizerDelegate

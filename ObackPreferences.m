@@ -87,4 +87,13 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     return v ? [v boolValue] : YES;   // 未设置 → 默认开
 }
 
+// 双返回诊断开关：设置面板「双返回诊断」(key=doubleReturnDiag)，默认关。
+// 开启后，每次边缘起滑补链时把本 window 所有边缘返回手势的精确类名打进日志，
+// 便于定位「一次滑动返回两层」中的「第二层」是系统原生还是某插件私有手势。
++ (BOOL)doubleReturnDiagEnabled {
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    id v = [d objectForKey:@"doubleReturnDiag"];
+    return v ? [v boolValue] : NO;   // 未设置 → 默认关
+}
+
 @end
