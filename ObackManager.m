@@ -141,6 +141,11 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 - (void)windowBecameKey:(NSNotification *)n {
     if ([n.object isKindOfClass:[UIWindow class]]) {
         UIWindow *win = (UIWindow *)n.object;
+        // 诊断黑名单：与 attachToWindow 同步跳过，避免无意义的链接噪声
+        if ([[NSBundle mainBundle].bundleIdentifier isEqualToString:@"im.xym.marknow"]) {
+            OBLog(@"windowBecameKey: SKIP link（诊断黑名单 bid=im.xym.marknow）");
+            return;
+        }
         OBLog(@"windowBecameKey: %@ (isKeyNow=%d)", NSStringFromClass([win class]), win.isKeyWindow);
         [self attachToWindow:win];
         [self _linkNavPopGesturesInWindow:win];  // 成为 key 时重新链接（nav 可能刚压入/呈现）
@@ -149,11 +154,26 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 
 - (void)attachToWindow:(UIWindow *)win {
     if (!win) return;
+    // 诊断性黑名单：部分纯 Flutter / 单屏 app（如 im.xym.marknow）报告「打不开」。
+    // 分析显示本 tweak 对其基本是无操作（无 nav 可关、无手势可链），但为彻底排除
+    // window 级 pan 注入影响其启动，直接跳过挂载。装上此版本后若 marknow 能打开 → 证实是
+    // oback 注入导致（后续深挖 attach 路径）；仍打不开 → 与 oback 无关（Flutter/越狱环境兼容问题）。
+    NSString *bid = NSBundle.mainBundle.bundleIdentifier;
+    if ([bid isEqualToString:@"im.xym.marknow"]) {
+        OBLog(@"attachToWindow: SKIP（诊断黑名单 bid=%@）", bid);
+        return;
+    }
     if (objc_getAssociatedObject(win, kAttachedKey)) { [self _linkNavPopGesturesInWindow:win]; return; }  // 已挂过：仍重新链接（nav 可能刚出现）
     ObackPanGestureRecognizer *pan = [[ObackPanGestureRecognizer alloc] initWithTarget:self
                                                                                  action:@selector(handlePan:)];
     pan.delegate = self;
     pan.maximumNumberOfTouches = 1;
+    // 关键修复：window 级 pan 默认 cancelsTouchesInView=YES，一旦识别成功会取消窗口内所有触摸，
+    // 导致底层 App 收不到点击（朋友圈点不进单条详情、Flutter 类 app 像"打不开"）。
+    // 设为 NO：我们的 pan 只「观察」触摸、绝不吞掉，App 永远能收到自己的触摸；
+    // 返回逻辑由我们驱动系统转场完成，不依赖取消 App 触摸。delaysTouchesBegan 显式 NO 避免延迟投递。
+    pan.cancelsTouchesInView = NO;
+    pan.delaysTouchesBegan   = NO;
     [win addGestureRecognizer:pan];
     objc_setAssociatedObject(win, kAttachedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(win, kPanKey, pan, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -187,24 +207,21 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         [self _enumerateEdgeGesturesInView:sub depth:depth + 1 block:block];
 }
 
-// 递归收集窗口视图树里所有「横向可滚动的 UIScrollView」的 pan 手势。
-// 朋友圈详情、微信某些横向分页容器等是横向 scrollView，其 panGestureRecognizer 优先级高于
-// 我们 window 上的 ObackPanGestureRecognizer，且它只是 UIPanGestureRecognizer（非
-// UIScreenEdgePanGestureRecognizer），没被下面的边缘手势枚举覆盖 → 边缘滑动被它抢走，
-// 我们的转场无法 begin（朋友圈"无作用"的根因）。让这些 pan 失败于 ourPan 即可修复：
-// 从边缘起滑时 ourPan 优先接管返回，从中间横向滑动时 ourPan 不 begin 故放行给滚动。
-- (void)_enumerateHScrollPansInView:(UIView *)view depth:(NSUInteger)depth
-                               block:(void(^)(UIPanGestureRecognizer *g))block {
+// 递归收集窗口视图树里所有 UIScrollView 的 pan 手势（横向 + 纵向皆含）。
+// 根因：朋友圈等是「纵向」UITableView，其 panGestureRecognizer 优先级高于我们 window 上的
+// ObackPanGestureRecognizer；而我们此前只链「横向」scrollView → 纵向表视图没被设为失败于 ourPan
+// → 从边缘起滑时表视图 pan 抢赢识别、ourPan 被取消 → 胶囊出现却无返回（朋友圈"有胶囊没返回"）。
+// 让「所有」scrollView 的 pan 失败于 ourPan：从边缘起滑时 ourPan 优先接管返回（无论横/纵 scroll），
+// 从中间滑动时 ourPan 本就不 begin → 放行给滚动，互不干扰。完全匹配 OPPO 行为（极端边缘=返回）。
+- (void)_enumerateScrollPansInView:(UIView *)view depth:(NSUInteger)depth
+                              block:(void(^)(UIPanGestureRecognizer *g))block {
     if (!view || !block || depth > 40) return;
     if ([view isKindOfClass:[UIScrollView class]]) {
         UIScrollView *sv = (UIScrollView *)view;
-        // 仅横向可滚动的 scrollView（contentSize 宽度明显大于可视宽度）才需让位失败
-        if (sv.contentSize.width > sv.bounds.size.width + 1.0 && sv.panGestureRecognizer) {
-            block(sv.panGestureRecognizer);
-        }
+        if (sv.panGestureRecognizer) block(sv.panGestureRecognizer);
     }
     for (UIView *sub in view.subviews)
-        [self _enumerateHScrollPansInView:sub depth:depth + 1 block:block];
+        [self _enumerateScrollPansInView:sub depth:depth + 1 block:block];
 }
 
 // 让窗口内所有「边缘返回手势」失败于我们的 window pan。
@@ -232,12 +249,12 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         @catch (NSException *e) { OBLog(@"linkNav: edge requireGestureRecognizerToFail 异常: %@", e); }
         linked++;
     }];
-    // 第三道防线：枚举窗口里所有横向 scrollView 的 pan（朋友圈详情、微信横向分页容器等）。
-    // 让它们失败于我们的 pan——从边缘起滑时 ourPan 优先接管返回，从中间横滑时 ourPan 不 begin
-    // 故放行给滚动，互不干扰。仅横向可滚动的才处理，避免影响普通纵向列表。
-    [self _enumerateHScrollPansInView:win depth:0 block:^(UIPanGestureRecognizer *g){
+    // 第三道防线：枚举窗口里所有 UIScrollView 的 pan（含纵向表视图 / 横向分页容器）。
+    // 让它们失败于我们的 pan——从边缘起滑时 ourPan 优先接管返回（无论横/纵 scroll），
+    // 从中间滑动时 ourPan 不 begin 故放行给滚动，互不干扰。
+    [self _enumerateScrollPansInView:win depth:0 block:^(UIPanGestureRecognizer *g){
         @try { [g requireGestureRecognizerToFail:pan]; }
-        @catch (NSException *e) { OBLog(@"linkNav: hscroll pan requireGestureRecognizerToFail 异常: %@", e); }
+        @catch (NSException *e) { OBLog(@"linkNav: scroll pan requireGestureRecognizerToFail 异常: %@", e); }
         linked++;
     }];
     CFTimeInterval dt = (CACurrentMediaTime() - t0) * 1000.0;
@@ -376,6 +393,10 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // 新手势开始：清空上一次松手速度/进度，避免遗留值串入本次动画
     self.releaseVelocity = 0;
     self.releasePercent  = 0;
+    // 诊断：确认本次手势是否真正进入 beginTransition（朋友圈此前"胶囊出现但无返回"疑似未到此）。
+    OBLog(@"beginTransition: entered (parallaxToView=%d top=%@)",
+          self.currentParallaxToView,
+          NSStringFromClass([[self topMost:((UIWindow *)pan.view).rootViewController] class]));
 
     UIWindow *win = (UIWindow *)pan.view;
     UIViewController *top = [self topMost:win.rootViewController];
