@@ -43,6 +43,8 @@ void OBLog(NSString *fmt, ...) {
 static void *kAttachedKey = &kAttachedKey;
 static void *kObackTDKey = &kObackTDKey;   // 让被 dismiss 的 VC 自己 retain 其 transition 转发器，避免野指针
 void *kPanKey = &kPanKey;                  // 暴露给 Tweak.xm：window 上挂载的 Oback 边缘 pan（NSArray，左/右各一，用于让原生 interactivePop 失败于它们）
+static void *kPanKindKey = &kPanKindKey;    // 标记 pan 种类：@"nav"(挂在 nav.view 驱动 nav pop) / @"modal"(挂在 window 驱动 modal dismiss)
+static void *kNavPansKey = &kNavPansKey;    // 挂在某个 UINavigationController 上的 Oback 边缘 pan（NSArray），用于幂等去重
 static void *kDiagLastLogKey = &kDiagLastLogKey;  // 双返回诊断：同一 window 日志节流（每 2s 最多打一次手势清单）
 static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指移动的距离 (pt)
 
@@ -187,6 +189,10 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 
     [win addGestureRecognizer:panL];
     [win addGestureRecognizer:panR];
+    // 这两个 window pan 仅用于「modal dismiss」检测（kind=modal）。nav pop 的边缘 pan 改挂到
+    // nav.view（见 _attachNavPanToNav:），以在可滚动列表页也能压过 scrollView 的 pan。
+    objc_setAssociatedObject(panL, kPanKindKey, @"modal", OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(panR, kPanKindKey, @"modal", OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     NSArray *pans = @[panL, panR];
     objc_setAssociatedObject(win, kAttachedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(win, kPanKey, pans, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -238,6 +244,44 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         [self _enumerateScrollPansInView:sub depth:depth + 1 block:block];
 }
 
+// 从 pan 解析出真正的 UIWindow：nav pop 的边缘 pan 挂在 nav.view 上（pan.view 是 UIView 非 window），
+// 其 window 需从 pan.view.window 取；window modal pan 的 pan.view 本身是 UIWindow。
+- (UIWindow *)_windowForPan:(UIPanGestureRecognizer *)pan {
+    UIView *v = pan.view;
+    if ([v isKindOfClass:[UIWindow class]]) return (UIWindow *)v;
+    return v.window;
+}
+
+// 方案 A 终极修复：nav pop 的边缘 pan 挂到 UINavigationController.view（而非 window）。
+// window 级边缘 pan 在可滚动列表（朋友圈 feed / 聊天列表）上会被 scrollView 的 pan 抢赢识别、
+// 永远进不了 Began（日志实证：胶囊出现却无返回）；挂到 nav.view 后，它与系统原生
+// interactivePopGestureRecognizer（同样挂在 nav.view）同优先级，在列表页也能稳定压过滚动——
+// 这正是 FDFullscreenPopGesture 等成熟库的做法。pan 挂到 nav.view，调用系统同一私有
+// target 的 handleNavigationTransition: 即可驱动原生交互 pop。
+- (void)_attachNavPanToNav:(UINavigationController *)nav win:(UIWindow *)win {
+    if (!nav || !win) return;
+    NSArray *existing = objc_getAssociatedObject(nav, kNavPansKey);
+    if ([existing isKindOfClass:[NSArray class]] && existing.count == 2) return;  // 已挂过，幂等
+    UIView *navView = nav.view;            // 触发加载；为 nil 时下面 addGestureRecognizer 无操作，下次链接重试
+    if (!navView) { OBLog(@"attachNavPan: nav.view 尚为 nil，跳过（下次链接重试）"); return; }
+    NSMutableArray *pans = [NSMutableArray array];
+    UIRectEdge edges[2] = { UIRectEdgeLeft, UIRectEdgeRight };
+    for (NSUInteger i = 0; i < 2; i++) {
+        ObackPanGestureRecognizer *pan = [[ObackPanGestureRecognizer alloc] initWithTarget:self
+                                                                                     action:@selector(handlePan:)];
+        pan.delegate = self;
+        pan.maximumNumberOfTouches = 1;
+        pan.cancelsTouchesInView = NO;
+        pan.delaysTouchesBegan   = NO;
+        pan.edges = edges[i];
+        objc_setAssociatedObject(pan, kPanKindKey, @"nav", OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [navView addGestureRecognizer:pan];
+        [pans addObject:pan];
+    }
+    objc_setAssociatedObject(nav, kNavPansKey, pans, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    OBLog(@"attachNavPan: nav=%@ pans=%lu on nav.view", NSStringFromClass([nav class]), (unsigned long)pans.count);
+}
+
 // 让窗口内所有「边缘返回手势」失败于我们的 window pan。
 // 关键：requireGestureRecognizerToFail: 是「成对依赖」关系，App/插件即便随后把 enabled 重新置 YES，
 // 其手势的 begin 仍被系统判定为必须先等我们的 pan 失败——无论对手是系统原生 interactivePop，
@@ -249,10 +293,20 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     if (![pans isKindOfClass:[NSArray class]] || pans.count == 0) {
         OBLog(@"linkNav: 本 window 无 Oback pan，跳过链接"); return;
     }
+    // 先给每个 nav 挂 nav.view 边缘 pan（方案 A 终极修复：列表页抢手势根治）
+    [self _enumerateNavControllersFrom:win.rootViewController block:^(UINavigationController *nav){
+        [self _attachNavPanToNav:nav win:win];
+    }];
+    // 收集所有我们的 pan（window modal pan + nav.view pan），用于让对手势失败于它们
+    NSMutableArray *allOurPans = [NSMutableArray arrayWithArray:pans];
+    [self _enumerateNavControllersFrom:win.rootViewController block:^(UINavigationController *nav){
+        NSArray *np = objc_getAssociatedObject(nav, kNavPansKey);
+        if ([np isKindOfClass:[NSArray class]]) [allOurPans addObjectsFromArray:np];
+    }];
     // 让传入手势「失败于」我们的每一个边缘 pan（左/右）。成对依赖：对手 begin 须等我们的 pan 先失败，
     // 从根上杜绝「一次滑动弹两层」。屏幕边缘 pan 自带「边缘优先于滚动」系统级优先级，列表页亦稳定接管返回。
     void (^failOnOurPans)(UIGestureRecognizer *) = ^(UIGestureRecognizer *g){
-        for (ObackPanGestureRecognizer *op in pans) {
+        for (ObackPanGestureRecognizer *op in allOurPans) {
             @try { [g requireGestureRecognizerToFail:op]; } @catch (NSException *e) {}
         }
     };
@@ -332,10 +386,12 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     if (!allowed) { OBLog(@"shouldBegin=NO (isAllowed=NO, bid=%@)", NSBundle.mainBundle.bundleIdentifier); return NO; }
 
     ObackParams *p = [ObackPreferences params];
-    UIWindow *win = (UIWindow *)pan.view;
+    UIWindow *win = [self _windowForPan:pan];
     CGPoint loc = [pan locationInView:win];
     CGFloat w = win.bounds.size.width;
     if (w <= 0) { OBLog(@"shouldBegin=NO (window width=0)"); return NO; }
+
+    NSString *kind = objc_getAssociatedObject(pan, kPanKindKey);  // @"nav"(挂 nav.view) / @"modal"(挂 window)
 
     // 方案 A 改用屏幕边缘 pan：每个 pan 实例已固定 edges（左/右），系统据此判定是否处于边缘，
     // 并自带「边缘优先于滚动」优先级——列表页也能稳定接管返回。triggerWidth 仅作「更窄」二次约束
@@ -348,8 +404,8 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         edge = ObackEdgeRight; isEdge = YES;
     }
     if (!isEdge) {
-        OBLog(@"shouldBegin=NO (该边缘未启用/超宽: pan.edges=%ld x=%.1f w=%.1f triggerW=%.1f left=%d right=%d)",
-              (long)pan.edges, loc.x, w, p.triggerWidth, p.leftEnabled, p.rightEnabled);
+        OBLog(@"shouldBegin=NO (该边缘未启用/超宽: pan.edges=%ld x=%.1f w=%.1f triggerW=%.1f left=%d right=%d kind=%@)",
+              (long)pan.edges, loc.x, w, p.triggerWidth, p.leftEnabled, p.rightEnabled, kind);
         return NO;
     }
 
@@ -359,24 +415,36 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     UINavigationController *nav = top.navigationController;
     if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
 
-    BOOL poppable = (nav && nav.viewControllers.count > 1) || (top.presentingViewController != nil);
-    if (!poppable) {
-        OBLog(@"shouldBegin=NO (不可返回: nav.childCount=%lu presenting=%d)",
-              (unsigned long)nav.viewControllers.count, top.presentingViewController != nil);
-        return NO;
+    // 按 pan 种类分流（根治"window 级边缘 pan 在列表页被 scrollView 抢赢"）：
+    // - nav.view 上的 pan 只接管 nav pop；
+    // - window modal pan 只接管 modal dismiss（有 nav pop 可接管时让 nav pan 处理，避免双触发）。
+    if ([kind isEqualToString:@"nav"]) {
+        // 顶层有 modal 时，其 dismiss 由 window modal pan 接管；nav.view 在 modal 之下不接管，避免双触发。
+        if (top.presentingViewController != nil) {
+            OBLog(@"shouldBegin(nav)=NO (有 modal 在顶层，交给 window modal pan)");
+            return NO;
+        }
+        if (!(nav && nav.viewControllers.count > 1)) {
+            OBLog(@"shouldBegin(nav)=NO (nav 不可 pop: childCount=%lu)",
+                  (unsigned long)nav.viewControllers.count);
+            return NO;
+        }
+        self.currentParallaxToView = YES;   // nav pop（系统原生交互转场，不 reparent toView）
+    } else {
+        if (top.presentingViewController != nil) {
+            self.currentParallaxToView = NO;  // modal dismiss（方案B 自定义，只移 sheet）
+        } else if (nav && nav.viewControllers.count > 1) {
+            OBLog(@"shouldBegin(modal)=NO (有 nav pop 可接管，交给 nav pan)");
+            return NO;
+        } else {
+            OBLog(@"shouldBegin(modal)=NO (无 modal 也无 nav pop)");
+            return NO;
+        }
     }
 
-    // 边缘返回优先：不再"让位横向滚动"。横向 scrollView 的 pan 已在 _linkNavPopGesturesInWindow
-    // 里被设为失败于我们的边缘 pan（requireGestureRecognizerToFail）——从边缘起滑时我们的手势
-    // 优先接管返回，从中间横滑时我们的 pan 不 begin 故放行给滚动，互不干扰。
-    // 这样朋友圈详情等横向分页容器也能从最左/右边缘触发返回（修复"朋友圈无作用"）。
-
     self.currentEdge = edge;
-    // 方案 A：在 shouldBegin 即确定本次是 nav pop 还是 modal dismiss，供 begin/update/end 分流。
-    // nav 且栈深>1 → nav pop（系统原生交互转场，不 reparent toView）；否则 modal dismiss（方案B 自定义）。
-    self.currentParallaxToView = (nav && nav.viewControllers.count > 1) ? YES : NO;
-    OBLog(@"shouldBegin=YES (edge=%@ top=%@ nav.childCount=%lu presenting=%d parallaxToView=%d)",
-          edge == ObackEdgeLeft ? @"左" : @"右",
+    OBLog(@"shouldBegin=YES (kind=%@ edge=%@ top=%@ nav.childCount=%lu presenting=%d parallaxToView=%d)",
+          kind, edge == ObackEdgeLeft ? @"左" : @"右",
           NSStringFromClass([top class]),
           (unsigned long)nav.viewControllers.count, top.presentingViewController != nil,
           self.currentParallaxToView);
@@ -421,11 +489,14 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     self.releaseVelocity = 0;
     self.releasePercent  = 0;
     // 诊断：确认本次手势是否真正进入 beginTransition（朋友圈此前"胶囊出现但无返回"疑似未到此）。
-    OBLog(@"beginTransition: entered (parallaxToView=%d top=%@)",
-          self.currentParallaxToView,
-          NSStringFromClass([[self topMost:((UIWindow *)pan.view).rootViewController] class]));
+    {
+        UIWindow *dbgWin = [self _windowForPan:pan];
+        OBLog(@"beginTransition: entered (parallaxToView=%d top=%@)",
+              self.currentParallaxToView,
+              NSStringFromClass([[self topMost:dbgWin.rootViewController] class]));
+    }
 
-    UIWindow *win = (UIWindow *)pan.view;
+    UIWindow *win = [self _windowForPan:pan];
     UIViewController *top = [self topMost:win.rootViewController];
     if (!top) return;
 
@@ -505,7 +576,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 
 - (void)updateTransition:(UIPanGestureRecognizer *)pan {
     if (!self.interacting) return;
-    UIWindow *win = (UIWindow *)pan.view;
+    UIWindow *win = [self _windowForPan:pan];
     CGFloat w = win.bounds.size.width;
     if (w <= 0) return;
 
@@ -533,7 +604,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 - (void)endTransition:(UIPanGestureRecognizer *)pan {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(dismissIndicatorSafety) object:nil];
     if (!self.interacting) return;
-    UIWindow *win = (UIWindow *)pan.view;
+    UIWindow *win = [self _windowForPan:pan];
     CGFloat w = win.bounds.size.width;
     CGPoint v = [pan velocityInView:win];
     CGFloat dir = (self.currentEdge == ObackEdgeLeft) ? 1.0 : -1.0;
@@ -636,7 +707,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     self.releaseVelocity = 0;
     self.releasePercent  = 0;
     OBLog(@"abortTransition (state=%ld)", (long)pan.state);
-    UIWindow *win = (UIWindow *)pan.view;
+    UIWindow *win = [self _windowForPan:pan];
     ObackParams *p = [ObackPreferences params];
     if (_indicator) [self dismissIndicatorCommitted:NO params:p window:win];
     if (self.currentParallaxToView) {
