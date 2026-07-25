@@ -130,8 +130,12 @@ static void OBApplyParallax(CGFloat percent,
 // 中断式动画器：速度感知弹簧的核心。系统对交互转场会暂停它并按 updateWithPercent 设定 fractionComplete，
 // finish 时 ObackInteractiveTransition 调 [animator applyReleaseVelocity] 更新弹簧初速度后由系统续完。
 - (id<UIViewImplicitlyAnimating>)interruptibleAnimatorForTransition:(id<UIViewControllerContextTransitioning>)ctx {
-    self.context = ctx;   // 交互转场下系统不调 animateTransition:，必须在此存 context
-    OBLog(@"interruptible ENTER (pa=%p ctx=%p)", _propertyAnimator, ctx);
+    // 交互转场下系统不调 animateTransition:，必须在此存 context。
+    // 关键：微信等 App 会 double-fetch（对同一转场调两次该方法），第二次 ctx 可能是 UIKit 重新封装的
+    // 包装对象。只保存第一次的 context（与 UIKit 转场状态机绑定的那个），避免覆盖后 forceFinishIfNeeded
+    // 对错误 context 调 completeTransition → UIKit 转场状态机不匹配 → 界面冻结。
+    if (!_context) self.context = ctx;
+    OBLog(@"interruptible ENTER (pa=%p ctx=%p context=%p)", _propertyAnimator, ctx, _context);
     if (_propertyAnimator) {
         // double-fetch（微信等 App 的 UIKit 会对同一转场调两次该方法）：
         // 缓存命中时确保动画器处于可 scrub 的 Active(paused) 态，
@@ -252,7 +256,15 @@ static void OBApplyParallax(CGFloat percent,
         // OBApplyParallax(1)=提交终态, OBApplyParallax(0)=取消回初始态
         OBApplyParallax(commit ? 1.0 : 0.0, fromView, toView, nil,
                         self.edge, self.params, self.parallaxToView);
-        // 遮罩淡出
+        // 显式归位 alpha（OBApplyParallax 只动 transform/corner/dimAlpha，不碰 fromView/toView.alpha）
+        if (commit) {
+            fromView.alpha = 0.0;    // 当前页淡出（completeTransition:YES 会移除它，alpha 可平滑过渡）
+            toView.alpha   = 1.0;    // 上一页全显
+        } else {
+            fromView.alpha = 1.0;    // 取消：双方复原
+            toView.alpha   = 1.0;
+        }
+        // 遮罩/自定义子视图淡出（dim、阴影等）
         for (UIView *sub in container.subviews) {
             if (sub != fromView && sub != toView) sub.alpha = 0.0;
         }
@@ -264,6 +276,16 @@ static void OBApplyParallax(CGFloat percent,
             [ctx completeTransition:commit];
         } @catch (NSException *exception) {
             OBLog(@"forceComplete completeTransition CRASH: %@", exception.reason);
+        }
+        // ⚠️ 关键：completeTransition 只处理 fromView/toView，不管我们在
+        // interruptibleAnimatorForTransition: 里手动添加的自定义子视图（dim 遮罩）。
+        // 而且 _completed=YES 导致 propertyAnimator 的 completion 跳过 [dim removeFromSuperview]，
+        // dim 的 CAGradientLayer 会永远留在容器里 → 残影/阴影残留（华为健康截图实证）。
+        // 此处用 copy 安全迭代（completeTransition:YES 后 fromView 可能已被移除），
+        // 显式清理所有非 from/to 子视图。
+        NSArray *subs = [[container.subviews copy] autorelease];
+        for (UIView *sub in subs) {
+            if (sub != fromView && sub != toView) [sub removeFromSuperview];
         }
         OBLog(@"animator forceComplete done (cancelled=%d)", !commit);
     }];
