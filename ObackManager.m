@@ -572,11 +572,12 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     self.interacting = YES;
     _transitionTriggered = NO;
 
-    // 方案 A：nav pop 改为驱动系统原生交互 pop（根除自定义转场 reparent toView 导致的空白/损坏）。
-    // 在手势 Began(位移=0)即启动系统原生交互转场，由后续 updateTransition 的横向位移 scrub。
-    // modal dismiss（currentParallaxToView=NO）走方案B 自定义转场，不在此启动。
-    if (self.currentParallaxToView) {
-        [self driveSystemNavPopBeginWithPan:pan window:win];
+    // 重构：navParallax 开启时不再驱动系统原生交互 pop（handleNavigationTransition:），
+    // 改由 triggerTransitionInWindow: 首次横向拖动时 popViewControllerAnimated: 启动纯自定义
+    // interactive 驱动（同 modal 方案B 安全路径），彻底消除「系统私有驱动 + 自定义 animator」双驱动
+    // 打架导致的冻结/空白。navParallax 关闭（默认）→ 仍走方案A 系统原生（begin 即启动，已由看门狗护住）。
+    if (self.currentParallaxToView && ![ObackPreferences navParallaxEnabled]) {
+        [self driveSystemNavPopBeginWithPan:pan window:win];   // 方案A：系统原生交互 pop
     }
 
     CGPoint loc = [pan locationInView:win];
@@ -618,12 +619,16 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
               nav.delegate ? NSStringFromClass([nav.delegate class]) : @"(nil)",
               (int)[[nav.delegate class] isSubclassOfClass:NSClassFromString(@"ObackNavDelegate")]);
         self.currentParallaxToView = YES;   // nav pop 视差（移动上一页）
-        if (self.interacting) {
-            // 方案 A：交互 pop 已在 beginTransition 通过 handleNavigationTransition: 启动，
-            // 此处不再调用 popViewControllerAnimated:（否则会触发第二次转场/黑屏）。
+        if (self.interacting && _navPopTarget) {
+            // 方案A：系统原生交互 pop 已在 beginTransition 经 driveSystemNavPopBeginWithPan:
+            // （handleNavigationTransition:）启动，并已设置 _navPopTarget；此处不再 popViewControllerAnimated:
+            // （否则触发第二次转场/黑屏）。
             OBLog(@"trigger: nav pop 已启动(系统原生交互)，忽略重复 popViewControllerAnimated");
         } else {
-            // 非交互兜底（快滑零位移：endTransition 先把 interacting 置 NO 再走此路径）
+            // 自定义 nav 视差（navParallaxEnabled=YES）：begin 未启动系统原生（_navPopTarget 为 nil），
+            // 此处首次横向拖动时 popViewControllerAnimated: 启动转场 → delegate 据 interacting=YES
+            // 返回自定义 ObackAnimator + interactive，单驱动、无双源打架，复用 modal 方案B 安全路径。
+            // 或 极端兜底（drive 取不到 target、interacting 被置 NO）→ 系统非交互 pop。
             [nav popViewControllerAnimated:YES];
         }
     } else if (top.presentingViewController) {
