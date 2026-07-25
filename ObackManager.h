@@ -6,6 +6,7 @@
 @interface ObackManager : NSObject <UIGestureRecognizerDelegate>
 + (instancetype)shared;
 - (void)start;
+- (void)_attachNavPanToNav:(UINavigationController *)nav win:(UIWindow *)win;  // 给 nav.view 挂左右边缘 pan（swizzle UINavigationController 时调用）
 
 @property (nonatomic, assign) ObackEdge currentEdge;                  // 本次手势触发边缘
 @property (nonatomic, assign) BOOL interacting;                          // 是否正在交互返回

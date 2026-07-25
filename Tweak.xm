@@ -195,6 +195,23 @@ static BOOL oback_shouldBackOff(void) {
     if (!self.delegate) {
         [self setDelegate:nil];
     }
+    // [2026-07-25 修复 朋友圈] 双 hook（viewDidLoad + viewDidAppear）确保微信 MMUINavigationController
+    // 无论在哪一处调用 super 都能挂上边缘 pan（幂等，重复挂无效）；绕过自定义容器枚举遗漏。
+    if (![ObackPreferences isAllowed]) return;
+    [[ObackManager shared] _attachNavPanToNav:self win:self.view.window];
+    self.interactivePopGestureRecognizer.enabled = NO;
+    OBLog(@"swizzle nav viewDidLoad: nav=%@ 已挂 oback 边缘 pan", NSStringFromClass([self class]));
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    // [2026-07-25 修复 朋友圈] swizzle UINavigationController 基类：任意子类（含微信 MMUINavigationController）
+    // 一显示即自动挂边缘 pan 到 nav.view 并关掉系统原生 interactivePop——绕过自定义容器枚举遗漏
+    // （朋友圈所在 nav 不在 win.rootViewController 标准 childViewControllers 链上，旧枚举永远漏挂 → 无返回）。
+    if (![ObackPreferences isAllowed]) return;
+    [[ObackManager shared] _attachNavPanToNav:self win:self.view.window];
+    self.interactivePopGestureRecognizer.enabled = NO;
+    OBLog(@"swizzle nav viewDidAppear: nav=%@ 已挂 oback 边缘 pan", NSStringFromClass([self class]));
 }
 
 %end

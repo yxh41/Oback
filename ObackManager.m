@@ -45,6 +45,7 @@ static void *kObackTDKey = &kObackTDKey;   // 让被 dismiss 的 VC 自己 retai
 void *kPanKey = &kPanKey;                  // 暴露给 Tweak.xm：window 上挂载的 Oback 边缘 pan（NSArray，左/右各一，用于让原生 interactivePop 失败于它们）
 static void *kPanKindKey = &kPanKindKey;    // 标记 pan 种类：@"nav"(挂在 nav.view 驱动 nav pop) / @"modal"(挂在 window 驱动 modal dismiss)
 static void *kNavPansKey = &kNavPansKey;    // 挂在某个 UINavigationController 上的 Oback 边缘 pan（NSArray），用于幂等去重
+static void *kObackNavKey = &kObackNavKey;   // 把 pan 所属的 UINavigationController 绑到 pan 上（swizzle 时写入），gesture 判定/驱动 pop 时直接读，绕过容器枚举
 static void *kDiagLastLogKey = &kDiagLastLogKey;  // 双返回诊断：同一 window 日志节流（每 2s 最多打一次手势清单）
 static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指移动的距离 (pt)
 
@@ -275,6 +276,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         pan.delaysTouchesBegan   = NO;
         pan.edges = edges[i];
         objc_setAssociatedObject(pan, kPanKindKey, @"nav", OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(pan, kObackNavKey, nav, OBJC_ASSOCIATION_ASSIGN);  // 绑定所属 nav，gesture 判定/驱动时直接读，不依赖容器枚举
         [navView addGestureRecognizer:pan];
         [pans addObject:pan];
     }
@@ -297,11 +299,13 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     [self _enumerateNavControllersFrom:win.rootViewController block:^(UINavigationController *nav){
         [self _attachNavPanToNav:nav win:win];
     }];
-    // 收集所有我们的 pan（window modal pan + nav.view pan），用于让对手势失败于它们
+    // 收集所有我们的 pan（window modal pan + 所有挂到 nav.view 的边缘 pan）。
+    // 关键：用**视图树遍历**收集（而非 childViewControllers 枚举），这样 swizzle 挂到
+    // 朋友圈 nav.view 上的 pan（朋友圈 nav 不在标准 VC 链上，枚举永远漏）也能被纳入，
+    // 其 scrollView 才会失败于该 pan → 朋友圈列表页边缘返回稳定压过滚动。
     NSMutableArray *allOurPans = [NSMutableArray arrayWithArray:pans];
-    [self _enumerateNavControllersFrom:win.rootViewController block:^(UINavigationController *nav){
-        NSArray *np = objc_getAssociatedObject(nav, kNavPansKey);
-        if ([np isKindOfClass:[NSArray class]]) [allOurPans addObjectsFromArray:np];
+    [self _enumerateEdgeGesturesInView:win depth:0 block:^(UIScreenEdgePanGestureRecognizer *g){
+        if (g.delegate == self) [allOurPans addObject:g];   // 仅我们的边缘 pan（delegate==self）
     }];
     // 让传入手势「失败于」我们的每一个边缘 pan（左/右）。成对依赖：对手 begin 须等我们的 pan 先失败，
     // 从根上杜绝「一次滑动弹两层」。屏幕边缘 pan 自带「边缘优先于滚动」系统级优先级，列表页亦稳定接管返回。
@@ -409,18 +413,28 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         return NO;
     }
 
-    UIViewController *top = [self topMost:win.rootViewController];
+    // 关键修复（朋友圈等自定义容器）：nav 类 pan 直接读其所属 nav（swizzle UINavigationController
+    // 的 viewDidAppear 时已把所属 nav 绑到 pan 上），不再依赖 win.rootViewController 标准链枚举——
+    // 微信朋友圈的 nav 不在 childViewControllers 标准链上，旧逻辑靠 topMost 枚举永远解析不到 → 无返回。
+    UINavigationController *nav = nil;
+    UIViewController *top = nil;
+    if ([kind isEqualToString:@"nav"]) {
+        nav = objc_getAssociatedObject(pan, kObackNavKey);
+        top = nav.topViewController;
+    }
+    if (!nav) {
+        top = [self topMost:win.rootViewController];
+        nav = top.navigationController;
+        if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
+    }
     if (!top) { OBLog(@"shouldBegin=NO (无顶层 VC)"); return NO; }
-
-    UINavigationController *nav = top.navigationController;
-    if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
 
     // 按 pan 种类分流（根治"window 级边缘 pan 在列表页被 scrollView 抢赢"）：
     // - nav.view 上的 pan 只接管 nav pop；
     // - window modal pan 只接管 modal dismiss（有 nav pop 可接管时让 nav pan 处理，避免双触发）。
     if ([kind isEqualToString:@"nav"]) {
         // 顶层有 modal 时，其 dismiss 由 window modal pan 接管；nav.view 在 modal 之下不接管，避免双触发。
-        if (top.presentingViewController != nil) {
+        if (nav.presentedViewController != nil || top.presentingViewController != nil) {
             OBLog(@"shouldBegin(nav)=NO (有 modal 在顶层，交给 window modal pan)");
             return NO;
         }
@@ -527,11 +541,19 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 // 关键修复：此前在 beginTransition(手势 Began) 就立即 popViewControllerAnimated:，
 // 一旦用户只是点按/纵向滑动即取消，交互转场易被卡在"进行中"态导致界面冻结。
 - (void)triggerTransitionInWindow:(UIWindow *)win withPan:(UIPanGestureRecognizer *)pan {
-    UIViewController *top = [self topMost:win.rootViewController];
+    // nav 类 pan 直接读所属 nav（swizzle 已绑定），绕过 topMost 枚举——朋友圈等自定义容器不在标准链上
+    UINavigationController *nav = nil;
+    UIViewController *top = nil;
+    if ([objc_getAssociatedObject(pan, kPanKindKey) isEqualToString:@"nav"]) {
+        nav = objc_getAssociatedObject(pan, kObackNavKey);
+        top = nav.topViewController;
+    }
+    if (!top) {
+        top = [self topMost:win.rootViewController];
+        nav = top.navigationController;
+        if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
+    }
     if (!top) return;
-
-    UINavigationController *nav = top.navigationController;
-    if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
 
     if (nav && nav.viewControllers.count > 1) {
         id nd = nav.delegate;
@@ -752,9 +774,16 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 // handleNavigationTransition: —— 系统原生交互转场运行，toView 由 UIKit 原生呈现与清理，
 // 彻底消除"自定义转场 reparent toView 进 containerView"导致的底部空白 / 导航栏损坏 / scrollView 错位。
 - (void)driveSystemNavPopBeginWithPan:(UIPanGestureRecognizer *)pan window:(UIWindow *)win {
-    UIViewController *top = [self topMost:win.rootViewController];
-    UINavigationController *nav = top.navigationController;
-    if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
+    // nav 类 pan 直接读所属 nav（swizzle 已绑定），绕过 topMost 枚举——朋友圈等自定义容器不在标准链上
+    UINavigationController *nav = nil;
+    if ([objc_getAssociatedObject(pan, kPanKindKey) isEqualToString:@"nav"]) {
+        nav = objc_getAssociatedObject(pan, kObackNavKey);
+    }
+    if (!nav) {
+        UIViewController *top = [self topMost:win.rootViewController];
+        nav = top.navigationController;
+        if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
+    }
     if (!nav) { OBLog(@"navPop: 无 nav，放弃"); return; }
     // 兜底确保 ObackNavDelegate 就位（delegate:nil 时自动包装；已是 ObackNavDelegate 则幂等）
     [nav setDelegate:nav.delegate];
