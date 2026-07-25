@@ -242,11 +242,14 @@ static void OBApplyParallax(CGFloat percent,
     UIView *container = ctx.containerView;
 
     // 停止并释放 property animator，彻底释放它对 layer 属性的控制，避免与我们的 UIView 动画冲突。
+    // 关键区别：stopAnimation:NO 保持当前属性值（从当前中间态继续动画），
+    // stopAnimation:YES 会恢复到 pre-animation 值（导致 toView 跳回缩放到 0.92 的初始态，
+    // 视觉上突兀跳跃，且可能触发某些 App 的渲染/layout 异常 → 按钮空白/残留）。
     // 实测 pauseAnimation 会让 paused animator 仍"持有"动画状态 → 与 UIView 动画打架 →
     // completion 延迟 1~2 秒甚至永不触发 → 界面冻结/残留。
     if (_propertyAnimator) {
         if (_propertyAnimator.state != UIViewAnimatingStateInactive) {
-            [_propertyAnimator stopAnimation:YES];
+            [_propertyAnimator stopAnimation:NO];
         }
         [_propertyAnimator release];
         _propertyAnimator = nil;
