@@ -248,11 +248,16 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         // 打印 rootViewController 类名/子容器/呈现态，判断它是否用自定义容器（非标准 childViewControllers）
         // 导致枚举遗漏（→ 边缘返回无法工作、甚至"进不去页面"）。
         UIViewController *rvc = win.rootViewController;
+        NSString *tabInfo = @"-";
+        if ([rvc isKindOfClass:[UITabBarController class]]) {
+            UIViewController *sel = [(UITabBarController *)rvc selectedViewController];
+            tabInfo = sel ? NSStringFromClass([sel class]) : @"(nil)";
+        }
         OBLog(@"linkNav: 0 导航！rootVC=%@ childCount=%lu presented=%@ tab=%@",
               NSStringFromClass([rvc class]),
               (unsigned long)rvc.childViewControllers.count,
               NSStringFromClass([rvc.presentedViewController class]),
-              NSStringFromClass([[rvc selectedViewController] class]));
+              tabInfo);
     }
     [self _diagLogEdgeGesturesInWindow:win];   // 双返回诊断（开关关闭时无输出，且自带节流）
 }
