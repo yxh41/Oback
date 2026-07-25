@@ -220,9 +220,10 @@ static void OBApplyParallax(CGFloat percent,
 
 // 统一收尾（finish/cancel/watchdog 共用）：
 // 不再依赖 UIViewPropertyAnimator 的 continueAnimation（double-fetch 时会阻塞主线程 →
-// watchdog 定时器无法触发 → 冻结/闪退）。改为：暂停 property animator → 用标准 UIView
-// 动画把视图归位到终态 → 在动画 completion 里调 completeTransition。
-// 这条路径不经过中断式动画器状态机，不受 double-fetch 影响，不阻塞主线程。
+// watchdog 定时器无法触发 → 冻结/闪退）。改为：停止 property animator（彻底释放它对 layer
+// 的动画控制，避免与 UIView 动画冲突）→ 用标准 UIView 动画把视图归位到终态 → 在动画
+// completion 里做 cleanup；completeTransition 由 completion + dispatch_after(0.3s) 双重
+// 保险确保一定被调用，避免某些 App 中 completion 延迟 1~2 秒导致界面冻结。
 // _completed 守卫防重复（finish/cancel 先调一次，watchdog 0.5s 后调则直接返回）。
 - (void)forceFinishIfNeeded {
     if (_completed) return;
@@ -240,35 +241,37 @@ static void OBApplyParallax(CGFloat percent,
     UIView *toView   = toVC.view;
     UIView *container = ctx.containerView;
 
-    // 暂停 property animator，防止它与我们的 UIView 动画打架
-    if (_propertyAnimator && _propertyAnimator.state != UIViewAnimatingStateInactive) {
-        [_propertyAnimator pauseAnimation];
+    // 停止并释放 property animator，彻底释放它对 layer 属性的控制，避免与我们的 UIView 动画冲突。
+    // 实测 pauseAnimation 会让 paused animator 仍"持有"动画状态 → 与 UIView 动画打架 →
+    // completion 延迟 1~2 秒甚至永不触发 → 界面冻结/残留。
+    if (_propertyAnimator) {
+        if (_propertyAnimator.state != UIViewAnimatingStateInactive) {
+            [_propertyAnimator stopAnimation:YES];
+        }
+        [_propertyAnimator release];
+        _propertyAnimator = nil;
     }
 
     BOOL commit = !_interactiveCancelled;
     OBLog(@"animator forceFinish animating (commit=%d edge=%@)", commit,
           self.edge == ObackEdgeLeft ? @"左" : @"右");
 
+    __block BOOL transitionFinished = NO;
+
     // 用标准 UIView 动画把视图从当前中间态归位到终态（0.22s easeOut）
     [UIView animateWithDuration:0.22 delay:0
-                         options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState
+                         options:UIViewAnimationOptionCurveEaseOut
                       animations:^{
         // OBApplyParallax(1)=提交终态, OBApplyParallax(0)=取消回初始态
         OBApplyParallax(commit ? 1.0 : 0.0, fromView, toView, nil,
                         self.edge, self.params, self.parallaxToView);
-        // 显式归位 alpha（OBApplyParallax 只动 transform/corner/dimAlpha，不碰 fromView/toView.alpha）
-        if (commit) {
-            fromView.alpha = 0.0;    // 当前页淡出（completeTransition:YES 会移除它，alpha 可平滑过渡）
-            toView.alpha   = 1.0;    // 上一页全显
-        } else {
-            fromView.alpha = 1.0;    // 取消：双方复原
-            toView.alpha   = 1.0;
-        }
         // 遮罩/自定义子视图淡出（dim、阴影等）
         for (UIView *sub in container.subviews) {
             if (sub != fromView && sub != toView) sub.alpha = 0.0;
         }
     } completion:^(BOOL finished) {
+        if (transitionFinished) return;
+        transitionFinished = YES;
         // 清理圆角/阴影残留
         fromView.layer.cornerRadius = 0;
         fromView.layer.masksToBounds = NO;
@@ -277,18 +280,33 @@ static void OBApplyParallax(CGFloat percent,
         } @catch (NSException *exception) {
             OBLog(@"forceComplete completeTransition CRASH: %@", exception.reason);
         }
-        // ⚠️ 关键：completeTransition 只处理 fromView/toView，不管我们在
-        // interruptibleAnimatorForTransition: 里手动添加的自定义子视图（dim 遮罩）。
-        // 而且 _completed=YES 导致 propertyAnimator 的 completion 跳过 [dim removeFromSuperview]，
-        // dim 的 CAGradientLayer 会永远留在容器里 → 残影/阴影残留（华为健康截图实证）。
-        // 此处用 copy 安全迭代（completeTransition:YES 后 fromView 可能已被移除），
-        // 显式清理所有非 from/to 子视图。
+        // 显式清理所有非 from/to 子视图（dim 遮罩等）
         NSArray *subs = [[container.subviews copy] autorelease];
         for (UIView *sub in subs) {
             if (sub != fromView && sub != toView) [sub removeFromSuperview];
         }
-        OBLog(@"animator forceComplete done (cancelled=%d)", !commit);
+        OBLog(@"animator forceComplete done (completion, cancelled=%d)", !commit);
     }];
+
+    // 保险：0.3 秒后如果 completion 仍未触发，强制完成转场。
+    // 避免某些 App 中 UIView 动画 completion 延迟 1~2 秒甚至永不触发导致界面冻结。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (transitionFinished) return;
+        transitionFinished = YES;
+        @try {
+            [ctx completeTransition:commit];
+        } @catch (NSException *exception) {
+            OBLog(@"forceComplete completeTransition CRASH (dispatch_after): %@", exception.reason);
+        }
+        NSArray *subs = [[container.subviews copy] autorelease];
+        for (UIView *sub in subs) {
+            if (sub != fromView && sub != toView) [sub removeFromSuperview];
+        }
+        fromView.layer.cornerRadius = 0;
+        fromView.layer.masksToBounds = NO;
+        OBLog(@"animator forceComplete done (dispatch_after, cancelled=%d)", !commit);
+    });
 }
 
 - (void)dealloc {
