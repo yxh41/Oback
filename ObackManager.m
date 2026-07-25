@@ -808,6 +808,51 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     });
 }
 
+// nav pop 安全看门狗（方案A 专用）：个别 App（如 Filza）会禁用/改造系统原生 interactivePopGestureRecognizer，
+// 导致我们经 handleNavigationTransition: 驱动的系统交互转场在松手后卡在「进行中」态
+// （UIKit 关闭 userInteraction → 界面冻结，后台再回来才被系统清掉）。
+// 机制：手势启动即排一个 0.8s 定时器，捕获此刻的系统交互动画器(_navPopTarget= _UINavigationInteractiveTransition，
+// 它是 UIPercentDrivenInteractiveTransition 子类，响应 finish/cancelInteractiveTransition)；
+// 正常 pop 约 0.35s 完成，到时 coordinator 已为 nil/非 interactive → 空操作；若仍卡在 interactive 态 →
+// 对捕获的 target 强制 finishInteractiveTransition 收尾，并防御性复位 manager 状态，杜绝冻结。
+// 注意：finish/cancel 是交互动画器(UIViewControllerInteractiveTransitioning)的方法，不是 transitionCoordinator 的，
+// 故必须对捕获的 _navPopTarget 调用，而非对 coordinator 调用（否则 -Werror 未声明方法）。
+// 幂等保护：这 0.8s 内若 topViewController 已变（发生新的 push/pop）说明转场已正常推进，跳过。
+- (void)_scheduleNavPopWatchdog:(UINavigationController *)nav {
+    if (!nav) return;
+    UIViewController *topAtSchedule = nav.topViewController;
+    if (!topAtSchedule) return;
+    id target = _navPopTarget;                 // 系统交互动画器（percent-driven），endTransition 会把它置 nil，故此处先捕获
+    if (!target) return;
+    [target retain];                           // MRC：block 持有期间强持，避免被 UIKit 释放成野指针
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (nav.topViewController != topAtSchedule) { [target release]; return; }   // 已正常推进，跳过
+        id tc = [topAtSchedule transitionCoordinator];
+        BOOL stuck = (tc && [tc respondsToSelector:@selector(isInteractive)] && [tc isInteractive]);
+        if (stuck) {
+            OBLog(@"navPop watchdog: 系统交互转场仍卡住，强制结束 (top=%@)",
+                  NSStringFromClass([topAtSchedule class]));
+            @try {
+                if ([target respondsToSelector:@selector(finishInteractiveTransition)])
+                    [target finishInteractiveTransition];   // 完成到目标态（父页），贴合用户已见到的返回结果
+                else if ([target respondsToSelector:@selector(cancelInteractiveTransition)])
+                    [target cancelInteractiveTransition];
+            } @catch (NSException *e) { OBLog(@"navPop watchdog finish fail: %@", e); }
+        }
+        // 防御性复位：即使正常路径已复位，也兜底，防止极端情况下 interacting 残留导致冻结
+        if (self.interacting && nav.topViewController == topAtSchedule) {
+            self.interacting = NO;
+            self.interactive = nil;
+            self.currentAnimator = nil;
+            _navPopTarget = nil;
+            _currentPercent = 0;
+            _transitionTriggered = NO;
+        }
+        [target release];
+    });
+}
+
 // 手势意外失败(Failed/超时等)时的紧急清理：取消转场+消除胶囊，防止残留
 - (void)abortTransition:(UIPanGestureRecognizer *)pan {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(dismissIndicatorSafety) object:nil];
@@ -893,6 +938,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // 直接把我们的 pan 作为 sender 喂给它的私有 action。
     [self _callSystemNavPop:pan];
     _transitionTriggered = YES;
+    [self _scheduleNavPopWatchdog:nav];   // 安全看门狗：防个别 App(如 Filza) 系统交互转场卡死冻结
     OBLog(@"navPop: 系统原生交互 pop 已启动 (target=%@)", NSStringFromClass([_navPopTarget class]));
 }
 
