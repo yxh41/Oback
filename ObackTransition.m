@@ -34,13 +34,14 @@ static void OBApplyParallax(CGFloat percent,
         CGAffineTransformMakeScale(fromScale, fromScale));
 
     if (parallaxToView) {
-        // 上一页：从对侧探出 + 轻微放大（视差）
-        CGFloat toX = -dir * p.parallaxOffset * w * (1.0 - percent);
-        CGFloat scale = p.previousScaleMin + (1.0 - p.previousScaleMin) * percent;
-        toView.transform = CGAffineTransformConcat(
-            CGAffineTransformMakeTranslation(toX, 0),
-            CGAffineTransformMakeScale(scale, scale));
-        // 上一页初始被压暗，随拖动变亮
+        // 上一页（toView）保持完全静止（系统原生边缘返回行为），不做任何 transform。
+        // 关键修复：实测给上一页加 scale/translate 视差（0.92→1.0）会让其内部
+        // UIScrollView 的 superview transform 破坏 contentOffset/layout 计算，
+        // 转场结束后底部按钮区域被滚出/错位（华为健康底部功能入口空白）。
+        // 当前页(fromView)仍按方向滑出+轻微缩小（视觉"飞出"感保留），它很快被移除，
+        // 其内部 scrollView 的瞬时 transform 不影响最终显示的上一页。
+        toView.transform = CGAffineTransformIdentity;
+        // 上一页初始被压暗，随拖动变亮（dim 仍跟随拖动，提供纵深感）
         if (dimView) dimView.alpha = (1.0 - percent) * p.dimAlpha;
         // nav pop 路径无卡片圆角，确保无残留
         fromView.layer.cornerRadius = 0;
@@ -278,6 +279,9 @@ static void OBApplyParallax(CGFloat percent,
         // 清理圆角/阴影残留
         fromView.layer.cornerRadius = 0;
         fromView.layer.masksToBounds = NO;
+        // 双保险：无论动画是否完成，收尾前强制上一页 transform 归位为 identity，
+        // 杜绝 dispatch_after/异常路径下 toView 残留缩放态（scrollView 错位/空白）。
+        toView.transform = CGAffineTransformIdentity;
         @try {
             [ctx completeTransition:commit];
         } @catch (NSException *exception) {
@@ -297,6 +301,8 @@ static void OBApplyParallax(CGFloat percent,
                    dispatch_get_main_queue(), ^{
         if (transitionFinished) return;
         transitionFinished = YES;
+        // 同上：强制上一页 transform 归位，防止收尾残留缩放态
+        toView.transform = CGAffineTransformIdentity;
         @try {
             [ctx completeTransition:commit];
         } @catch (NSException *exception) {

@@ -185,6 +185,26 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         [self _enumerateEdgeGesturesInView:sub depth:depth + 1 block:block];
 }
 
+// 递归收集窗口视图树里所有「横向可滚动的 UIScrollView」的 pan 手势。
+// 朋友圈详情、微信某些横向分页容器等是横向 scrollView，其 panGestureRecognizer 优先级高于
+// 我们 window 上的 ObackPanGestureRecognizer，且它只是 UIPanGestureRecognizer（非
+// UIScreenEdgePanGestureRecognizer），没被下面的边缘手势枚举覆盖 → 边缘滑动被它抢走，
+// 我们的转场无法 begin（朋友圈"无作用"的根因）。让这些 pan 失败于 ourPan 即可修复：
+// 从边缘起滑时 ourPan 优先接管返回，从中间横向滑动时 ourPan 不 begin 故放行给滚动。
+- (void)_enumerateHScrollPansInView:(UIView *)view depth:(NSUInteger)depth
+                               block:(void(^)(UIPanGestureRecognizer *g))block {
+    if (!view || !block || depth > 40) return;
+    if ([view isKindOfClass:[UIScrollView class]]) {
+        UIScrollView *sv = (UIScrollView *)view;
+        // 仅横向可滚动的 scrollView（contentSize 宽度明显大于可视宽度）才需让位失败
+        if (sv.contentSize.width > sv.bounds.size.width + 1.0 && sv.panGestureRecognizer) {
+            block(sv.panGestureRecognizer);
+        }
+    }
+    for (UIView *sub in view.subviews)
+        [self _enumerateHScrollPansInView:sub depth:depth + 1 block:block];
+}
+
 // 让窗口内所有「边缘返回手势」失败于我们的 window pan。
 // 关键：requireGestureRecognizerToFail: 是「成对依赖」关系，App/插件即便随后把 enabled 重新置 YES，
 // 其手势的 begin 仍被系统判定为必须先等我们的 pan 失败——无论对手是系统原生 interactivePop，
@@ -208,6 +228,14 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     [self _enumerateEdgeGesturesInView:win depth:0 block:^(UIScreenEdgePanGestureRecognizer *g){
         @try { [g requireGestureRecognizerToFail:pan]; }
         @catch (NSException *e) { OBLog(@"linkNav: edge requireGestureRecognizerToFail 异常: %@", e); }
+        linked++;
+    }];
+    // 第三道防线：枚举窗口里所有横向 scrollView 的 pan（朋友圈详情、微信横向分页容器等）。
+    // 让它们失败于我们的 pan——从边缘起滑时 ourPan 优先接管返回，从中间横滑时 ourPan 不 begin
+    // 故放行给滚动，互不干扰。仅横向可滚动的才处理，避免影响普通纵向列表。
+    [self _enumerateHScrollPansInView:win depth:0 block:^(UIPanGestureRecognizer *g){
+        @try { [g requireGestureRecognizerToFail:pan]; }
+        @catch (NSException *e) { OBLog(@"linkNav: hscroll pan requireGestureRecognizerToFail 异常: %@", e); }
         linked++;
     }];
     CFTimeInterval dt = (CACurrentMediaTime() - t0) * 1000.0;
