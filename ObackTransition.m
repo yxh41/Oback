@@ -107,6 +107,7 @@ static void OBApplyParallax(CGFloat percent,
 - (void)animateTransition:(id<UIViewControllerContextTransitioning>)ctx {
     // 诊断：入口确定执行一次（每次转场开始）。注意此刻 releaseVelocity 仍为 beginTransition 清零后的 0，
     // 真实速度在 finish 时写入并体现在「animator spring applied」日志里。此处仅确认走了弹簧/线性分支。
+    self.context = ctx;   // 记入上下文：兜底强制收尾时仍需它调 completeTransition
     CGFloat vel    = [ObackManager shared].releaseVelocity;
     CGFloat startP = [ObackManager shared].releasePercent;
     BOOL reduceMotion = UIAccessibilityIsReduceMotionEnabled();
@@ -166,7 +167,9 @@ static void OBApplyParallax(CGFloat percent,
         [dim removeFromSuperview];
         // 以 interactiveCancelled 为准（finish=NO/cancel=YES），避免反向动画 finalPosition 误判
         BOOL cancelled = blockSelf.interactiveCancelled || (finalPosition == UIViewAnimatingPositionStart);
-        [ctx completeTransition:!cancelled];
+        if (blockSelf.completed) { blockSelf = nil; return; }   // 已被 manager 兜底收尾 → 防重复 completeTransition
+        blockSelf.completed = YES;
+        if (blockSelf.context) [blockSelf.context completeTransition:!cancelled];
         OBLog(@"animator done (cancelled=%d)", cancelled);
         blockSelf = nil;   // 打破循环引用（MRC 无 __weak）
     }];
@@ -275,7 +278,7 @@ static void OBApplyParallax(CGFloat percent,
     // 提交前先用真实松手速度更新弹簧初速度（动量继承），再续跑动画器到 end
     ObackAnimator *anim = self.animator ?: [ObackManager shared].currentAnimator;
     UIViewPropertyAnimator *pa = anim.propertyAnimator;
-    OBLog(@"oback-intc finish (self=%p animator=%p pa=%p)", self, anim, pa);
+    OBLog(@"oback-intc finish (self=%p animator=%p pa=%p state=%ld)", self, anim, pa, (long)(pa ? pa.state : 0));
     if (pa && pa.state == UIViewAnimatingStateInactive) [pa pauseAnimation];
     anim.interactiveCancelled = NO;
     [anim applyReleaseVelocity];   // 更新弹簧初速度并 continueAnimation（续跑到 end -> completion 触发 completeTransition）
@@ -285,13 +288,23 @@ static void OBApplyParallax(CGFloat percent,
     // 取消：反向续跑动画器回到 start（弹簧回弹），completion 以 interactiveCancelled=YES 调 completeTransition:NO
     ObackAnimator *anim = self.animator ?: [ObackManager shared].currentAnimator;
     UIViewPropertyAnimator *pa = anim.propertyAnimator;
-    OBLog(@"oback-intc cancel (self=%p animator=%p pa=%p)", self, anim, pa);
-    if (!pa) return;
+    anim.interactiveCancelled = YES;   // 取消意图：即使下方 pa=nil 走兜底，也以「取消」收尾（不 pop）
+    OBLog(@"oback-intc cancel (self=%p animator=%p pa=%p state=%ld)", self, anim, pa, (long)(pa ? pa.state : 0));
+    if (!pa) return;   // pa=nil（动画器未构建）→ 交给 manager 兜底 forceFinishIfNeeded，不再早退丢 completeTransition
     if (pa.state == UIViewAnimatingStateInactive) [pa pauseAnimation];
     if (pa.state == UIViewAnimatingStateActive)   [pa pauseAnimation];
-    anim.interactiveCancelled = YES;
     pa.reversed = YES;   // 反向续跑 -> 回到 start -> completion 以 cancelled=YES 调 completeTransition:NO
     [pa continueAnimationWithTimingParameters:pa.timingParameters];
+}
+
+// 兜底收尾：动画器因状态错位（如微信二次取用导致 continueAnimation 空操作）未能自行触发 completion 时，
+// 由 manager 定时器调用，一次性按 interactiveCancelled 调 completeTransition，杜绝「转场孤儿化 → nav 卡交互态 → 冻结」。
+- (void)forceFinishIfNeeded {
+    if (self.completed) return;          // 动画器自身 completion 已收尾 → 跳过（防重复 completeTransition 断言）
+    self.completed = YES;
+    BOOL cancelled = self.interactiveCancelled;
+    if (self.context) [self.context completeTransition:!cancelled];
+    OBLog(@"animator forceComplete (cancelled=%d)", cancelled);
 }
 
 @end

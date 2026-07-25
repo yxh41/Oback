@@ -51,6 +51,10 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 @property (nonatomic, assign) BOOL parallaxToView;
 // 速度感知弹簧核心：中断式动画器由 interruptibleAnimatorForTransition: 构建并缓存
 @property (nonatomic, retain) UIViewPropertyAnimator *propertyAnimator;
+// 转场上下文（animateTransition: 时记入，finish/cancel 动画器若未能自行收尾由兜底强制 completeTransition）
+@property (nonatomic, assign) id<UIViewControllerContextTransitioning> context;
+// 防重复：completeTransition 只准调一次（动画器 completion 与 manager 兜底定时器互斥）
+@property (nonatomic, assign) BOOL completed;
 // 松手速度/进度，由 ObackManager 在 endTransition 写入，finish 时经 applyReleaseVelocity 用于动量继承
 @property (nonatomic, assign) CGFloat releaseVelocity;
 @property (nonatomic, assign) CGFloat releasePercent;
@@ -59,6 +63,9 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 - (instancetype)initWithEdge:(ObackEdge)edge params:(ObackParams *)params;
 // 在 finish/cancel 前调用：用真实松手速度更新弹簧初速度（速度感知弹簧的关键；取消时速度已清零→温和回弹）
 - (void)applyReleaseVelocity;
+// 兜底收尾：若动画器因状态错位（continueAnimation 空操作等）未能自行触发 completion，
+// 由 manager 定时器调用，按 interactiveCancelled 一次性 completeTransition，杜绝"转场孤儿化→界面冻结"。
+- (void)forceFinishIfNeeded;
 @end
 
 // 手势拖动时按百分比驱动同一套视差动画（中断式动画器）。
