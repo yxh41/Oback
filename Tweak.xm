@@ -211,7 +211,25 @@ static BOOL oback_shouldBackOff(void) {
     if (![ObackPreferences isAllowed]) return;
     [[ObackManager shared] _attachNavPanToNav:self win:self.view.window];
     self.interactivePopGestureRecognizer.enabled = NO;
+    // 全窗口链接：每 nav 显示跑一次（非每次手势），让原生 interactivePop / 插件边缘手势 /
+    // 已存在的 scrollView 失败于我们的 pan（成对依赖持久）。晚到的 scrollView 由 shouldBegin 精准补链覆盖。
+    UIWindow *lnkWin = self.view.window;
+    if (lnkWin) [[ObackManager shared] _linkNavPopGesturesInWindow:lnkWin];
     OBLog(@"swizzle nav viewDidAppear: nav=%@ 已挂 oback 边缘 pan", NSStringFromClass([self class]));
+}
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+    // [2026-07-25 加固] 第 3 挂载点：viewDidLoad 时 view.window 常为 nil 而早退，viewDidAppear 又
+    // 可能被子类不调 super → 朋友圈等 nav 漏挂。viewDidLayoutSubviews 在 view 已布局、window 就绪后
+    // 几乎必调，作为兜底挂载点（幂等：已挂过则 _attachNavPanToNav 直接 return）。此处只挂 pan +
+    // 关原生 interactivePop，不做全窗口链接（layout 调用频次高，链接已在 viewDidAppear / windowBecameKey
+    // 各跑一次，且晚到 scrollView 由 shouldBegin 精准补链）。
+    if (![ObackPreferences isAllowed]) return;
+    if (self.view.window) {
+        [[ObackManager shared] _attachNavPanToNav:self win:self.view.window];
+        self.interactivePopGestureRecognizer.enabled = NO;
+    }
 }
 
 %end

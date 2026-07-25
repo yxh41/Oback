@@ -466,12 +466,15 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         UIImpactFeedbackGenerator *g = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
         [g impactOccurred];
     }
-    // 实时补链：本 window 可能在我们初次(windowBecameKey)枚举之后才压入分组/子容器，
-    // 其边缘返回手势从未被链接 → 加固对它形同虚设。故每次确认接管时，对当前窗口重新
-    // 枚举并让所有边缘返回手势失败于我们的 pan（幂等无害：requireGestureRecognizerToFail
-    // 为成对依赖，设一次即持久；且依赖在每个 touch 事件重评估 → 当次滑动也会被持续压制，
-    // 因我们的 pan 在手指移动期间保持交互态不会失败，故对方边缘手势整段被阻塞，只弹一层）。
-    [self _linkNavPopGesturesInWindow:win];
+    // 轻量精准补链（替代原先每次手势全树遍历 _linkNavPopGesturesInWindow:，根除起点卡顿）：
+    // 仅让「触摸点正下方的 scrollView」失败于本次 pan（O(depth) 命中测试，几乎零成本），
+    // 覆盖「push 后才出现的列表」这类晚到 scrollView。全窗口级的禁用原生 interactivePop /
+    // 插件边缘手势链接已在 windowBecameKey / nav swizzle viewDidAppear 时各跑一次（成对依赖持久），
+    // 无需每次手势重做。
+    UIScrollView *sv = [self scrollViewAtPoint:loc inView:win];
+    if (sv && sv.panGestureRecognizer) {
+        @try { [sv.panGestureRecognizer requireGestureRecognizerToFail:pan]; } @catch (NSException *e) {}
+    }
     // 关键修复：胶囊在 shouldBegin=YES 时即显示，而非等 Began。左边缘会被系统原生
     // interactivePopGestureRecognizer（UIScreenEdgePanGestureRecognizer）抢走，导致我们的手势
     // 永远进不了 Began，胶囊若只在 Began 显示则左边缘永不出现（日志实证：左边缘 shouldBegin=YES
@@ -657,6 +660,10 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // ===== 方案 A：nav pop 用系统原生交互转场 =====
     // 直接把当前 pan(已 Ended)喂给 handleNavigationTransition:，系统据此完成/取消原生 pop。
     // 无自定义动画器、无 completeTransition 调用、无 watchdog —— 全部由 UIKit 原生收尾。
+    // [稳定性决策] nav pop 的提交/灵敏度完全由系统 _UINavigationInteractiveTransition 决定，
+    // 上面算的 commit / commitRatio / commitVelocity 对 nav pop 不生效（仅打日志）。设置面板里的
+    // 灵敏度滑块只对 modal dismiss(方案B 自定义转场)生效——这是为换取"零冻结/原生手感"的取舍，
+    // 不回退到自定义 nav 转场（那曾是导致黑屏/冻结的根因）。
     if (self.currentParallaxToView) {
         [self _callSystemNavPop:pan];
         self.interacting = NO;

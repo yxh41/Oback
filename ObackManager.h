@@ -7,6 +7,7 @@
 + (instancetype)shared;
 - (void)start;
 - (void)_attachNavPanToNav:(UINavigationController *)nav win:(UIWindow *)win;  // 给 nav.view 挂左右边缘 pan（swizzle UINavigationController 时调用）
+- (void)_linkNavPopGesturesInWindow:(UIWindow *)win;   // 全窗口链接（禁用原生 interactivePop / 让插件边缘手势与 scrollView 失败于我们的 pan）；每 window/nav 出现跑一次，不在手势热路径
 
 @property (nonatomic, assign) ObackEdge currentEdge;                  // 本次手势触发边缘
 @property (nonatomic, assign) BOOL interacting;                          // 是否正在交互返回
