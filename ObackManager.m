@@ -483,7 +483,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         return;   // 此路径用系统原生动画，无 ObackAnimator，无需兜底收尾
     }
     // 兜底收尾：finish/cancel 后若动画器因状态错位（如微信二次取用动画器导致 continueAnimation 空操作）
-    // 未能自行触发 completeTransition，0.8s 内由 manager 单例（永不被释放，MRC 安全）强制收尾，
+    // 未能自行触发 completeTransition，0.5s 内由 manager 单例（永不被释放，MRC 安全）强制收尾，
     // 根绝「转场上下文孤儿化 → nav 卡在交互态 → 界面冻结」这一整类冻结。
     [self _scheduleCompletionWatchdog];
     self.interacting = NO;
@@ -493,7 +493,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     _transitionTriggered = NO;
 }
 
-// 兜底收尾定时器：当前 ObackAnimator 在 0.8s 内若仍未自行完成（completed=NO），
+// 兜底收尾定时器：当前 ObackAnimator 在 0.5s 内若仍未自行完成（completed=NO），
 // 强制调 completeTransition，确保转场一定收尾，绝不遗留"卡交互态"冻结。
 // manager 单例常驻 → 定时器回调持有 _watchAnimator（已 retain）安全，无野指针风险。
 - (void)_scheduleCompletionWatchdog {
@@ -501,7 +501,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     if (!a) return;
     [_watchAnimator release];
     _watchAnimator = [a retain];   // MRC：定时器期间强持，避免 UIKit 释放动画器成野指针
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         [_watchAnimator forceFinishIfNeeded];
         [_watchAnimator release];

@@ -131,7 +131,16 @@ static void OBApplyParallax(CGFloat percent,
 // finish 时 ObackInteractiveTransition 调 [animator applyReleaseVelocity] 更新弹簧初速度后由系统续完。
 - (id<UIViewImplicitlyAnimating>)interruptibleAnimatorForTransition:(id<UIViewControllerContextTransitioning>)ctx {
     OBLog(@"interruptible ENTER (pa=%p)", _propertyAnimator);
-    if (_propertyAnimator) { OBLog(@"interruptible cached return pa=%p", _propertyAnimator); return _propertyAnimator; }
+    if (_propertyAnimator) {
+        // double-fetch（微信等 App 的 UIKit 会对同一转场调两次该方法）：
+        // 缓存命中时确保动画器处于可 scrub 的 Active(paused) 态，
+        // 避免"Active 且未 pause → continueAnimation 行为异常 → 动画器卡死不触发 completion"。
+        if (_propertyAnimator.state == UIViewAnimatingStateActive) {
+            [_propertyAnimator pauseAnimation];
+        }
+        OBLog(@"interruptible cached return pa=%p", _propertyAnimator);
+        return _propertyAnimator;
+    }
 
     UIView *container = ctx.containerView;
     UIViewController *from = [ctx viewControllerForKey:UITransitionContextFromViewControllerKey];
@@ -205,13 +214,61 @@ static void OBApplyParallax(CGFloat percent,
 }
 
 // 兜底收尾：动画器因状态错位（如微信二次取用导致 continueAnimation 空操作）未能自行触发
-// completion 时，由 manager 定时器（_watchAnimator 强持本实例）调用，一次性按 interactiveCancelled
-// 调 completeTransition，杜绝「转场孤儿化 → nav 卡交互态 → 冻结」。completion 守卫防重复。
+// completion 时，由 manager 定时器（_watchAnimator 强持本实例）调用。
+//
+// 关键：必须先将所有视图归位到终态，再调 completeTransition —— 否则 UIKit 只按结果
+// 移除/保留 view，不会把 transform/scale/alpha 从中间值刷到终值 → 画面卡半屏（华为健康截图实证）。
+// completion 守卫防重复（重复调用会触发 UIKit 断言崩溃）。
 - (void)forceFinishIfNeeded {
-    if (_completed) return;              // 动画器自身 completion 已收尾 → 跳过（防重复 completeTransition 断言）
+    if (_completed) return;
     _completed = YES;
+
+    id<UIViewControllerContextTransitioning> ctx = _context;
+    if (ctx) {
+        UIViewController *fromVC = [ctx viewControllerForKey:UITransitionContextFromViewControllerKey];
+        UIViewController *toVC   = [ctx viewControllerForKey:UITransitionContextToViewControllerKey];
+        UIView *fromView = fromVC.view;
+        UIView *toView   = toVC.view;
+        UIView *container = ctx.containerView;
+
+        if (_interactiveCancelled) {
+            // 取消归位：当前页复原、上一页隐藏回初始态
+            fromView.transform = CGAffineTransformIdentity;
+            fromView.alpha    = 1.0;
+            fromView.layer.cornerRadius = 0;
+            fromView.layer.masksToBounds = NO;
+            toView.transform   = CGAffineTransformIdentity;
+            toView.alpha      = 1.0;
+            // 遮罩淡出
+            for (UIView *sub in container.subviews) {
+                if (sub != fromView && sub != toView && sub.layer.subviews.count == 0) {
+                    sub.alpha = 0.0;
+                }
+            }
+        } else {
+            // 提交归位：上一页全显、当前页消失（UIKit 随后会移除 fromView）
+            fromView.transform = CGAffineTransformIdentity;
+            fromView.alpha    = 0.0;          // 淡出（比直接 hidden 更自然）
+            fromView.layer.cornerRadius = 0;
+            fromView.layer.masksToBounds = NO;
+            toView.transform   = CGAffineTransformIdentity;
+            toView.alpha      = 1.0;
+            // 清除遮罩
+            for (UIView *sub in container.subviews) {
+                if (sub != fromView && sub != toView && sub.layer.subviews.count == 0) {
+                    sub.alpha = 0.0;
+                }
+            }
+        }
+    }
+
     BOOL cancelled = _interactiveCancelled;
-    if (_context) [_context completeTransition:!cancelled];
+    @try {
+        if (_context) [_context completeTransition:!cancelled];
+    } @catch (NSException *exception) {
+        OBLog(@"forceComplete completeTransition CRASH: %@", exception.reason);
+        // 即使 completeTransition 崩溃/断言失败，视图已归位 → 用户至少不卡半屏
+    }
     OBLog(@"animator forceComplete (cancelled=%d)", cancelled);
 }
 
