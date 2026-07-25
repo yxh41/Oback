@@ -154,15 +154,26 @@ static void OBApplyParallax(CGFloat percent,
     UIView *fromView = from.view;
     UIView *toView   = to.view;
 
-    if (toView.superview != container) [container insertSubview:toView atIndex:0];
-
-    // 方向性渐变遮罩（替代纯黑），沿边缘方向由深到浅
-    UIView *dim = [self _makeDimViewWithFrame:container.bounds edge:self.edge];
-    dim.alpha = 0;
-    dim.userInteractionEnabled = NO;   // 遮罩绝不拦截触摸
-    [container insertSubview:dim aboveSubview:toView];
+    UIView *dim = nil;
+    if (self.parallaxToView) {
+        // 【关键修复】nav pop：目的页(toView=你要返回到的那一页) 绝不重挂载进 containerView。
+        // 原实现 insertSubview:toView 会把目的页从导航层级拽进 container、转场结束再拽回，
+        // 期间其内部 UIScrollView 的 safeAreaInsets/contentInset 被重算 → 底部 TabBar/功能入口
+        // 被滚出视口错位（华为健康、微信「底部按钮空白」根因，与 toView 是否 transform 无关）。
+        // 目的页本就在 container 下方原样可见，只需让当前页(fromView)滑出即可，与系统原生 pop
+        // 完全一致，绝不伤目的页。故此处不 insert toView、不创建 dim（目的页不被遮挡）。
+        if (fromView.superview != container) [container addSubview:fromView];
+    } else {
+        // 弹窗 dismiss 方案B：底层 presenting(toView) 不碰 transform；目的页正常挂载，
+        // dim 置于二者之间（presenting 不加深遮罩，避免已可见背景闪暗）。
+        if (toView.superview != container) [container insertSubview:toView atIndex:0];
+        dim = [self _makeDimViewWithFrame:container.bounds edge:self.edge];
+        dim.alpha = 0;
+        dim.userInteractionEnabled = NO;   // 遮罩绝不拦截触摸
+        [container insertSubview:dim aboveSubview:toView];
+    }
     [container bringSubviewToFront:fromView];
-    [dim release];   // MRC：已加入 container 被其 retain，释放我们的所有权
+    if (dim) [dim release];   // MRC：已加入 container 被其 retain，释放我们的所有权（nil 时跳过）
 
     [self applyShadowTo:fromView];
     OBApplyParallax(0, fromView, toView, dim, self.edge, self.params, self.parallaxToView);
@@ -257,8 +268,9 @@ static void OBApplyParallax(CGFloat percent,
     }
 
     BOOL commit = !_interactiveCancelled;
-    OBLog(@"animator forceFinish animating (commit=%d edge=%@)", commit,
-          self.edge == ObackEdgeLeft ? @"左" : @"右");
+    OBLog(@"animator forceFinish animating (commit=%d edge=%@ parallaxToView=%d toViewInContainer=%d)",
+          commit, self.edge == ObackEdgeLeft ? @"左" : @"右",
+          self.parallaxToView, (toView.superview == container));
 
     __block BOOL transitionFinished = NO;
 
@@ -276,9 +288,10 @@ static void OBApplyParallax(CGFloat percent,
     } completion:^(BOOL finished) {
         if (transitionFinished) return;
         transitionFinished = YES;
-        // 清理圆角/阴影残留
+        // 清理圆角/阴影残留（取消返回时 fromView 留在屏上，须清掉投影避免永久残留）
         fromView.layer.cornerRadius = 0;
         fromView.layer.masksToBounds = NO;
+        fromView.layer.shadowOpacity = 0.0;
         // 双保险：无论动画是否完成，收尾前强制上一页 transform 归位为 identity，
         // 杜绝 dispatch_after/异常路径下 toView 残留缩放态（scrollView 错位/空白）。
         toView.transform = CGAffineTransformIdentity;
@@ -314,6 +327,7 @@ static void OBApplyParallax(CGFloat percent,
         }
         fromView.layer.cornerRadius = 0;
         fromView.layer.masksToBounds = NO;
+        fromView.layer.shadowOpacity = 0.0;
         OBLog(@"animator forceComplete done (dispatch_after, cancelled=%d)", !commit);
     });
 }
