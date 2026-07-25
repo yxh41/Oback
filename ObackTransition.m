@@ -187,10 +187,11 @@ static void OBApplyParallax(CGFloat percent,
             iv.contentMode = UIViewContentModeScaleToFill;
             [container insertSubview:iv belowSubview:fromView];
             OBLog(@"interruptible: nav pop 使用底页图像快照(避免底部空白)");
-        } else if (toView.superview != container) {
-            // 兜底：极端情况下图像取不到，仍挂真实 toView（保证不空白，等同旧行为）
-            [container insertSubview:toView atIndex:0];
-            OBLog(@"interruptible: nav pop 图像快照失败，退回到挂真实 toView");
+        } else {
+            // 兜底：极端情况下图像取不到。不再 reparent 真实 toView（那正是之前华为健康/微信
+            // 底部空白根因——真实 toView 的 scrollView 随 superview 变化被重算 contentInset）。
+            // 改为仅当前页(fromView)滑出、无上一页底图（视觉略差但安全，绝不空白）。
+            OBLog(@"interruptible: nav pop 图像快照失败，安全兜底(不挂真实 toView，避免底部空白)");
         }
     } else {
         // 弹窗 dismiss 方案B：底层 presenting(toView) 不碰 transform；目的页正常挂载，

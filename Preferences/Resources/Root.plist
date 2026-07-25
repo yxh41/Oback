@@ -284,6 +284,28 @@
             <key>cell</key>
             <string>PSGroupCell</string>
             <key>label</key>
+            <string>实验功能</string>
+            <key>footerText</key>
+            <string>以下为实验性开关，默认关闭。开启后需多 App 真机验证稳定性，如出现冻结 / 空白请关闭。</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSSwitchCell</string>
+            <key>label</key>
+            <string>导航视差（实验）</string>
+            <key>key</key>
+            <string>navParallax</string>
+            <key>defaults</key>
+            <string>com.zlhkf.oback</string>
+            <key>default</key>
+            <false/>
+            <key>footnote</key>
+            <string>关（默认）：导航返回用系统原生转场（最稳）。开：导航返回改用自定义 Oback 视差（当前页平移+投影，灵敏度滑块对导航返回也生效）；实验功能，需真机验证。</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSGroupCell</string>
+            <key>label</key>
             <string>调试</string>
             <key>footerText</key>
             <string>开启后把每次手势判定写入 /var/mobile/oback_debug.log（可用 Filza 抓取发我分析）。日用机建议关闭，避免日志频繁写盘。</string>
@@ -298,9 +320,9 @@
             <key>defaults</key>
             <string>com.zlhkf.oback</string>
             <key>default</key>
-            <true/>
+            <false/>
             <key>footnote</key>
-            <string>关：完全不写日志（最省）。开（默认）：记录手势触发/提交/取消，便于定位问题。</string>
+            <string>关（默认）：完全不写日志（最省）。开：记录手势触发/提交/取消，便于定位问题。</string>
         </dict>
         <dict>
             <key>cell</key>

@@ -53,6 +53,19 @@ static BOOL oback_shouldBackOff(void) {
     [ObackManager shared].currentAnimator = nil;   // 先清，避免残留上一轮动画器
     // 仅在我们手势驱动返回时接管 pop 动画；普通返回按钮走 App 原生转场（避免破坏/黑屏）
     if (operation == UINavigationControllerOperationPop && interacting) {
+        if ([ObackPreferences navParallaxEnabled]) {
+            // 实验：自定义 nav 视差转场。转场交互态已由 handleNavigationTransition: 启动
+            // （driveSystemNavPopBegin，与方案A 同款入口），此处返回自定义 ObackAnimator(parallaxToView=YES)
+            // 接管动画；交互由 interactionController 返回的 ObackInteractiveTransition 驱动（update/finish/cancel）。
+            // 风险：个别 App 离屏快照/自定义转场可能空白或冻结，需多 App 真机验证；默认关。
+            ObackAnimator *a = [[ObackAnimator alloc] initWithEdge:[ObackManager shared].currentEdge
+                                                           params:[ObackPreferences params]];
+            a.parallaxToView = YES;
+            [ObackManager shared].interactive.animator = a;   // assign 反向引用（finish/cancel 改弹簧速度）
+            [ObackManager shared].currentAnimator = a;        // assign（endTransition 写 releaseVelocity）
+            OBLog(@"nav-anim -> ObackAnimator (实验: nav 视差)");
+            return a;   // 照搬 modal 模式：直接返回，系统 retain；两属性均 assign 不二次持有
+        }
         // 方案 A：返回 nil → 系统原生交互 pop（toView 由 UIKit 原生处理，
         // 根除自定义转场 reparent toView 进 containerView 导致的空白 / 导航栏损坏 / scrollView 错位）。
         // 系统默认转场由 _UINavigationInteractiveTransition 驱动，ObackManager 已用

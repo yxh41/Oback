@@ -664,7 +664,10 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     }
 
     _currentPercent = p;
-    if (self.currentParallaxToView) {
+    if (self.currentParallaxToView && [ObackPreferences navParallaxEnabled]) {
+        // 实验：自定义 nav 视差 scrub（同 modal 方案B 机制，驱动 animator 的 fractionComplete）
+        if (self.interactive) [self.interactive updateWithPercent:p];
+    } else if (self.currentParallaxToView) {
         // 方案 A：nav pop 用系统原生交互转场，直接把当前 pan 喂给 handleNavigationTransition: 做 scrub
         [self _callSystemNavPop:pan];
     } else {
@@ -712,6 +715,35 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // 灵敏度滑块只对 modal dismiss(方案B 自定义转场)生效——这是为换取"零冻结/原生手感"的取舍，
     // 不回退到自定义 nav 转场（那曾是导致黑屏/冻结的根因）。
     if (self.currentParallaxToView) {
+        if ([ObackPreferences navParallaxEnabled]) {
+            // 实验：自定义 nav 视差收尾（同 modal 方案B 机制，复用已验证的 forceFinishIfNeeded）
+            if (_transitionTriggered) {
+                if (commit) [self.interactive finish];
+                else {
+                    self.currentAnimator.releaseVelocity = 0;  // 取消：温和回弹，不带入前向速度
+                    [self.interactive cancel];
+                }
+            } else if (commit) {
+                // 快滑零位移：自定义转场未启动，走系统非交互 pop（最干净）
+                self.interacting = NO;
+                self.interactive = nil;
+                self.currentAnimator = nil;
+                _navPopTarget = nil;
+                _currentPercent = 0;
+                _transitionTriggered = NO;
+                [self triggerTransitionInWindow:win withPan:pan];
+                return;
+            }
+            [self _scheduleCompletionWatchdog];
+            self.interacting = NO;
+            self.interactive = nil;
+            self.currentAnimator = nil;
+            _navPopTarget = nil;
+            _currentPercent = 0;
+            _transitionTriggered = NO;
+            OBLog(@"endTransition: nav pop 自定义视差收尾 (commit=%d)", commit);
+            return;
+        }
         [self _callSystemNavPop:pan];
         self.interacting = NO;
         _navPopTarget = nil;
@@ -787,9 +819,15 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     ObackParams *p = [ObackPreferences params];
     if (_indicator) [self dismissIndicatorCommitted:NO params:p window:win];
     if (self.currentParallaxToView) {
-        // 方案 A：nav pop 用系统原生交互转场，把当前 pan(Failed/Cancelled)喂给 handleNavigationTransition:
-        // 让系统取消原生 pop；无自定义动画器，无需 watchdog/interactive cancel。
-        if (_transitionTriggered) [self _callSystemNavPop:pan];
+        if ([ObackPreferences navParallaxEnabled]) {
+            // 实验：自定义 nav 视差取消（同 modal 方案B：驱动 animator 反向回弹 + watchdog 兜底收尾）
+            if (_transitionTriggered && self.interactive) [self.interactive cancel];
+            [self _scheduleCompletionWatchdog];
+        } else {
+            // 方案 A：nav pop 用系统原生交互转场，把当前 pan(Failed/Cancelled)喂给 handleNavigationTransition:
+            // 让系统取消原生 pop；无自定义动画器，无需 watchdog/interactive cancel。
+            if (_transitionTriggered) [self _callSystemNavPop:pan];
+        }
         // 兜底：若系统 target 取不到导致原生 pop 从未启动（driveSystemNavPopBegin 降级为非交互 pop），
         // 此处 _navPopTarget 为 nil，_callSystemNavPop 为空操作，无需额外处理。
     } else {

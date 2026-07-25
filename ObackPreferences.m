@@ -122,6 +122,16 @@ static NSTimeInterval __obDebugLogOpenedAt = 0;
     return enabled;
 }
 
+// 导航视差实验开关：设置面板「导航视差（实验）」(key=navParallax)，默认关。
+// 开 → nav pop 走自定义 ObackAnimator 视差转场（当前页平移+投影，灵敏度滑块对导航返回也生效）；
+// 关（默认）→ 系统原生 pop（方案A，最稳）。实验功能，需多 App 真机验证。
++ (BOOL)navParallaxEnabled {
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    id v = [d objectForKey:@"navParallax"];
+    [d release];
+    return v ? [v boolValue] : NO;   // 未设置 → 默认关
+}
+
 // 双返回诊断开关：设置面板「双返回诊断」(key=doubleReturnDiag)，默认关。
 // 开启后，每次边缘起滑补链时把本 window 所有边缘返回手势的精确类名打进日志，
 // 便于定位「一次滑动返回两层」中的「第二层」是系统原生还是某插件私有手势。
