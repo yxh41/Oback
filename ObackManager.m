@@ -261,6 +261,10 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 // target 的 handleNavigationTransition: 即可驱动原生交互 pop。
 - (void)_attachNavPanToNav:(UINavigationController *)nav win:(UIWindow *)win {
     if (!nav || !win) return;
+    if ([self _isExcludedNav:nav]) {
+        OBLog(@"attachNavPan: 跳过排除的 nav=%@（朋友圈等，保留原生边缘返回）", NSStringFromClass([nav class]));
+        return;
+    }
     NSArray *existing = objc_getAssociatedObject(nav, kNavPansKey);
     if ([existing isKindOfClass:[NSArray class]] && existing.count == 2) return;  // 已挂过，幂等
     UIView *navView = nav.view;            // 触发加载；为 nil 时下面 addGestureRecognizer 无操作，下次链接重试
@@ -318,6 +322,10 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     __block NSUInteger linked = 0;
     // 第一道防线：直接关掉 nav 原生 interactivePop（左边缘专属）
     [self _enumerateNavControllersFrom:win.rootViewController block:^(UINavigationController *nav){
+        if ([self _isExcludedNav:nav]) {
+            OBLog(@"linkNav: 跳过排除 nav（朋友圈等），保留原生 interactivePop");
+            return;
+        }
         nav.interactivePopGestureRecognizer.enabled = NO;
         failOnOurPans(nav.interactivePopGestureRecognizer);
         linked++;
@@ -381,6 +389,31 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
           NSStringFromClass([win class]), (unsigned long)names.count, names);
 }
 
+#pragma mark - 排除名单（不干预的页面）
+
+// 不干预的视图控制器：其所在 nav 不挂我们的边缘 pan、不关原生 interactivePop，交原生处理。
+// 当前仅微信朋友圈（WCTimeLineViewController 及其相关）：整屏滚动信息流与我们的边缘 pan
+// 存在手势竞争——我们的 pan 在 shouldBegin=YES 后仍进不了 Began（被朋友圈 scrollView/原生
+// 手势抢走），且 swizzle 关掉原生 interactivePop 后会把朋友圈原本可用的原生边缘返回也弄没。
+// 用户明确要求「不干预朋友圈」，故整页跳过，保留微信原生边缘返回。
+- (BOOL)_isExcludedViewController:(UIViewController *)vc {
+    if (!vc) return NO;
+    NSString *name = NSStringFromClass([vc class]);
+    if ([name isEqualToString:@"WCTimeLineViewController"] ||
+        [name rangeOfString:@"WCTimeLine"].location != NSNotFound) {
+        return YES;
+    }
+    return NO;
+}
+
+- (BOOL)_isExcludedNav:(UINavigationController *)nav {
+    if (!nav) return NO;
+    for (UIViewController *vc in nav.viewControllers) {
+        if ([self _isExcludedViewController:vc]) return YES;
+    }
+    return [self _isExcludedViewController:nav.topViewController];
+}
+
 #pragma mark - UIGestureRecognizerDelegate
 
 // 只在"落在边缘 + 可返回 + 不在黑名单"时，手势才接管，否则放行给 App 自身
@@ -428,6 +461,12 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
     }
     if (!top) { OBLog(@"shouldBegin=NO (无顶层 VC)"); return NO; }
+
+    // 排除名单（朋友圈等）：不干预，交原生处理，避免我们的 pan 与整屏滚动手势打架、进不了 Began
+    if ([self _isExcludedViewController:top]) {
+        OBLog(@"shouldBegin=NO (排除视图，交原生: top=%@)", NSStringFromClass([top class]));
+        return NO;
+    }
 
     // 按 pan 种类分流（根治"window 级边缘 pan 在列表页被 scrollView 抢赢"）：
     // - nav.view 上的 pan 只接管 nav pop；
