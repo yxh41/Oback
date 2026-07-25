@@ -213,63 +213,59 @@ static void OBApplyParallax(CGFloat percent,
     [tp release];   // MRC：alloc 所得；方法内部已拷贝 timing，此处释放所有权
 }
 
-// 兜底收尾：动画器因状态错位（如微信二次取用导致 continueAnimation 空操作）未能自行触发
-// completion 时，由 manager 定时器（_watchAnimator 强持本实例）调用。
-//
-// 关键：必须先将所有视图归位到终态，再调 completeTransition —— 否则 UIKit 只按结果
-// 移除/保留 view，不会把 transform/scale/alpha 从中间值刷到终值 → 画面卡半屏（华为健康截图实证）。
-// completion 守卫防重复（重复调用会触发 UIKit 断言崩溃）。
+// 统一收尾（finish/cancel/watchdog 共用）：
+// 不再依赖 UIViewPropertyAnimator 的 continueAnimation（double-fetch 时会阻塞主线程 →
+// watchdog 定时器无法触发 → 冻结/闪退）。改为：暂停 property animator → 用标准 UIView
+// 动画把视图归位到终态 → 在动画 completion 里调 completeTransition。
+// 这条路径不经过中断式动画器状态机，不受 double-fetch 影响，不阻塞主线程。
+// _completed 守卫防重复（finish/cancel 先调一次，watchdog 0.5s 后调则直接返回）。
 - (void)forceFinishIfNeeded {
     if (_completed) return;
     _completed = YES;
 
     id<UIViewControllerContextTransitioning> ctx = _context;
-    if (ctx) {
-        UIViewController *fromVC = [ctx viewControllerForKey:UITransitionContextFromViewControllerKey];
-        UIViewController *toVC   = [ctx viewControllerForKey:UITransitionContextToViewControllerKey];
-        UIView *fromView = fromVC.view;
-        UIView *toView   = toVC.view;
-        UIView *container = ctx.containerView;
+    if (!ctx) {
+        OBLog(@"animator forceFinish SKIP (context=nil, cancelled=%d)", _interactiveCancelled);
+        return;
+    }
 
-        if (_interactiveCancelled) {
-            // 取消归位：当前页复原、上一页隐藏回初始态
-            fromView.transform = CGAffineTransformIdentity;
-            fromView.alpha    = 1.0;
-            fromView.layer.cornerRadius = 0;
-            fromView.layer.masksToBounds = NO;
-            toView.transform   = CGAffineTransformIdentity;
-            toView.alpha      = 1.0;
-            // 遮罩淡出：容器中除 from/to 外仅我们加的 dim，全部淡出
-            for (UIView *sub in container.subviews) {
-                if (sub != fromView && sub != toView) {
-                    sub.alpha = 0.0;
-                }
-            }
-        } else {
-            // 提交归位：上一页全显、当前页消失（UIKit 随后会移除 fromView）
-            fromView.transform = CGAffineTransformIdentity;
-            fromView.alpha    = 0.0;          // 淡出（比直接 hidden 更自然）
-            fromView.layer.cornerRadius = 0;
-            fromView.layer.masksToBounds = NO;
-            toView.transform   = CGAffineTransformIdentity;
-            toView.alpha      = 1.0;
-            // 清除遮罩：容器中除 from/to 外仅我们加的 dim，全部淡出
-            for (UIView *sub in container.subviews) {
-                if (sub != fromView && sub != toView) {
-                    sub.alpha = 0.0;
-                }
-            }
+    UIViewController *fromVC = [ctx viewControllerForKey:UITransitionContextFromViewControllerKey];
+    UIViewController *toVC   = [ctx viewControllerForKey:UITransitionContextToViewControllerKey];
+    UIView *fromView = fromVC.view;
+    UIView *toView   = toVC.view;
+    UIView *container = ctx.containerView;
+
+    // 暂停 property animator，防止它与我们的 UIView 动画打架
+    if (_propertyAnimator && _propertyAnimator.state != UIViewAnimatingStateInactive) {
+        [_propertyAnimator pauseAnimation];
+    }
+
+    BOOL commit = !_interactiveCancelled;
+    OBLog(@"animator forceFinish animating (commit=%d edge=%@)", commit,
+          self.edge == ObackEdgeLeft ? @"左" : @"右");
+
+    // 用标准 UIView 动画把视图从当前中间态归位到终态（0.22s easeOut）
+    [UIView animateWithDuration:0.22 delay:0
+                         options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState
+                      animations:^{
+        // OBApplyParallax(1)=提交终态, OBApplyParallax(0)=取消回初始态
+        OBApplyParallax(commit ? 1.0 : 0.0, fromView, toView, nil,
+                        self.edge, self.params, self.parallaxToView);
+        // 遮罩淡出
+        for (UIView *sub in container.subviews) {
+            if (sub != fromView && sub != toView) sub.alpha = 0.0;
         }
-    }
-
-    BOOL cancelled = _interactiveCancelled;
-    @try {
-        if (_context) [_context completeTransition:!cancelled];
-    } @catch (NSException *exception) {
-        OBLog(@"forceComplete completeTransition CRASH: %@", exception.reason);
-        // 即使 completeTransition 崩溃/断言失败，视图已归位 → 用户至少不卡半屏
-    }
-    OBLog(@"animator forceComplete (cancelled=%d)", cancelled);
+    } completion:^(BOOL finished) {
+        // 清理圆角/阴影残留
+        fromView.layer.cornerRadius = 0;
+        fromView.layer.masksToBounds = NO;
+        @try {
+            [ctx completeTransition:commit];
+        } @catch (NSException *exception) {
+            OBLog(@"forceComplete completeTransition CRASH: %@", exception.reason);
+        }
+        OBLog(@"animator forceComplete done (cancelled=%d)", !commit);
+    }];
 }
 
 - (void)dealloc {
@@ -343,26 +339,22 @@ static void OBApplyParallax(CGFloat percent,
 }
 
 - (void)finish {
-    // 提交前先用真实松手速度更新弹簧初速度（动量继承），再续跑动画器到 end
+    // 提交返回：直接调 forceFinishIfNeeded 做 UIView 动画归位 + completeTransition。
+    // 不再调 applyReleaseVelocity/continueAnimation —— 后者在 double-fetch(微信等)时会
+    // 阻塞主线程，watchdog 定时器无法触发 → 冻结/闪退。
     ObackAnimator *anim = self.animator ?: [ObackManager shared].currentAnimator;
-    UIViewPropertyAnimator *pa = anim.propertyAnimator;
-    OBLog(@"oback-intc finish (self=%p animator=%p pa=%p state=%ld)", self, anim, pa, (long)(pa ? pa.state : 0));
-    if (pa && pa.state == UIViewAnimatingStateInactive) [pa pauseAnimation];
+    OBLog(@"oback-intc finish (self=%p animator=%p)", self, anim);
     anim.interactiveCancelled = NO;
-    [anim applyReleaseVelocity];   // 更新弹簧初速度并 continueAnimation（续跑到 end -> completion 触发 completeTransition）
+    [anim forceFinishIfNeeded];
 }
 
 - (void)cancel {
-    // 取消：反向续跑动画器回到 start（弹簧回弹），completion 以 interactiveCancelled=YES 调 completeTransition:NO
+    // 取消回弹：直接调 forceFinishIfNeeded 做 UIView 动画归位(回初始态) + completeTransition:NO。
+    // 不再调 continueAnimationWithTimingParameters: —— 同 finish 的根因。
     ObackAnimator *anim = self.animator ?: [ObackManager shared].currentAnimator;
-    UIViewPropertyAnimator *pa = anim.propertyAnimator;
-    anim.interactiveCancelled = YES;   // 取消意图：即使下方 pa=nil 走兜底，也以「取消」收尾（不 pop）
-    OBLog(@"oback-intc cancel (self=%p animator=%p pa=%p state=%ld)", self, anim, pa, (long)(pa ? pa.state : 0));
-    if (!pa) return;   // pa=nil（动画器未构建）→ 交给 manager 兜底 forceFinishIfNeeded，不再早退丢 completeTransition
-    if (pa.state == UIViewAnimatingStateInactive) [pa pauseAnimation];
-    if (pa.state == UIViewAnimatingStateActive)   [pa pauseAnimation];
-    pa.reversed = YES;   // 反向续跑 -> 回到 start -> completion 以 cancelled=YES 调 completeTransition:NO
-    [pa continueAnimationWithTimingParameters:pa.timingParameters];
+    anim.interactiveCancelled = YES;
+    OBLog(@"oback-intc cancel (self=%p animator=%p)", self, anim);
+    [anim forceFinishIfNeeded];
 }
 
 @end

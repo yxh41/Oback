@@ -437,7 +437,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 
     // 记录松手时的前向速度/进度：
     // - 写回 manager 自身（供诊断 / 下次 beginTransition 清零逻辑参考）
-    // - 同步写入当前动画器，finish 时经 applyReleaseVelocity 真正用于动量继承的弹簧初速度
+    // - 同步写入当前动画器（forceFinishIfNeeded 用 OBApplyParallax 做归位动画时可能参考）
     self.releaseVelocity = vel;
     self.releasePercent  = _currentPercent;
     self.currentAnimator.releaseVelocity = vel;
@@ -460,7 +460,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // 仍指向该 td；释放会留下野指针。td 的生命周期由被 dismiss 的 VC 关联对象保证（见 beginTransition）。
     // 仅当本次手势确实触发了交互转场才 finish/cancel；纯点按未触发则什么都不碰，安全复位。
     if (_transitionTriggered) {
-        if (commit) [self.interactive finish];   // 提交：applyReleaseVelocity 已带真实速度→动量继承
+        if (commit) [self.interactive finish];   // 提交：forceFinishIfNeeded 做 UIView 动画归位 + completeTransition
         else {
             self.currentAnimator.releaseVelocity = 0;  // 取消：温和回弹，不带入前向速度
             [self.interactive cancel];           // 反向续跑动画器回弹（直接驱动中断式动画器）
@@ -482,9 +482,8 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         _transitionTriggered = NO;
         return;   // 此路径用系统原生动画，无 ObackAnimator，无需兜底收尾
     }
-    // 兜底收尾：finish/cancel 后若动画器因状态错位（如微信二次取用动画器导致 continueAnimation 空操作）
-    // 未能自行触发 completeTransition，0.5s 内由 manager 单例（永不被释放，MRC 安全）强制收尾，
-    // 根绝「转场上下文孤儿化 → nav 卡在交互态 → 界面冻结」这一整类冻结。
+    // 兜底收尾：finish/cancel 已直接调 forceFinishIfNeeded（不再走 continueAnimation），
+    // watchdog 仅作为最后一道保险（若 UIView 动画 completion 因极端情况未触发）。
     [self _scheduleCompletionWatchdog];
     self.interacting = NO;
     self.interactive = nil;
