@@ -828,6 +828,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (nav.topViewController != topAtSchedule) { [target release]; return; }   // 已正常推进，跳过
+        if (self.interacting) { [target release]; return; }   // 已有新手势进行中，不干扰（避免误伤二次滑动）
         id tc = [topAtSchedule transitionCoordinator];
         BOOL stuck = (tc && [tc respondsToSelector:@selector(isInteractive)] && [tc isInteractive]);
         if (stuck) {
