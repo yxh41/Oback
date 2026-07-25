@@ -575,7 +575,12 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // 方案 A：nav pop 改为驱动系统原生交互 pop（根除自定义转场 reparent toView 导致的空白/损坏）。
     // 在手势 Began(位移=0)即启动系统原生交互转场，由后续 updateTransition 的横向位移 scrub。
     // modal dismiss（currentParallaxToView=NO）走方案B 自定义转场，不在此启动。
-    if (self.currentParallaxToView) {
+    // 【导航视差（实验）】开启时：此处不启动系统原生交互 pop —— 改由 triggerTransitionInWindow:
+    // 调 popViewControllerAnimated: 触发纯自定义交互转场（ObackNavDelegate 返回自定义 animator +
+    // interactive controller，本管理器经 updateWithPercent/finish/cancel 单驱动）。若此处仍喂
+    // handleNavigationTransition:，系统原生交互转场会与我们的自定义 animator 争抢 fractionComplete
+    // （双驱动→抖动/不稳定），故必须排除。
+    if (self.currentParallaxToView && ![ObackPreferences navParallaxEnabled]) {
         [self driveSystemNavPopBeginWithPan:pan window:win];
     }
 
@@ -618,12 +623,14 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
               nav.delegate ? NSStringFromClass([nav.delegate class]) : @"(nil)",
               (int)[[nav.delegate class] isSubclassOfClass:NSClassFromString(@"ObackNavDelegate")]);
         self.currentParallaxToView = YES;   // nav pop 视差（移动上一页）
-        if (self.interacting) {
+        if (self.interacting && ![ObackPreferences navParallaxEnabled]) {
             // 方案 A：交互 pop 已在 beginTransition 通过 handleNavigationTransition: 启动，
             // 此处不再调用 popViewControllerAnimated:（否则会触发第二次转场/黑屏）。
             OBLog(@"trigger: nav pop 已启动(系统原生交互)，忽略重复 popViewControllerAnimated");
         } else {
-            // 非交互兜底（快滑零位移：endTransition 先把 interacting 置 NO 再走此路径）
+            // 非交互兜底（快滑零位移：endTransition 先把 interacting 置 NO 再走此路径）；
+            // 或【导航视差（实验）】交互态：触发 popViewControllerAnimated: 启动纯自定义交互转场，
+            // 由 ObackNavDelegate 返回自定义 animator + interactive controller，本管理器单驱动。
             [nav popViewControllerAnimated:YES];
         }
     } else if (top.presentingViewController) {

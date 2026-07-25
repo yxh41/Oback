@@ -1,5 +1,6 @@
 #import "ObackTransition.h"
 #import "ObackManager.h"   // 读取松手速度/进度做动量继承（ObackManager.h 已 import ObackTransition.h，无循环依赖）
+#import "ObackPreferences.h"  // navParallaxEnabled 判定（导航栏协同仅在该开关开启时启用）
 
 // 该 SDK 头未在本编译单元暴露 UIViewImplicitlyAnimating 协议的
 // continueAnimationWithTimingParameters: 声明，-Werror 会把它误判为 error。
@@ -193,6 +194,9 @@ static void OBApplyParallax(CGFloat percent,
             // 改为仅当前页(fromView)滑出、无上一页底图（视觉略差但安全，绝不空白）。
             OBLog(@"interruptible: nav pop 图像快照失败，安全兜底(不挂真实 toView，避免底部空白)");
         }
+        // 导航栏协同（实验）：隐藏活 bar + 叠加快照，转场结束 restoreNavBar 恢复。
+        // 仅 navParallax 开启且本就是 nav pop（parallaxToView=YES）时内部才会真正执行。
+        [self _setupNavBarCoordinationFromVC:from toVC:to container:container];
     } else {
         // 弹窗 dismiss 方案B：底层 presenting(toView) 不碰 transform；目的页正常挂载，
         // dim 置于二者之间（presenting 不加深遮罩，避免已可见背景闪暗）。
@@ -218,6 +222,8 @@ static void OBApplyParallax(CGFloat percent,
     __block ObackAnimator *blockSelf = self;
     [anim addAnimations:^{
         OBApplyParallax(1, fromView, toView, dim, blockSelf.edge, blockSelf.params, blockSelf.parallaxToView);
+        // 导航栏协同：快照随内容淡出（交互 scrub 时 fractionComplete 自动插值 1→0）
+        if (blockSelf.navBarSnapshotView) blockSelf.navBarSnapshotView.alpha = 0.0;
     }];
     [anim addCompletion:^(UIViewAnimatingPosition finalPosition) {
         [dim removeFromSuperview];
@@ -227,6 +233,7 @@ static void OBApplyParallax(CGFloat percent,
         blockSelf.completed = YES;
         if (blockSelf.context) [blockSelf.context completeTransition:!cancelled];
         OBLog(@"animator done (cancelled=%d)", cancelled);
+        [blockSelf restoreNavBar];   // 导航栏协同：转场结束时恢复活 bar（幂等；防御性，主路径由 forceFinishIfNeeded 调用）
         blockSelf = nil;   // 打破循环引用（MRC 无 __weak）
     }];
     self.propertyAnimator = anim;   // retain 属性赋值（anim 为 autorelease，直接赋 ivar 会在 drain 后野指针）
@@ -330,7 +337,8 @@ static void OBApplyParallax(CGFloat percent,
         } @catch (NSException *exception) {
             OBLog(@"forceComplete completeTransition CRASH: %@", exception.reason);
         }
-        // 显式清理所有非 from/to 子视图（dim 遮罩等）
+        [self restoreNavBar];   // 导航栏协同：恢复活 bar（幂等）—— 防 forceFinish 后活 bar 永久隐藏
+        // 显式清理所有非 from/to 子视图（dim 遮罩、底页图像、bar 快照等）
         NSArray *subs = [[container.subviews copy] autorelease];
         for (UIView *sub in subs) {
             if (sub != fromView && sub != toView) [sub removeFromSuperview];
@@ -351,6 +359,7 @@ static void OBApplyParallax(CGFloat percent,
         } @catch (NSException *exception) {
             OBLog(@"forceComplete completeTransition CRASH (dispatch_after): %@", exception.reason);
         }
+        [self restoreNavBar];   // 导航栏协同：保险路径也恢复活 bar（防止 completion 未触发时 bar 永久隐藏）
         NSArray *subs = [[container.subviews copy] autorelease];
         for (UIView *sub in subs) {
             if (sub != fromView && sub != toView) [sub removeFromSuperview];
@@ -364,7 +373,60 @@ static void OBApplyParallax(CGFloat percent,
 
 - (void)dealloc {
     [_propertyAnimator release];
+    [_navBarSnapshotView release];
     [super dealloc];
+}
+
+#pragma mark - 导航栏协同（实验）
+
+// 转场开始时：捕获活导航栏的快照，隐藏活 bar，把快照叠到 container 顶层。
+// 转场过程中快照随内容淡出（addAnimations 块里设 alpha→0，交互 scrub 时 fractionComplete 自动插值）；
+// 转场结束 restoreNavBar 恢复活 bar。以此消除"内容/bar 不同步"的导航栏损坏
+// （自定义转场只拿到 fromView/toView，导航栏由 nav controller 单独持有，不随内容转场）。
+// 仅 navParallax 开启且 parallaxToView=YES 时调用。
+- (void)_setupNavBarCoordinationFromVC:(UIViewController *)fromVC
+                                  toVC:(UIViewController *)toVC
+                              container:(UIView *)container {
+    if (![ObackPreferences navParallaxEnabled]) return;
+    UINavigationController *nav = fromVC.navigationController;
+    if (!nav) nav = toVC.navigationController;
+    if (!nav) { OBLog(@"navBar-coord SKIP (无 nav)"); return; }
+    UINavigationBar *bar = nav.navigationBar;
+    if (!bar || bar.hidden || bar.alpha < 0.01) {
+        OBLog(@"navBar-coord SKIP (bar=nil/hidden)");
+        return;
+    }
+    @try {
+        UIView *snap = [bar snapshotViewAfterScreenUpdates:NO];
+        if (!snap) { OBLog(@"navBar-coord SKIP (快照为 nil)"); return; }
+        // 把 bar 在其 superview 坐标系下的 frame 转换到 container 坐标系
+        CGRect r = [container convertRect:bar.frame fromView:bar.superview];
+        if (r.size.width < 1.0 || r.size.height < 1.0) r = bar.frame;
+        snap.frame = r;
+        snap.userInteractionEnabled = NO;
+        snap.layer.zPosition = 1000;   // 确保压在 fromView 之上
+        [container addSubview:snap];
+        self.navBarSnapshotView = snap;          // retain 属性
+        self.navControllerForBar = nav;          // assign（避免成环）
+        bar.hidden = YES;                        // 隐藏活 bar，避免与内容不同步
+        OBLog(@"navBar-coord: 已隐藏活 bar 并叠加快照 (bar=%@ frame=%@)",
+              NSStringFromClass([bar class]), NSStringFromCGRect(r));
+    } @catch (NSException *e) {
+        OBLog(@"navBar-coord: 快照异常 %@", e.reason);
+    }
+}
+
+// 恢复活 bar 并移除快照（幂等：可重复调用）
+- (void)restoreNavBar {
+    if (_navBarSnapshotView) {
+        [_navBarSnapshotView removeFromSuperview];
+        self.navBarSnapshotView = nil;   // 置 nil 同时 release（retain 属性）
+    }
+    if (_navControllerForBar && _navControllerForBar.navigationBar) {
+        _navControllerForBar.navigationBar.hidden = NO;
+        _navControllerForBar = nil;
+        OBLog(@"navBar-coord: 已恢复活 bar");
+    }
 }
 
 - (void)applyShadowTo:(UIView *)v {
