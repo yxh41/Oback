@@ -243,6 +243,17 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     CFTimeInterval dt = (CACurrentMediaTime() - t0) * 1000.0;
     OBLog(@"linkNav: 链接 %lu 个返回手势 (耗时 %.2f ms) @window=%@",
           (unsigned long)linked, dt, NSStringFromClass([win class]));
+    if (linked == 0) {
+        // 诊断：某些 app（如 marknow）linkNav 找不到任何 UINavigationController。
+        // 打印 rootViewController 类名/子容器/呈现态，判断它是否用自定义容器（非标准 childViewControllers）
+        // 导致枚举遗漏（→ 边缘返回无法工作、甚至"进不去页面"）。
+        UIViewController *rvc = win.rootViewController;
+        OBLog(@"linkNav: 0 导航！rootVC=%@ childCount=%lu presented=%@ tab=%@",
+              NSStringFromClass([rvc class]),
+              (unsigned long)rvc.childViewControllers.count,
+              NSStringFromClass([rvc.presentedViewController class]),
+              NSStringFromClass([[rvc selectedViewController] class]));
+    }
     [self _diagLogEdgeGesturesInWindow:win];   // 双返回诊断（开关关闭时无输出，且自带节流）
 }
 
@@ -315,9 +326,11 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // 方案 A：在 shouldBegin 即确定本次是 nav pop 还是 modal dismiss，供 begin/update/end 分流。
     // nav 且栈深>1 → nav pop（系统原生交互转场，不 reparent toView）；否则 modal dismiss（方案B 自定义）。
     self.currentParallaxToView = (nav && nav.viewControllers.count > 1) ? YES : NO;
-    OBLog(@"shouldBegin=YES (edge=%@ nav.childCount=%lu presenting=%d parallaxToView=%d)",
+    OBLog(@"shouldBegin=YES (edge=%@ top=%@ nav.childCount=%lu presenting=%d parallaxToView=%d)",
           edge == ObackEdgeLeft ? @"左" : @"右",
-          (unsigned long)nav.viewControllers.count, top.presentingViewController != nil);
+          NSStringFromClass([top class]),
+          (unsigned long)nav.viewControllers.count, top.presentingViewController != nil,
+          self.currentParallaxToView);
     if (p.hapticEnabled) {
         UIImpactFeedbackGenerator *g = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
         [g impactOccurred];
@@ -783,6 +796,19 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     [super touchesBegan:touches withEvent:event];
     UITouch *touch = [touches anyObject];
     if (touch) self.startPoint = [touch locationInView:self.view];
+    // 诊断（节流 1s）：确认 window pan 是否收到朋友圈/照片查看器/部分 app 的触摸。
+    // 若某页面【无任何 [diag] 输出】却也【无 shouldBegin】，说明触摸未送达本 window pan
+    // （内容在独立 window 或触摸被其它手势吞掉）→ 边缘返回自然"没效果"。
+    static CFTimeInterval sLastDiag = 0;
+    CFTimeInterval now = CACurrentMediaTime();
+    if (now - sLastDiag > 1.0) {
+        sLastDiag = now;
+        UITouch *t = [touches anyObject];
+        CGPoint l = t ? [t locationInView:self.view] : CGPointZero;
+        // self.view 即本 pan 挂载的 window（window 级手势），故直接用其类名表示所在 window
+        OBLog(@"[diag] pan touchesBegan @(%.0f,%.0f) win=%@",
+              l.x, l.y, NSStringFromClass([self.view class]));
+    }
 }
 
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
