@@ -157,43 +157,16 @@ static void OBApplyParallax(CGFloat percent,
 
     UIView *dim = nil;
     if (self.parallaxToView) {
-        // 【关键修复】nav pop：底页(toView) 用「离屏渲染的图像」呈现，绝不重挂载真实 toView 进 container。
-        // 真实 toView 内部多为 UIScrollView，一旦 reparent 进 containerView，其 safeAreaInsets/
-        // contentInset 会随 superview 变化被重算 → 底部 TabBar/功能入口错位、被滚出视口
-        // （华为健康/微信「底部空白」根因，与 toView 是否 transform 无关）。
-        // 系统原生 pop 的底页本就完全静止，故用 drawViewHierarchyInRect:afterScreenUpdates:YES 渲染出
-        // 一张当前内容的静态图像铺底——图像是离屏像素，reparent 它永不伤真实 scrollView；
-        // 转场结束 completeTransition 后，真实 toView（从未移动）原样显露，零 layout 扰动、零空白。
-        // 只把当前页(fromView)挂入 container 做滑出；不创建 dim（底页无需压暗、避免遮挡）。
+        // nav pop：底页(toView) 直接入 container（真实视图、实时渲染）——取代之前「drawViewHierarchy
+        // 离屏快照铺底」方案。旧快照方案在交互转场开始时上一页尚未进渲染树，drawViewHierarchy 拍到
+        // 空图 → Filza 等 App 中间页空白（oback 真机复现）。
+        // 为何现在可安全重挂载真实 toView：当年（60352e6）"底部空白/错位"根因是**给 toView 加
+        // scale/translate 视差**（见 OBApplyParallax 内 toView 已改 CGAffineTransformIdentity），
+        // reparent + transform 破坏 scrollView 的 contentOffset/layout。本版 toView 完全静止，
+        // 重挂载进全屏 container 不改其布局，不重现 scrollView 错位；真实视图实时渲染，杜绝空白。
+        // 仅把当前页(fromView)挂入 container 做滑出；不创建 dim（底页无需压暗、避免遮挡）。
         if (fromView.superview != container) [container addSubview:fromView];
-        // 用「离屏渲染底页图像」作容器最底层，绝不重挂载真实 toView（避免底部空白根因）。
-        // 旧方案 snapshotViewAfterScreenUpdates:NO 在交互转场此刻 toView 尚未进窗口/未渲染，
-        // 永远返回 nil → 每次都退回挂真实 toView → 重挂载破坏 scrollView 布局 → 底部空白
-        // （oback_debug(38).log 实测每次都打「快照失败」印证）。
-        // 改用 drawViewHierarchyInRect:afterScreenUpdates:YES：强制离屏渲染 toView 当前内容
-        // （无论是否进窗口都能拿到正确像素），转成 UIImageView 铺底。图像是静态像素，
-        // reparent 它永不伤真实 scrollView；completeTransition 后真实 toView（从未被移动）
-        // 原样显露，零 layout 扰动、零空白。
-        UIImage *snapImg = nil;
-        CGRect snapRect = toView.bounds;
-        if (snapRect.size.width < 1.0 || snapRect.size.height < 1.0) snapRect = container.bounds;
-        UIGraphicsBeginImageContextWithOptions(snapRect.size, NO, 0);
-        [toView drawViewHierarchyInRect:snapRect afterScreenUpdates:YES];
-        snapImg = UIGraphicsGetImageFromCurrentImageContext();
-        UIGraphicsEndImageContext();
-        if (snapImg) {
-            UIImageView *iv = [[[UIImageView alloc] initWithImage:snapImg] autorelease];
-            iv.frame = container.bounds;
-            iv.userInteractionEnabled = NO;
-            iv.contentMode = UIViewContentModeScaleToFill;
-            [container insertSubview:iv belowSubview:fromView];
-            OBLog(@"interruptible: nav pop 使用底页图像快照(避免底部空白)");
-        } else {
-            // 兜底：极端情况下图像取不到。不再 reparent 真实 toView（那正是之前华为健康/微信
-            // 底部空白根因——真实 toView 的 scrollView 随 superview 变化被重算 contentInset）。
-            // 改为仅当前页(fromView)滑出、无上一页底图（视觉略差但安全，绝不空白）。
-            OBLog(@"interruptible: nav pop 图像快照失败，安全兜底(不挂真实 toView，避免底部空白)");
-        }
+        if (toView.superview != container) [container insertSubview:toView atIndex:0];
         // 导航栏协同（实验）：隐藏活 bar + 叠加快照，转场结束 restoreNavBar 恢复。
         // 仅 navParallax 开启且本就是 nav pop（parallaxToView=YES）时内部才会真正执行。
         [self _setupNavBarCoordinationFromVC:from toVC:to container:container];
