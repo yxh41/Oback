@@ -53,12 +53,12 @@ static BOOL oback_shouldBackOff(void) {
     [ObackManager shared].currentAnimator = nil;   // 先清，避免残留上一轮动画器
     // 仅在我们手势驱动返回时接管 pop 动画；普通返回按钮走 App 原生转场（避免破坏/黑屏）
     if (operation == UINavigationControllerOperationPop && interacting) {
-        ObackAnimator *a = [[ObackAnimator alloc] initWithEdge:[ObackManager shared].currentEdge
-                                                      params:[ObackPreferences params]];
-        [ObackManager shared].interactive.animator = a;   // 反向引用，finish/cancel 时改弹簧速度
-        [ObackManager shared].currentAnimator = a;
-        OBLog(@"nav-anim -> ObackAnimator a=%p interactive=%p", a, [ObackManager shared].interactive);
-        return a;
+        // 方案 A：返回 nil → 系统原生交互 pop（toView 由 UIKit 原生处理，
+        // 根除自定义转场 reparent toView 进 containerView 导致的空白 / 导航栏损坏 / scrollView 错位）。
+        // 系统默认转场由 _UINavigationInteractiveTransition 驱动，ObackManager 已用
+        // handleNavigationTransition: 把 window pan 喂给它做 scrub。
+        OBLog(@"nav-anim -> nil (方案A: 系统原生 pop)");
+        return nil;
     }
     id ret = nil;
     if (_original && [_original respondsToSelector:_cmd])

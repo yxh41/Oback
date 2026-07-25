@@ -101,6 +101,8 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     CGPoint _indicatorAnchor;    // 手势起点（胶囊初始垂直位置）
     CGFloat _indicatorStartX;    // 手势起点 x（用于计算跟随位移）
     ObackAnimator *_watchAnimator; // MRC 强引用：兜底收尾定时器期间持有动画器，避免 UIKit 释放成野指针
+    id     _navPopTarget;        // 方案A: 系统原生 nav pop 的私有 target(_UINavigationInteractiveTransition)，
+                                 // 驱动 handleNavigationTransition: 用（assign，由 nav 内部持有，转场期间有效）
 }
 
 + (instancetype)shared {
@@ -310,7 +312,10 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // 这样朋友圈详情等横向分页容器也能从最左/右边缘触发返回（修复"朋友圈无作用"）。
 
     self.currentEdge = edge;
-    OBLog(@"shouldBegin=YES (edge=%@ nav.childCount=%lu presenting=%d)",
+    // 方案 A：在 shouldBegin 即确定本次是 nav pop 还是 modal dismiss，供 begin/update/end 分流。
+    // nav 且栈深>1 → nav pop（系统原生交互转场，不 reparent toView）；否则 modal dismiss（方案B 自定义）。
+    self.currentParallaxToView = (nav && nav.viewControllers.count > 1) ? YES : NO;
+    OBLog(@"shouldBegin=YES (edge=%@ nav.childCount=%lu presenting=%d parallaxToView=%d)",
           edge == ObackEdgeLeft ? @"左" : @"右",
           (unsigned long)nav.viewControllers.count, top.presentingViewController != nil);
     if (p.hapticEnabled) {
@@ -366,6 +371,13 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     self.interacting = YES;
     _transitionTriggered = NO;
 
+    // 方案 A：nav pop 改为驱动系统原生交互 pop（根除自定义转场 reparent toView 导致的空白/损坏）。
+    // 在手势 Began(位移=0)即启动系统原生交互转场，由后续 updateTransition 的横向位移 scrub。
+    // modal dismiss（currentParallaxToView=NO）走方案B 自定义转场，不在此启动。
+    if (self.currentParallaxToView) {
+        [self driveSystemNavPopBeginWithPan:pan window:win];
+    }
+
     CGPoint loc = [pan locationInView:win];
     _indicatorAnchor = loc;
     _indicatorStartX = loc.x;
@@ -377,7 +389,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 // 首次横向拖动时（p>0）才真正触发 pop/dismiss。
 // 关键修复：此前在 beginTransition(手势 Began) 就立即 popViewControllerAnimated:，
 // 一旦用户只是点按/纵向滑动即取消，交互转场易被卡在"进行中"态导致界面冻结。
-- (void)triggerTransitionInWindow:(UIWindow *)win {
+- (void)triggerTransitionInWindow:(UIWindow *)win withPan:(UIPanGestureRecognizer *)pan {
     UIViewController *top = [self topMost:win.rootViewController];
     if (!top) return;
 
@@ -397,7 +409,14 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
               nav.delegate ? NSStringFromClass([nav.delegate class]) : @"(nil)",
               (int)[[nav.delegate class] isSubclassOfClass:NSClassFromString(@"ObackNavDelegate")]);
         self.currentParallaxToView = YES;   // nav pop 视差（移动上一页）
-        [nav popViewControllerAnimated:YES];
+        if (self.interacting) {
+            // 方案 A：交互 pop 已在 beginTransition 通过 handleNavigationTransition: 启动，
+            // 此处不再调用 popViewControllerAnimated:（否则会触发第二次转场/黑屏）。
+            OBLog(@"trigger: nav pop 已启动(系统原生交互)，忽略重复 popViewControllerAnimated");
+        } else {
+            // 非交互兜底（快滑零位移：endTransition 先把 interacting 置 NO 再走此路径）
+            [nav popViewControllerAnimated:YES];
+        }
     } else if (top.presentingViewController) {
         // 方案B（安全恢复弹窗 dismiss 视差）：只移动被 dismiss 的 sheet(fromView)，
         // 绝不碰底层 presenting(toView)（黑屏根因），也不加深遮罩（避免已可见背景闪暗）。
@@ -419,7 +438,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 }
 
 - (void)updateTransition:(UIPanGestureRecognizer *)pan {
-    if (!self.interacting || !self.interactive) return;
+    if (!self.interacting) return;
     UIWindow *win = (UIWindow *)pan.view;
     CGFloat w = win.bounds.size.width;
     if (w <= 0) return;
@@ -429,20 +448,25 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     CGFloat p = dir * t.x / w;
     p = MAX(0.0, MIN(1.0, p));
 
-    // 首次横向拖动（p>0）才真正触发 pop/dismiss；纯纵向/点按不会启动转场
+    // 首次横向拖动（p>0）才真正触发（modal 路径在此触发 dismiss；nav 路径已在 begin 启动，这里不再触发）
     if (!_transitionTriggered && p > 0.001) {
-        [self triggerTransitionInWindow:win];
+        [self triggerTransitionInWindow:win withPan:pan];
         _transitionTriggered = YES;
     }
 
     _currentPercent = p;
-    [self.interactive updateWithPercent:p];
+    if (self.currentParallaxToView) {
+        // 方案 A：nav pop 用系统原生交互转场，直接把当前 pan 喂给 handleNavigationTransition: 做 scrub
+        [self _callSystemNavPop:pan];
+    } else {
+        if (self.interactive) [self.interactive updateWithPercent:p];
+    }
     [self updateIndicatorWithPan:pan window:win];
 }
 
 - (void)endTransition:(UIPanGestureRecognizer *)pan {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(dismissIndicatorSafety) object:nil];
-    if (!self.interacting || !self.interactive) return;
+    if (!self.interacting) return;
     UIWindow *win = (UIWindow *)pan.view;
     CGFloat w = win.bounds.size.width;
     CGPoint v = [pan velocityInView:win];
@@ -470,6 +494,23 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     OBLog(@"endTransition (percent=%.2f vel=%.0f projected=%.2f commit=%d triggered=%d)",
           _currentPercent, vel, projected, commit, _transitionTriggered);
     if (_indicator) [self dismissIndicatorCommitted:commit params:p window:win];
+
+    // ===== 方案 A：nav pop 用系统原生交互转场 =====
+    // 直接把当前 pan(已 Ended)喂给 handleNavigationTransition:，系统据此完成/取消原生 pop。
+    // 无自定义动画器、无 completeTransition 调用、无 watchdog —— 全部由 UIKit 原生收尾。
+    if (self.currentParallaxToView) {
+        [self _callSystemNavPop:pan];
+        self.interacting = NO;
+        _navPopTarget = nil;
+        self.interactive = nil;
+        self.currentAnimator = nil;
+        _currentPercent = 0;
+        _transitionTriggered = NO;
+        OBLog(@"endTransition: nav pop 系统原生收尾 (commit=%d)", commit);
+        return;
+    }
+
+    // ===== 以下为 modal dismiss 路径（方案B），保持不变 =====
     // 注意：这里不释放 currentTD —— 弹窗若 cancel 仍 present，其 transitioningDelegate(assign)
     // 仍指向该 td；释放会留下野指针。td 的生命周期由被 dismiss 的 VC 关联对象保证（见 beginTransition）。
     // 仅当本次手势确实触发了交互转场才 finish/cancel；纯点按未触发则什么都不碰，安全复位。
@@ -490,7 +531,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         self.interacting = NO;
         OBLog(@"endTransition: 快滑零位移，非交互直接返回 (vel=%.0f edge=%@)", vel,
               self.currentEdge == ObackEdgeLeft ? @"左" : @"右");
-        [self triggerTransitionInWindow:win];
+        [self triggerTransitionInWindow:win withPan:pan];
         self.interactive = nil;
         _currentPercent = 0;
         _transitionTriggered = NO;
@@ -532,16 +573,78 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     UIWindow *win = (UIWindow *)pan.view;
     ObackParams *p = [ObackPreferences params];
     if (_indicator) [self dismissIndicatorCommitted:NO params:p window:win];
-    // 仅当本次手势确实触发了转场才 cancel（直接驱动中断式动画器反向回弹）；
-    // 未触发则什么都不碰，安全复位，避免误调用导致导航卡在交互态。
-    if (_transitionTriggered && self.interactive) [self.interactive cancel];
-    // 兜底收尾：cancel 内部 pa=nil 时早退不会调 completeTransition，此处定时器保证转场仍被收尾（见 _scheduleCompletionWatchdog）
-    [self _scheduleCompletionWatchdog];
+    if (self.currentParallaxToView) {
+        // 方案 A：nav pop 用系统原生交互转场，把当前 pan(Failed/Cancelled)喂给 handleNavigationTransition:
+        // 让系统取消原生 pop；无自定义动画器，无需 watchdog/interactive cancel。
+        if (_transitionTriggered) [self _callSystemNavPop:pan];
+        // 兜底：若系统 target 取不到导致原生 pop 从未启动（driveSystemNavPopBegin 降级为非交互 pop），
+        // 此处 _navPopTarget 为 nil，_callSystemNavPop 为空操作，无需额外处理。
+    } else {
+        // 仅当本次手势确实触发了转场才 cancel（直接驱动中断式动画器反向回弹）；
+        // 未触发则什么都不碰，安全复位，避免误调用导致导航卡在交互态。
+        if (_transitionTriggered && self.interactive) [self.interactive cancel];
+        // 兜底收尾：cancel 内部 pa=nil 时早退不会调 completeTransition，此处定时器保证转场仍被收尾（见 _scheduleCompletionWatchdog）
+        [self _scheduleCompletionWatchdog];
+    }
     self.interacting = NO;
     self.interactive = nil;
     self.currentAnimator = nil;   // assign 弱引用，显式清更安全
+    _navPopTarget = nil;
     _currentPercent = 0;
     _transitionTriggered = NO;
+}
+
+#pragma mark - 方案 A：驱动系统原生 nav pop
+
+// 取系统 interactivePopGestureRecognizer 的私有 target（_UINavigationInteractiveTransition 实例）。
+// 该 target 的 action handleNavigationTransition: 即系统原生交互 pop 的入口。
+- (id)navPopSystemTargetForNav:(UINavigationController *)nav {
+    @try {
+        id ipg = nav.interactivePopGestureRecognizer;
+        NSArray *targets = [ipg valueForKey:@"_targets"];
+        id targetObj = targets.firstObject;
+        return [targetObj valueForKey:@"target"];
+    } @catch (NSException *e) {
+        OBLog(@"navPopSystemTarget fail: %@", e);
+        return nil;
+    }
+}
+
+// 在手势 Began(位移=0)启动系统原生交互 pop：把 window pan 作为 sender 喂给 handleNavigationTransition:。
+// 等价于 FDFullscreenPopGesture 把自定义 pan 的 target 设为系统 target、action 设为
+// handleNavigationTransition: —— 系统原生交互转场运行，toView 由 UIKit 原生呈现与清理，
+// 彻底消除"自定义转场 reparent toView 进 containerView"导致的底部空白 / 导航栏损坏 / scrollView 错位。
+- (void)driveSystemNavPopBeginWithPan:(UIPanGestureRecognizer *)pan window:(UIWindow *)win {
+    UIViewController *top = [self topMost:win.rootViewController];
+    UINavigationController *nav = top.navigationController;
+    if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
+    if (!nav) { OBLog(@"navPop: 无 nav，放弃"); return; }
+    // 兜底确保 ObackNavDelegate 就位（delegate:nil 时自动包装；已是 ObackNavDelegate 则幂等）
+    [nav setDelegate:nav.delegate];
+    _navPopTarget = [self navPopSystemTargetForNav:nav];
+    if (!_navPopTarget) {
+        // 极端兜底：取不到系统 target，降级为非交互 popViewControllerAnimated（interacting 置 NO
+        // 让 delegate 返回 nil → 系统默认转场），至少能返回，不卡死。
+        OBLog(@"navPop: 取不到系统 target，降级为非交互 popViewControllerAnimated");
+        [nav popViewControllerAnimated:YES];
+        self.interacting = NO;
+        _transitionTriggered = YES;
+        return;
+    }
+    // 系统原生 interactivePopGestureRecognizer 保持 disabled（避免它自己触发 double），
+    // 直接把我们的 pan 作为 sender 喂给它的私有 action。
+    [self _callSystemNavPop:pan];
+    _transitionTriggered = YES;
+    OBLog(@"navPop: 系统原生交互 pop 已启动 (target=%@)", NSStringFromClass([_navPopTarget class]));
+}
+
+// 把 window pan 作为 sender 喂给系统私有 action handleNavigationTransition:。
+// Began→开始原生交互转场；Changed→scrub 进度；Ended/Cancelled→系统完成/取消。
+- (void)_callSystemNavPop:(UIPanGestureRecognizer *)pan {
+    if (!_navPopTarget) return;
+    SEL sel = NSSelectorFromString(@"handleNavigationTransition:");
+    if (![_navPopTarget respondsToSelector:sel]) return;
+    [_navPopTarget performSelector:sel withObject:pan];
 }
 
 #pragma mark - 边缘方向胶囊
