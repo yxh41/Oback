@@ -156,13 +156,26 @@ static void OBApplyParallax(CGFloat percent,
 
     UIView *dim = nil;
     if (self.parallaxToView) {
-        // 【关键修复】nav pop：目的页(toView=你要返回到的那一页) 绝不重挂载进 containerView。
-        // 原实现 insertSubview:toView 会把目的页从导航层级拽进 container、转场结束再拽回，
-        // 期间其内部 UIScrollView 的 safeAreaInsets/contentInset 被重算 → 底部 TabBar/功能入口
-        // 被滚出视口错位（华为健康、微信「底部按钮空白」根因，与 toView 是否 transform 无关）。
-        // 目的页本就在 container 下方原样可见，只需让当前页(fromView)滑出即可，与系统原生 pop
-        // 完全一致，绝不伤目的页。故此处不 insert toView、不创建 dim（目的页不被遮挡）。
+        // 【关键修复】nav pop：底页(toView) 用「快照」呈现，绝不重挂载真实 toView 进 container。
+        // 真实 toView 内部多为 UIScrollView，一旦 reparent 进 containerView，其 safeAreaInsets/
+        // contentInset 会随 superview 变化被重算 → 底部 TabBar/功能入口错位、被滚出视口
+        // （华为健康/微信「底部空白」根因，与 toView 是否 transform 无关）。
+        // 系统原生 pop 的底页本就完全静止，因此用 snapshotViewAfterScreenUpdates: 取一张像素级
+        // 静态快照铺在 container 最底层即可——快照是离屏图片，reparent 它永不伤真实 scrollView；
+        // 转场结束 completeTransition 后，真实 toView（从未移动）原样显露，零 layout 扰动、零空白。
+        // 只把当前页(fromView)挂入 container 做滑出；不创建 dim（底页无需压暗、避免遮挡）。
         if (fromView.superview != container) [container addSubview:fromView];
+        UIView *snap = [toView snapshotViewAfterScreenUpdates:NO];
+        if (snap) {
+            snap.frame = container.bounds;
+            snap.userInteractionEnabled = NO;
+            [container insertSubview:snap belowSubview:fromView];
+            OBLog(@"interruptible: nav pop 使用底页快照(避免底部空白)");
+        } else if (toView.superview != container) {
+            // 兜底：极端情况下快照取不到，仍挂真实 toView（保证不空白）
+            [container insertSubview:toView atIndex:0];
+            OBLog(@"interruptible: nav pop 快照失败，退回到挂真实 toView");
+        }
     } else {
         // 弹窗 dismiss 方案B：底层 presenting(toView) 不碰 transform；目的页正常挂载，
         // dim 置于二者之间（presenting 不加深遮罩，避免已可见背景闪暗）。
