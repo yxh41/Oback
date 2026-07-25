@@ -204,6 +204,17 @@ static void OBApplyParallax(CGFloat percent,
     [tp release];   // MRC：alloc 所得；方法内部已拷贝 timing，此处释放所有权
 }
 
+// 兜底收尾：动画器因状态错位（如微信二次取用导致 continueAnimation 空操作）未能自行触发
+// completion 时，由 manager 定时器（_watchAnimator 强持本实例）调用，一次性按 interactiveCancelled
+// 调 completeTransition，杜绝「转场孤儿化 → nav 卡交互态 → 冻结」。completion 守卫防重复。
+- (void)forceFinishIfNeeded {
+    if (_completed) return;              // 动画器自身 completion 已收尾 → 跳过（防重复 completeTransition 断言）
+    _completed = YES;
+    BOOL cancelled = _interactiveCancelled;
+    if (_context) [_context completeTransition:!cancelled];
+    OBLog(@"animator forceComplete (cancelled=%d)", cancelled);
+}
+
 - (void)dealloc {
     [_propertyAnimator release];
     [super dealloc];
@@ -295,16 +306,6 @@ static void OBApplyParallax(CGFloat percent,
     if (pa.state == UIViewAnimatingStateActive)   [pa pauseAnimation];
     pa.reversed = YES;   // 反向续跑 -> 回到 start -> completion 以 cancelled=YES 调 completeTransition:NO
     [pa continueAnimationWithTimingParameters:pa.timingParameters];
-}
-
-// 兜底收尾：动画器因状态错位（如微信二次取用导致 continueAnimation 空操作）未能自行触发 completion 时，
-// 由 manager 定时器调用，一次性按 interactiveCancelled 调 completeTransition，杜绝「转场孤儿化 → nav 卡交互态 → 冻结」。
-- (void)forceFinishIfNeeded {
-    if (self.completed) return;          // 动画器自身 completion 已收尾 → 跳过（防重复 completeTransition 断言）
-    self.completed = YES;
-    BOOL cancelled = self.interactiveCancelled;
-    if (self.context) [self.context completeTransition:!cancelled];
-    OBLog(@"animator forceComplete (cancelled=%d)", cancelled);
 }
 
 @end
