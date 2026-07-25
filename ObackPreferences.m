@@ -21,6 +21,9 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     if ((v = [d objectForKey:@"leftEnabled"]))      p.leftEnabled      = [v boolValue];
     if ((v = [d objectForKey:@"rightEnabled"]))     p.rightEnabled     = [v boolValue];
     if ((v = [d objectForKey:@"hapticEnabled"]))    p.hapticEnabled    = [v boolValue];
+    if ((v = [d objectForKey:@"springEnabled"]))    p.springEnabled    = [v boolValue];
+    if ((v = [d objectForKey:@"cardCornerEnabled"])) p.cardCornerEnabled = [v boolValue];
+    if ((v = [d objectForKey:@"cardCornerValue"]))  p.cardCornerValue  = [v doubleValue];
     return p;
 }
 
@@ -77,6 +80,23 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     NSString *raw = [d stringForKey:@"blacklistRaw"];
     if (!raw.length) return NO;
     return [self _bundleId:bid inList:raw];
+}
+
+// 调试日志总开关：设置面板「调试日志」(key=debugLog)，默认开（保持既有诊断能力）；
+// 日用机可关闭以节省磁盘写盘。
++ (BOOL)debugLogEnabled {
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    id v = [d objectForKey:@"debugLog"];
+    return v ? [v boolValue] : YES;   // 未设置 → 默认开
+}
+
+// 双返回诊断开关：设置面板「双返回诊断」(key=doubleReturnDiag)，默认关。
+// 开启后，每次边缘起滑补链时把本 window 所有边缘返回手势的精确类名打进日志，
+// 便于定位「一次滑动返回两层」中的「第二层」是系统原生还是某插件私有手势。
++ (BOOL)doubleReturnDiagEnabled {
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    id v = [d objectForKey:@"doubleReturnDiag"];
+    return v ? [v boolValue] : NO;   // 未设置 → 默认关
 }
 
 @end

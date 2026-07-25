@@ -150,4 +150,37 @@ static NSDictionary *_obSliderUnits(void) {
     lbl.text = [num stringByAppendingString:unit];
 }
 
+#pragma mark - 重置设置
+
+// PSButtonCell 的 action 会打到本控制器（无参调用，安全）
+- (void)resetSettings {
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"重置设置"
+                         message:@"将清空所有 Oback 设置并恢复默认（含已选的白/黑名单程序），确定吗？"
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消"
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"重置"
+                                              style:UIAlertActionStyleDestructive
+                                            handler:^(UIAlertAction *action) {
+        [self _obPerformReset];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+// 真正执行重置：清空 com.zlhkf.oback 域 → 重建 specifiers → 表格回弹默认值
+- (void)_obPerformReset {
+    NSString *domain = @"com.zlhkf.oback";
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:domain];
+    [d removePersistentDomainForName:domain];
+    [d synchronize];
+
+    // 丢掉缓存的右侧数值标签（reload 后 willDisplayCell: 会按新默认值重建）
+    _valueLabels = [NSMutableDictionary dictionary];
+
+    // 重建 specifiers 并刷新表格：所有开关/滑块回到 Root.plist 的 <default>
+    [self reloadSpecifiers];
+}
+
 @end

@@ -1,4 +1,12 @@
 #import "ObackTransition.h"
+#import "ObackManager.h"   // 读取松手速度/进度做动量继承（ObackManager.h 已 import ObackTransition.h，无循环依赖）
+
+// 该 SDK 头未在本编译单元暴露 UIViewImplicitlyAnimating 协议的
+// continueAnimationWithTimingParameters: 声明，-Werror 会把它误判为 error。
+// 这里用分类声明让编译器识别（运行时该方法由系统实现，无冲突、无重复实现）。
+@interface UIViewPropertyAnimator (ObackContinue)
+- (void)continueAnimationWithTimingParameters:(id)parameters;
+@end
 
 // 核心：根据百分比把"当前页"和"上一页"摆到位，模拟 OPPO 视差
 // parallaxToView=YES  → nav pop：上一页(presenting/toView)探出+放大（视差），当前页平移。
@@ -34,10 +42,22 @@ static void OBApplyParallax(CGFloat percent,
             CGAffineTransformMakeScale(scale, scale));
         // 上一页初始被压暗，随拖动变亮
         if (dimView) dimView.alpha = (1.0 - percent) * p.dimAlpha;
+        // nav pop 路径无卡片圆角，确保无残留
+        fromView.layer.cornerRadius = 0;
+        fromView.layer.masksToBounds = NO;
     } else {
         // 方案B：底层 presenting 绝不碰（黑屏根因）；不加深遮罩，避免已可见背景闪暗
         toView.transform = CGAffineTransformIdentity;
         if (dimView) dimView.alpha = 0.0;
+        // 弹窗 dismiss：可选卡片圆角（拉出时渐进圆角，模拟 iOS sheet 下拉手感）
+        if (p.cardCornerEnabled) {
+            CGFloat r = p.cardCornerValue * percent;   // p=0→0, p=1→最大值，拖动中由 CA 线性插值
+            fromView.layer.cornerRadius = r;
+            fromView.layer.masksToBounds = (r > 0.5);
+        } else {
+            fromView.layer.cornerRadius = 0;
+            fromView.layer.masksToBounds = NO;
+        }
     }
 }
 
@@ -60,6 +80,11 @@ static void OBApplyParallax(CGFloat percent,
     // commitVelocity 同步下调到 400，让一般甩动(flick)也能可靠提交。
     p.commitRatio      = 0.30;
     p.commitVelocity   = 400.0;
+    // 弹性补间：默认开。松手后按释放速度做动量继承的 spring 收尾，比线性 easeOut 更跟手、更高级。
+    p.springEnabled    = YES;
+    // 弹窗下拉卡片圆角：默认关（方案B 保守路径；开启后下拉 sheet 时渐进圆角，更贴近 iOS 原生 sheet）。
+    p.cardCornerEnabled = NO;
+    p.cardCornerValue   = 12.0;
     return p;
 }
 @end
@@ -80,6 +105,33 @@ static void OBApplyParallax(CGFloat percent,
 }
 
 - (void)animateTransition:(id<UIViewControllerContextTransitioning>)ctx {
+    // 诊断：入口确定执行一次（每次转场开始）。注意此刻 releaseVelocity 仍为 beginTransition 清零后的 0，
+    // 真实速度在 finish 时写入并体现在「animator spring applied」日志里。此处仅确认走了弹簧/线性分支。
+    CGFloat vel    = [ObackManager shared].releaseVelocity;
+    CGFloat startP = [ObackManager shared].releasePercent;
+    BOOL reduceMotion = UIAccessibilityIsReduceMotionEnabled();
+    BOOL spring = self.params.springEnabled && !reduceMotion;
+
+    CGFloat _w = [UIScreen mainScreen].bounds.size.width;
+    CGFloat _rem = MAX(0.0, 1.0 - startP);
+    CGFloat _dur = spring ? MAX(0.22, MIN(0.46, self.params.duration * (0.55 + 0.45 * _rem)))
+                          : self.params.duration;
+    CGFloat _sv = (_w > 0) ? (vel / _w) : 0.0;
+    _sv = MAX(-2.0, MIN(2.0, _sv));
+    OBLog(@"animator start (edge=%@ spring=%d reduce=%d vel=%.0f startP=%.2f dur=%.2f sv=%.2f)",
+          self.edge == ObackEdgeLeft ? @"左" : @"右", spring, reduceMotion, vel, startP, _dur, _sv);
+
+    // 构建/取回中断式动画器：系统据 interruptibleAnimatorForTransition: 驱动它——交互时暂停并按百分比 scrub，
+    // 非交互时直接跑到完成。视图层级(dim/阴影/parallax)在该方法内搭建。
+    [self interruptibleAnimatorForTransition:ctx];
+}
+
+// 中断式动画器：速度感知弹簧的核心。系统对交互转场会暂停它并按 updateWithPercent 设定 fractionComplete，
+// finish 时 ObackInteractiveTransition 调 [animator applyReleaseVelocity] 更新弹簧初速度后由系统续完。
+- (id<UIViewImplicitlyAnimating>)interruptibleAnimatorForTransition:(id<UIViewControllerContextTransitioning>)ctx {
+    OBLog(@"interruptible ENTER (pa=%p)", _propertyAnimator);
+    if (_propertyAnimator) { OBLog(@"interruptible cached return pa=%p", _propertyAnimator); return _propertyAnimator; }
+
     UIView *container = ctx.containerView;
     UIViewController *from = [ctx viewControllerForKey:UITransitionContextFromViewControllerKey];
     UIViewController *to   = [ctx viewControllerForKey:UITransitionContextToViewControllerKey];
@@ -88,34 +140,103 @@ static void OBApplyParallax(CGFloat percent,
 
     if (toView.superview != container) [container insertSubview:toView atIndex:0];
 
-    UIView *dim = [[UIView alloc] initWithFrame:container.bounds];
-    dim.backgroundColor = [UIColor blackColor];
+    // 方向性渐变遮罩（替代纯黑），沿边缘方向由深到浅
+    UIView *dim = [self _makeDimViewWithFrame:container.bounds edge:self.edge];
     dim.alpha = 0;
-    dim.userInteractionEnabled = NO;   // 关键：遮罩绝不拦截触摸，即便残留也只是黑、不会"无法操作"
+    dim.userInteractionEnabled = NO;   // 遮罩绝不拦截触摸
     [container insertSubview:dim aboveSubview:toView];
     [container bringSubviewToFront:fromView];
+    [dim release];   // MRC：已加入 container 被其 retain，释放我们的所有权
 
     [self applyShadowTo:fromView];
     OBApplyParallax(0, fromView, toView, dim, self.edge, self.params, self.parallaxToView);
 
-    [UIView animateWithDuration:[self transitionDuration:ctx]
-                          delay:0
-                        options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState
-                     animations:^{
-        OBApplyParallax(1, fromView, toView, dim, self.edge, self.params, self.parallaxToView);
-    } completion:^(BOOL finished) {
-        [dim removeFromSuperview];
-        [ctx completeTransition:![ctx transitionWasCancelled]];
-        OBLog(@"animator done (cancelled=%d finished=%d)", [ctx transitionWasCancelled], finished);
+    // 初速 0（真实速度在 finish 时经 applyReleaseVelocity 更新），damping 0.82 给出自然回弹手感
+    UISpringTimingParameters *sp = [[UISpringTimingParameters alloc] initWithDampingRatio:0.82];
+    UIViewPropertyAnimator *anim = [[[UIViewPropertyAnimator alloc]
+        initWithDuration:self.params.duration
+          timingParameters:sp] autorelease];
+    [sp release];   // MRC：animator 内部已拷贝 timing，释放我们的所有权
+    // MRC：禁用 __weak，用 __block 且 completion 内置 nil 打破 self->animator->block->self 循环引用
+    __block ObackAnimator *blockSelf = self;
+    [anim addAnimations:^{
+        OBApplyParallax(1, fromView, toView, dim, blockSelf.edge, blockSelf.params, blockSelf.parallaxToView);
     }];
+    [anim addCompletion:^(UIViewAnimatingPosition finalPosition) {
+        [dim removeFromSuperview];
+        // 以 interactiveCancelled 为准（finish=NO/cancel=YES），避免反向动画 finalPosition 误判
+        BOOL cancelled = blockSelf.interactiveCancelled || (finalPosition == UIViewAnimatingPositionStart);
+        [ctx completeTransition:!cancelled];
+        OBLog(@"animator done (cancelled=%d)", cancelled);
+        blockSelf = nil;   // 打破循环引用（MRC 无 __weak）
+    }];
+    self.propertyAnimator = anim;   // retain 属性赋值（anim 为 autorelease，直接赋 ivar 会在 drain 后野指针）
+    OBLog(@"interruptible built pa=%p", _propertyAnimator);
+    return anim;
+}
+
+// 在 finish/cancel 前由 ObackInteractiveTransition 调用：用真实松手速度更新弹簧初速度，实现动量继承。
+// 取消时 ObackManager 已把 releaseVelocity 清零→温和回弹；提交时带入真实速度→快甩更快归位。
+- (void)applyReleaseVelocity {
+    if (!_propertyAnimator) {
+        OBLog(@"applyReleaseVelocity SKIP (propertyAnimator=nil)");
+        return;
+    }
+    BOOL reduceMotion = UIAccessibilityIsReduceMotionEnabled();
+    BOOL spring = self.params.springEnabled && !reduceMotion;
+    CGFloat w = [UIScreen mainScreen].bounds.size.width;
+    CGFloat sv = (w > 0) ? (self.releaseVelocity / w) : 0.0;
+    sv = MAX(-2.0, MIN(2.0, sv));   // 弹簧初速度（相对全程）
+    NSObject<UITimingCurveProvider> *tp;
+    if (spring) {
+        tp = [[UISpringTimingParameters alloc] initWithDampingRatio:0.82
+                                                       initialVelocity:CGVectorMake(sv, 0.0)];
+    } else {
+        // 关闭弹性 / 减弱动态效果 → 线性 easeOut 兜底（与旧版一致）
+        tp = [[UICubicTimingParameters alloc] initWithAnimationCurve:UIViewAnimationCurveEaseOut];
+    }
+    OBLog(@"animator spring applied (spring=%d vel=%.0f startP=%.2f sv=%.2f)",
+          spring, self.releaseVelocity, self.releasePercent, sv);
+    [_propertyAnimator continueAnimationWithTimingParameters:tp];
+    [tp release];   // MRC：alloc 所得；方法内部已拷贝 timing，此处释放所有权
+}
+
+- (void)dealloc {
+    [_propertyAnimator release];
+    [super dealloc];
 }
 
 - (void)applyShadowTo:(UIView *)v {
+    // 弹窗下拉卡片圆角开启时，圆角需 masksToBounds=YES 才能显示，会裁掉阴影；
+    // 该路径下以圆角为主、放弃阴影，避免两者互相打架。
+    BOOL cornering = (self.params.cardCornerEnabled && !self.parallaxToView);
     v.layer.shadowColor = [UIColor blackColor].CGColor;
-    v.layer.shadowOpacity = self.params.shadowEnabled ? self.params.shadowOpacity : 0.0;
+    v.layer.shadowOpacity = (self.params.shadowEnabled && !cornering) ? self.params.shadowOpacity : 0.0;
     v.layer.shadowRadius = 12.0;
     v.layer.shadowOffset = CGSizeMake((self.edge == ObackEdgeLeft ? -6.0 : 6.0), 0.0);
     v.layer.masksToBounds = NO;
+}
+
+// 方向性渐变遮罩：替代纯黑 UIView。沿边缘方向由深到浅，给"被压在下方"的页面更自然的纵深感。
+- (UIView *)_makeDimViewWithFrame:(CGRect)frame edge:(ObackEdge)edge {
+    UIView *v = [[UIView alloc] initWithFrame:frame];
+    v.userInteractionEnabled = NO;
+    CAGradientLayer *g = [CAGradientLayer layer];
+    g.frame = frame;
+    // 仅用黑→透明渐变；整体浓度仍由 OBApplyParallax 设置的 v.alpha 控制（0→dimAlpha）。
+    CGColorRef dark = [UIColor colorWithWhite:0.0 alpha:1.0].CGColor;
+    CGColorRef clear = [UIColor colorWithWhite:0.0 alpha:0.0].CGColor;
+    g.colors = @[(__bridge id)dark, (__bridge id)clear];
+    g.locations = @[@0.0, @0.55];
+    if (edge == ObackEdgeLeft) {            // 当前页右移，上一页从左侧探出 → 左侧深
+        g.startPoint = CGPointMake(0.0, 0.5);
+        g.endPoint   = CGPointMake(1.0, 0.5);
+    } else {                                // 当前页左移，上一页从右侧探出 → 右侧深
+        g.startPoint = CGPointMake(1.0, 0.5);
+        g.endPoint   = CGPointMake(0.0, 0.5);
+    }
+    [v.layer addSublayer:g];
+    return v;
 }
 
 @end
@@ -131,19 +252,46 @@ static void OBApplyParallax(CGFloat percent,
     return self;
 }
 
-// 以下三个方法均走 UIPercentDrivenInteractiveTransition 标准实现：
-// 由它来驱动 ObackAnimator 的 animateTransition: 动画进度，并在 finish/cancel 时
-// 正确复位导航控制器的"交互中"状态（否则导航会一直卡在交互转场态 → 界面冻结、点不动）。
+#pragma mark - UIViewControllerInteractiveTransitioning
+// 必选方法。此处无需保存 context：动画器由 self.animator 持有，completeTransition 在其 completion 调用。
+// （不再继承 UIPercentDrivenInteractiveTransition：它内部靠驱动 animateTransition: 里的 UIView 动画，
+//  而本 tweak 的动画在 interruptibleAnimatorForTransition: 的 UIViewPropertyAnimator 里，二者并存时
+//  在微信等自定义 nav 下会导致动画器不被续跑→completeTransition 永不触发→界面冻结。）
+- (void)startInteractiveTransition:(id<UIViewControllerContextTransitioning>)transitionContext {
+}
+
+// 直接驱动中断式动画器的 fractionComplete（Apple 推荐：实现 interruptibleAnimatorForTransition: 时
+// 不要用 UIPercentDrivenInteractiveTransition，改为手动设 fractionComplete）。
 - (void)updateWithPercent:(CGFloat)percent {
-    [self updateInteractiveTransition:percent];
+    UIViewPropertyAnimator *pa = self.animator.propertyAnimator;
+    if (!pa) return;
+    if (pa.state == UIViewAnimatingStateInactive) {
+        [pa pauseAnimation];   // inactive -> 启动并立即暂停，进入可 scrub 态
+    }
+    pa.fractionComplete = percent;
 }
 
 - (void)finish {
-    [self finishInteractiveTransition];
+    // 提交前先用真实松手速度更新弹簧初速度（动量继承），再续跑动画器到 end
+    ObackAnimator *anim = self.animator ?: [ObackManager shared].currentAnimator;
+    UIViewPropertyAnimator *pa = anim.propertyAnimator;
+    OBLog(@"oback-intc finish (self=%p animator=%p pa=%p)", self, anim, pa);
+    if (pa && pa.state == UIViewAnimatingStateInactive) [pa pauseAnimation];
+    anim.interactiveCancelled = NO;
+    [anim applyReleaseVelocity];   // 更新弹簧初速度并 continueAnimation（续跑到 end -> completion 触发 completeTransition）
 }
 
 - (void)cancel {
-    [self cancelInteractiveTransition];
+    // 取消：反向续跑动画器回到 start（弹簧回弹），completion 以 interactiveCancelled=YES 调 completeTransition:NO
+    ObackAnimator *anim = self.animator ?: [ObackManager shared].currentAnimator;
+    UIViewPropertyAnimator *pa = anim.propertyAnimator;
+    OBLog(@"oback-intc cancel (self=%p animator=%p pa=%p)", self, anim, pa);
+    if (!pa) return;
+    if (pa.state == UIViewAnimatingStateInactive) [pa pauseAnimation];
+    if (pa.state == UIViewAnimatingStateActive)   [pa pauseAnimation];
+    anim.interactiveCancelled = YES;
+    pa.reversed = YES;   // 反向续跑 -> 回到 start -> completion 以 cancelled=YES 调 completeTransition:NO
+    [pa continueAnimationWithTimingParameters:pa.timingParameters];
 }
 
 @end

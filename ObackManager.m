@@ -15,6 +15,7 @@ static NSString *OBLogPath(void) {
 }
 
 void OBLog(NSString *fmt, ...) {
+    if (![ObackPreferences debugLogEnabled]) return;   // 调试日志关闭 → 完全不写盘/不 NSLog（最省）
     va_list ap; va_start(ap, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
@@ -41,6 +42,8 @@ void OBLog(NSString *fmt, ...) {
 
 static void *kAttachedKey = &kAttachedKey;
 static void *kObackTDKey = &kObackTDKey;   // 让被 dismiss 的 VC 自己 retain 其 transition 转发器，避免野指针
+void *kPanKey = &kPanKey;                  // 暴露给 Tweak.xm：window 上挂载的 Oback 全屏 pan 手势（用于让原生 interactivePop 失败于它）
+static void *kDiagLastLogKey = &kDiagLastLogKey;  // 双返回诊断：同一 window 日志节流（每 2s 最多打一次手势清单）
 static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指移动的距离 (pt)
 
 #pragma mark - 边缘方向指示胶囊（OPPO 风格：跟随手指、带方向箭头）
@@ -133,20 +136,106 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 }
 
 - (void)windowBecameKey:(NSNotification *)n {
-    if ([n.object isKindOfClass:[UIWindow class]]) [self attachToWindow:n.object];
+    if ([n.object isKindOfClass:[UIWindow class]]) {
+        UIWindow *win = (UIWindow *)n.object;
+        OBLog(@"windowBecameKey: %@ (isKeyNow=%d)", NSStringFromClass([win class]), win.isKeyWindow);
+        [self attachToWindow:win];
+        [self _linkNavPopGesturesInWindow:win];  // 成为 key 时重新链接（nav 可能刚压入/呈现）
+    }
 }
 
 - (void)attachToWindow:(UIWindow *)win {
     if (!win) return;
-    if (objc_getAssociatedObject(win, kAttachedKey)) return;  // 每个 window 只挂一次
+    if (objc_getAssociatedObject(win, kAttachedKey)) { [self _linkNavPopGesturesInWindow:win]; return; }  // 已挂过：仍重新链接（nav 可能刚出现）
     ObackPanGestureRecognizer *pan = [[ObackPanGestureRecognizer alloc] initWithTarget:self
                                                                                  action:@selector(handlePan:)];
     pan.delegate = self;
     pan.maximumNumberOfTouches = 1;
     [win addGestureRecognizer:pan];
     objc_setAssociatedObject(win, kAttachedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(win, kPanKey, pan, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     OBLog(@"attached pan gesture to window %@ (bounds=%.0fx%.0f)", win,
           win.bounds.size.width, win.bounds.size.height);
+    [self _linkNavPopGesturesInWindow:win];
+}
+
+#pragma mark - 让其他左边缘返回手势失败于我们的手势（杜绝双返回）
+
+// 递归收集窗口 VC 树里所有 UINavigationController
+- (void)_enumerateNavControllersFrom:(UIViewController *)vc block:(void(^)(UINavigationController *nav))block {
+    if (!vc || !block) return;
+    if ([vc isKindOfClass:[UINavigationController class]]) block((UINavigationController *)vc);
+    for (UIViewController *child in vc.childViewControllers)
+        [self _enumerateNavControllersFrom:child block:block];
+    if (vc.presentedViewController)
+        [self _enumerateNavControllersFrom:vc.presentedViewController block:block];
+}
+
+// 递归收集窗口视图树里所有 UIScreenEdgePanGestureRecognizer（含 App/插件自定义的左边缘返回手势）。
+// 注意：我们的 window pan 是 UIPanGestureRecognizer 子类（非 UIScreenEdgePanGestureRecognizer），
+// 故 isKindOfClass 过滤已天然排除它，无需额外判等。深度护栏避免超大视图树爆栈。
+- (void)_enumerateEdgeGesturesInView:(UIView *)view depth:(NSUInteger)depth
+                               block:(void(^)(UIScreenEdgePanGestureRecognizer *g))block {
+    if (!view || !block || depth > 40) return;
+    for (UIGestureRecognizer *g in view.gestureRecognizers) {
+        if ([g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) block((UIScreenEdgePanGestureRecognizer *)g);
+    }
+    for (UIView *sub in view.subviews)
+        [self _enumerateEdgeGesturesInView:sub depth:depth + 1 block:block];
+}
+
+// 让窗口内所有「边缘返回手势」失败于我们的 window pan。
+// 关键：requireGestureRecognizerToFail: 是「成对依赖」关系，App/插件即便随后把 enabled 重新置 YES，
+// 其手势的 begin 仍被系统判定为必须先等我们的 pan 失败——无论对手是系统原生 interactivePop，
+// 还是某越狱插件（如微信分组）添加的私有边缘返回手势，同一根手指都只认我们的单次 pop，
+// 从根上消除「一次滑动弹两层」（含插件场景）。
+- (void)_linkNavPopGesturesInWindow:(UIWindow *)win {
+    if (!win) return;
+    ObackPanGestureRecognizer *pan = objc_getAssociatedObject(win, kPanKey);
+    if (!pan) { OBLog(@"linkNav: 本 window 无 Oback pan，跳过链接"); return; }
+    CFTimeInterval t0 = CACurrentMediaTime();
+    __block NSUInteger linked = 0;
+    // 第一道防线：直接关掉 nav 原生 interactivePop（左边缘专属）
+    [self _enumerateNavControllersFrom:win.rootViewController block:^(UINavigationController *nav){
+        nav.interactivePopGestureRecognizer.enabled = NO;
+        @try { [nav.interactivePopGestureRecognizer requireGestureRecognizerToFail:pan]; }
+        @catch (NSException *e) { OBLog(@"linkNav: nav requireGestureRecognizerToFail 异常: %@", e); }
+        linked++;
+    }];
+    // 第二道防线：枚举窗口里所有 UIScreenEdgePanGestureRecognizer（含插件自定义的边缘返回手势），
+    // 让它们全部失败于我们的 pan——plugin 私有的边缘手势也能压住，杜绝「一次滑动弹两层」。
+    [self _enumerateEdgeGesturesInView:win depth:0 block:^(UIScreenEdgePanGestureRecognizer *g){
+        @try { [g requireGestureRecognizerToFail:pan]; }
+        @catch (NSException *e) { OBLog(@"linkNav: edge requireGestureRecognizerToFail 异常: %@", e); }
+        linked++;
+    }];
+    CFTimeInterval dt = (CACurrentMediaTime() - t0) * 1000.0;
+    OBLog(@"linkNav: 链接 %lu 个返回手势 (耗时 %.2f ms) @window=%@",
+          (unsigned long)linked, dt, NSStringFromClass([win class]));
+    [self _diagLogEdgeGesturesInWindow:win];   // 双返回诊断（开关关闭时无输出，且自带节流）
+}
+
+// 双返回诊断：列出本 window 视图树里所有「边缘返回手势」的精确类名 + 所属视图类。
+// 原生系统手势固定为 UIScreenEdgePanGestureRecognizer；任何**其它类名**都来自 App/越狱插件
+// 的私有边缘返回手势——若双返回仍在，对照日志里多出来的类名即可定位「第二层」到底是谁。
+// 注意：本函数完全受「调试日志」总开关门控（走 OBLog），且同一 window 每 2s 最多打一次，避免刷屏。
+- (void)_diagLogEdgeGesturesInWindow:(UIWindow *)win {
+    if (![ObackPreferences doubleReturnDiagEnabled]) return;
+    // 节流：同一 window 2s 内只打一次清单（每次边缘起滑都会触发补链，不节流会刷屏）
+    NSNumber *last = objc_getAssociatedObject(win, kDiagLastLogKey);
+    CFTimeInterval now = CACurrentMediaTime();
+    if (last && (now - [last doubleValue]) < 2.0) return;
+    objc_setAssociatedObject(win, kDiagLastLogKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    [self _enumerateEdgeGesturesInView:win depth:0 block:^(UIScreenEdgePanGestureRecognizer *g){
+        NSString *cls = NSStringFromClass([g class]);
+        UIView *v = g.view;
+        NSString *owner = v ? NSStringFromClass([v class]) : @"(无宿主视图)";
+        [names addObject:[NSString stringWithFormat:@"%@(宿主:%@)", cls, owner]];
+    }];
+    OBLog(@"diag[双返回]: window=%@ | 边缘返回手势共 %lu → %@",
+          NSStringFromClass([win class]), (unsigned long)names.count, names);
 }
 
 #pragma mark - UIGestureRecognizerDelegate
@@ -213,6 +302,12 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         UIImpactFeedbackGenerator *g = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
         [g impactOccurred];
     }
+    // 实时补链：本 window 可能在我们初次(windowBecameKey)枚举之后才压入分组/子容器，
+    // 其边缘返回手势从未被链接 → 加固对它形同虚设。故每次确认接管时，对当前窗口重新
+    // 枚举并让所有边缘返回手势失败于我们的 pan（幂等无害：requireGestureRecognizerToFail
+    // 为成对依赖，设一次即持久；且依赖在每个 touch 事件重评估 → 当次滑动也会被持续压制，
+    // 因我们的 pan 在手指移动期间保持交互态不会失败，故对方边缘手势整段被阻塞，只弹一层）。
+    [self _linkNavPopGesturesInWindow:win];
     // 关键修复：胶囊在 shouldBegin=YES 时即显示，而非等 Began。左边缘会被系统原生
     // interactivePopGestureRecognizer（UIScreenEdgePanGestureRecognizer）抢走，导致我们的手势
     // 永远进不了 Began，胶囊若只在 Began 显示则左边缘永不出现（日志实证：左边缘 shouldBegin=YES
@@ -240,6 +335,10 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 }
 
 - (void)beginTransition:(UIPanGestureRecognizer *)pan {
+    // 新手势开始：清空上一次松手速度/进度，避免遗留值串入本次动画
+    self.releaseVelocity = 0;
+    self.releasePercent  = 0;
+
     UIWindow *win = (UIWindow *)pan.view;
     UIViewController *top = [self topMost:win.rootViewController];
     if (!top) return;
@@ -271,7 +370,17 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
 
     if (nav && nav.viewControllers.count > 1) {
-        OBLog(@"beginTransition: pop nav (childCount=%lu)", (unsigned long)nav.viewControllers.count);
+        id nd = nav.delegate;
+        OBLog(@"beginTransition: pop nav (childCount=%lu) delegateBefore=%@",
+              (unsigned long)nav.viewControllers.count,
+              nd ? NSStringFromClass([nd class]) : @"(nil)");
+        // 兜底：强制确保 ObackNavDelegate 转发器就位。
+        // 若 setDelegate: 因时机（早期设置未触发 hook）/ 退避门控 / 子类覆写等原因没装，
+        // 这里再 setDelegate: 一次触发 hook 重新包装；已是 ObackNavDelegate 则幂等透传。
+        [nav setDelegate:nd];
+        OBLog(@"pop nav delegateAfter=%@ isOback=%d",
+              nav.delegate ? NSStringFromClass([nav.delegate class]) : @"(nil)",
+              (int)[[nav.delegate class] isSubclassOfClass:NSClassFromString(@"ObackNavDelegate")]);
         self.currentParallaxToView = YES;   // nav pop 视差（移动上一页）
         [nav popViewControllerAnimated:YES];
     } else if (top.presentingViewController) {
@@ -325,6 +434,14 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     CGFloat dir = (self.currentEdge == ObackEdgeLeft) ? 1.0 : -1.0;
     CGFloat vel = dir * v.x;   // 前向(朝返回方向)为正
 
+    // 记录松手时的前向速度/进度：
+    // - 写回 manager 自身（供诊断 / 下次 beginTransition 清零逻辑参考）
+    // - 同步写入当前动画器，finish 时经 applyReleaseVelocity 真正用于动量继承的弹簧初速度
+    self.releaseVelocity = vel;
+    self.releasePercent  = _currentPercent;
+    self.currentAnimator.releaseVelocity = vel;
+    self.currentAnimator.releasePercent  = _currentPercent;
+
     // 动量投影：按当前速度再投影约 0.12s 的惯性滑行距离，避免"快滑却因瞬时位移小被取消"。
     // 真机日志显示用户多为快速内滑(percent 仅 0.23~0.37 就松手)，纯位移阈值会误判取消。
     CGFloat projected = _currentPercent;
@@ -340,13 +457,29 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     if (_indicator) [self dismissIndicatorCommitted:commit params:p window:win];
     // 注意：这里不释放 currentTD —— 弹窗若 cancel 仍 present，其 transitioningDelegate(assign)
     // 仍指向该 td；释放会留下野指针。td 的生命周期由被 dismiss 的 VC 关联对象保证（见 beginTransition）。
-    // 仅当本次手势确实触发了转场才 finish/cancel；纯点按未触发则什么都不碰，安全复位。
+    // 仅当本次手势确实触发了交互转场才 finish/cancel；纯点按未触发则什么都不碰，安全复位。
     if (_transitionTriggered) {
-        if (commit) [self.interactive finish];   // 走标准 finishInteractiveTransition
-        else        [self.interactive cancel];   // 走标准 cancelInteractiveTransition
+        if (commit) [self.interactive finish];   // 提交：applyReleaseVelocity 已带真实速度→动量继承
+        else {
+            self.currentAnimator.releaseVelocity = 0;  // 取消：温和回弹，不带入前向速度
+            [self.interactive cancel];           // 反向续跑动画器回弹（直接驱动中断式动画器）
+        }
+    } else if (commit) {
+        // 快滑但几乎无净位移（手势 Began→Ended 之间无有效横向移动，p 从未 >0.001），
+        // 交互转场未启动；但速度已达提交阈值(commit=1) → 用户意图明确"一滑即回"。
+        // 直接走系统动画 pop/dismiss（非交互，最干净），避免"胶囊飞出却没反应"的困惑。
+        // 实测 oback_debug(10).log 第296行即此场景：percent=0.00 vel=723 projected=0.22 commit=1 triggered=0。
+        // 关键修复：先置 interacting=NO，让 delegate 返回 nil 交互控制器 → 真正非交互转场，
+        // 由系统动画自动完成（最干净），避免"交互控制器已返回却永不 finish"导致停滞冻结。
+        self.currentAnimator = nil;
+        self.interacting = NO;
+        OBLog(@"endTransition: 快滑零位移，非交互直接返回 (vel=%.0f edge=%@)", vel,
+              self.currentEdge == ObackEdgeLeft ? @"左" : @"右");
+        [self triggerTransitionInWindow:win];
     }
     self.interacting = NO;
     self.interactive = nil;
+    self.currentAnimator = nil;   // assign 弱引用，显式清更安全
     _currentPercent = 0;
     _transitionTriggered = NO;
 }
@@ -354,15 +487,19 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 // 手势意外失败(Failed/超时等)时的紧急清理：取消转场+消除胶囊，防止残留
 - (void)abortTransition:(UIPanGestureRecognizer *)pan {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(dismissIndicatorSafety) object:nil];
+    // 手势意外失败（无明确释放速度）：清速度为 0，让取消动画走温和回弹（不继承动量）
+    self.releaseVelocity = 0;
+    self.releasePercent  = 0;
     OBLog(@"abortTransition (state=%ld)", (long)pan.state);
     UIWindow *win = (UIWindow *)pan.view;
     ObackParams *p = [ObackPreferences params];
     if (_indicator) [self dismissIndicatorCommitted:NO params:p window:win];
-    // 仅当本次手势确实触发了转场才 cancel（走标准 cancelInteractiveTransition）；
+    // 仅当本次手势确实触发了转场才 cancel（直接驱动中断式动画器反向回弹）；
     // 未触发则什么都不碰，安全复位，避免误调用导致导航卡在交互态。
     if (_transitionTriggered && self.interactive) [self.interactive cancel];
     self.interacting = NO;
     self.interactive = nil;
+    self.currentAnimator = nil;   // assign 弱引用，显式清更安全
     _currentPercent = 0;
     _transitionTriggered = NO;
 }

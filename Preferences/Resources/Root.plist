@@ -184,6 +184,28 @@
             <key>cell</key>
             <string>PSGroupCell</string>
             <key>label</key>
+            <string>动画</string>
+            <key>footerText</key>
+            <string>松手后的回弹动画。开启（默认）后释放速度会继承为弹性收尾，更跟手、更接近 OPPO/系统手感；若觉得回弹过头或想更线性，可关闭。</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSSwitchCell</string>
+            <key>label</key>
+            <string>弹性收尾</string>
+            <key>key</key>
+            <string>springEnabled</string>
+            <key>defaults</key>
+            <string>com.zlhkf.oback</string>
+            <key>default</key>
+            <true/>
+            <key>footnote</key>
+            <string>开（默认）：按松手速度做动量继承的弹簧收尾。关：线性 easeOut，更克制。</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSGroupCell</string>
+            <key>label</key>
             <string>返回灵敏度</string>
             <key>footerText</key>
             <string>调节边缘返回的触发灵敏度。两个阈值都越低 → 越容易返回（更跟手，但快速横滑列表时可能误触）；越高 → 越需明显拖动或甩动才返回。建议保持默认，按真机手感微调。</string>
@@ -257,6 +279,58 @@
             <string>选黑名单程序</string>
             <key>detail</key>
             <string>ObackBlackListController</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSGroupCell</string>
+            <key>label</key>
+            <string>调试</string>
+            <key>footerText</key>
+            <string>开启后把每次手势判定写入 /var/mobile/oback_debug.log（可用 Filza 抓取发我分析）。日用机建议关闭，避免日志频繁写盘。</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSSwitchCell</string>
+            <key>label</key>
+            <string>调试日志</string>
+            <key>key</key>
+            <string>debugLog</string>
+            <key>defaults</key>
+            <string>com.zlhkf.oback</string>
+            <key>default</key>
+            <true/>
+            <key>footnote</key>
+            <string>关：完全不写日志（最省）。开（默认）：记录手势触发/提交/取消，便于定位问题。</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSSwitchCell</string>
+            <key>label</key>
+            <string>双返回诊断</string>
+            <key>key</key>
+            <string>doubleReturnDiag</string>
+            <key>defaults</key>
+            <string>com.zlhkf.oback</string>
+            <key>default</key>
+            <false/>
+            <key>footnote</key>
+            <string>关（默认）：不输出。开：在「调试日志」也开启的前提下，每次边缘起滑时把窗口内所有边缘返回手势的类名打进日志，用于定位「一次滑动返回两层」中的第二层（原生为 UIScreenEdgePanGestureRecognizer，其它类名即插件私有手势）。定位完请关闭。</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSGroupCell</string>
+            <key>label</key>
+            <string>维护</string>
+            <key>footerText</key>
+            <string>将所有 Oback 设置恢复为默认值。已选的白名单 / 黑名单程序、以及灵敏度等各项调节都会被清空。</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSButtonCell</string>
+            <key>label</key>
+            <string>重置设置</string>
+            <key>action</key>
+            <string>resetSettings</string>
         </dict>
     </array>
 </dict>
