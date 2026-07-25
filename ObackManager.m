@@ -36,13 +36,13 @@ void OBLog(NSString *fmt, ...) {
 }
 
 #pragma mark - 仅识别横向的 pan（避免纵向滑动误触发返回）
-@interface ObackPanGestureRecognizer : UIPanGestureRecognizer
+@interface ObackPanGestureRecognizer : UIScreenEdgePanGestureRecognizer
 @property (nonatomic, assign) CGPoint startPoint;
 @end
 
 static void *kAttachedKey = &kAttachedKey;
 static void *kObackTDKey = &kObackTDKey;   // 让被 dismiss 的 VC 自己 retain 其 transition 转发器，避免野指针
-void *kPanKey = &kPanKey;                  // 暴露给 Tweak.xm：window 上挂载的 Oback 全屏 pan 手势（用于让原生 interactivePop 失败于它）
+void *kPanKey = &kPanKey;                  // 暴露给 Tweak.xm：window 上挂载的 Oback 边缘 pan（NSArray，左/右各一，用于让原生 interactivePop 失败于它们）
 static void *kDiagLastLogKey = &kDiagLastLogKey;  // 双返回诊断：同一 window 日志节流（每 2s 最多打一次手势清单）
 static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指移动的距离 (pt)
 
@@ -164,19 +164,32 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         return;
     }
     if (objc_getAssociatedObject(win, kAttachedKey)) { [self _linkNavPopGesturesInWindow:win]; return; }  // 已挂过：仍重新链接（nav 可能刚出现）
-    ObackPanGestureRecognizer *pan = [[ObackPanGestureRecognizer alloc] initWithTarget:self
+    // 方案 A 关键修复：改用「屏幕边缘 pan」(UIScreenEdgePanGestureRecognizer) 而非普通 UIPanGestureRecognizer。
+    // 普通 window 级 pan 在可滚动列表（朋友圈 feed / 聊天列表）上会被 scrollView 的 pan 抢赢识别，
+    // 导致 shouldBegin=YES（胶囊出现）却永远进不了 Began（无返回）——日志实证。屏幕边缘 pan 自带
+    // 「边缘优先于滚动」的系统级优先级，正是原生 interactivePop 在列表页也能用的原理，从根上根治。
+    ObackPanGestureRecognizer *panL = [[ObackPanGestureRecognizer alloc] initWithTarget:self
                                                                                  action:@selector(handlePan:)];
-    pan.delegate = self;
-    pan.maximumNumberOfTouches = 1;
-    // 关键修复：window 级 pan 默认 cancelsTouchesInView=YES，一旦识别成功会取消窗口内所有触摸，
-    // 导致底层 App 收不到点击（朋友圈点不进单条详情、Flutter 类 app 像"打不开"）。
-    // 设为 NO：我们的 pan 只「观察」触摸、绝不吞掉，App 永远能收到自己的触摸；
-    // 返回逻辑由我们驱动系统转场完成，不依赖取消 App 触摸。delaysTouchesBegan 显式 NO 避免延迟投递。
-    pan.cancelsTouchesInView = NO;
-    pan.delaysTouchesBegan   = NO;
-    [win addGestureRecognizer:pan];
+    panL.delegate = self;
+    panL.maximumNumberOfTouches = 1;
+    // 仍设 NO：pan 只观察、绝不吞掉 App 触摸（修复朋友圈点不进详情 / Flutter 类 app 像打不开）。
+    panL.cancelsTouchesInView = NO;
+    panL.delaysTouchesBegan   = NO;
+    panL.edges = UIRectEdgeLeft;
+
+    ObackPanGestureRecognizer *panR = [[ObackPanGestureRecognizer alloc] initWithTarget:self
+                                                                                 action:@selector(handlePan:)];
+    panR.delegate = self;
+    panR.maximumNumberOfTouches = 1;
+    panR.cancelsTouchesInView = NO;
+    panR.delaysTouchesBegan   = NO;
+    panR.edges = UIRectEdgeRight;
+
+    [win addGestureRecognizer:panL];
+    [win addGestureRecognizer:panR];
+    NSArray *pans = @[panL, panR];
     objc_setAssociatedObject(win, kAttachedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(win, kPanKey, pan, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(win, kPanKey, pans, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     OBLog(@"attached pan gesture to window %@ (bounds=%.0fx%.0f)", win,
           win.bounds.size.width, win.bounds.size.height);
     [self _linkNavPopGesturesInWindow:win];
@@ -195,8 +208,9 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 }
 
 // 递归收集窗口视图树里所有 UIScreenEdgePanGestureRecognizer（含 App/插件自定义的左边缘返回手势）。
-// 注意：我们的 window pan 是 UIPanGestureRecognizer 子类（非 UIScreenEdgePanGestureRecognizer），
-// 故 isKindOfClass 过滤已天然排除它，无需额外判等。深度护栏避免超大视图树爆栈。
+// 注意：我们的 window pan 现在本身就是 UIScreenEdgePanGestureRecognizer 子类，故枚举时会包含它们；
+// 在链接处通过 g.delegate == self 跳过自身（避免 requireGestureRecognizerToFail 自引用），无需在此排除。
+// 深度护栏避免超大视图树爆栈。
 - (void)_enumerateEdgeGesturesInView:(UIView *)view depth:(NSUInteger)depth
                                block:(void(^)(UIScreenEdgePanGestureRecognizer *g))block {
     if (!view || !block || depth > 40) return;
@@ -231,30 +245,37 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 // 从根上消除「一次滑动弹两层」（含插件场景）。
 - (void)_linkNavPopGesturesInWindow:(UIWindow *)win {
     if (!win) return;
-    ObackPanGestureRecognizer *pan = objc_getAssociatedObject(win, kPanKey);
-    if (!pan) { OBLog(@"linkNav: 本 window 无 Oback pan，跳过链接"); return; }
+    NSArray *pans = objc_getAssociatedObject(win, kPanKey);
+    if (![pans isKindOfClass:[NSArray class]] || pans.count == 0) {
+        OBLog(@"linkNav: 本 window 无 Oback pan，跳过链接"); return;
+    }
+    // 让传入手势「失败于」我们的每一个边缘 pan（左/右）。成对依赖：对手 begin 须等我们的 pan 先失败，
+    // 从根上杜绝「一次滑动弹两层」。屏幕边缘 pan 自带「边缘优先于滚动」系统级优先级，列表页亦稳定接管返回。
+    void (^failOnOurPans)(UIGestureRecognizer *) = ^(UIGestureRecognizer *g){
+        for (ObackPanGestureRecognizer *op in pans) {
+            @try { [g requireGestureRecognizerToFail:op]; } @catch (NSException *e) {}
+        }
+    };
     CFTimeInterval t0 = CACurrentMediaTime();
     __block NSUInteger linked = 0;
     // 第一道防线：直接关掉 nav 原生 interactivePop（左边缘专属）
     [self _enumerateNavControllersFrom:win.rootViewController block:^(UINavigationController *nav){
         nav.interactivePopGestureRecognizer.enabled = NO;
-        @try { [nav.interactivePopGestureRecognizer requireGestureRecognizerToFail:pan]; }
-        @catch (NSException *e) { OBLog(@"linkNav: nav requireGestureRecognizerToFail 异常: %@", e); }
+        failOnOurPans(nav.interactivePopGestureRecognizer);
         linked++;
     }];
     // 第二道防线：枚举窗口里所有 UIScreenEdgePanGestureRecognizer（含插件自定义的边缘返回手势），
     // 让它们全部失败于我们的 pan——plugin 私有的边缘手势也能压住，杜绝「一次滑动弹两层」。
     [self _enumerateEdgeGesturesInView:win depth:0 block:^(UIScreenEdgePanGestureRecognizer *g){
-        @try { [g requireGestureRecognizerToFail:pan]; }
-        @catch (NSException *e) { OBLog(@"linkNav: edge requireGestureRecognizerToFail 异常: %@", e); }
+        if (g.delegate == self) return;   // 跳过我们自己的边缘 pan（避免 requireGestureRecognizerToFail 自引用）
+        failOnOurPans(g);
         linked++;
     }];
     // 第三道防线：枚举窗口里所有 UIScrollView 的 pan（含纵向表视图 / 横向分页容器）。
     // 让它们失败于我们的 pan——从边缘起滑时 ourPan 优先接管返回（无论横/纵 scroll），
     // 从中间滑动时 ourPan 不 begin 故放行给滚动，互不干扰。
     [self _enumerateScrollPansInView:win depth:0 block:^(UIPanGestureRecognizer *g){
-        @try { [g requireGestureRecognizerToFail:pan]; }
-        @catch (NSException *e) { OBLog(@"linkNav: scroll pan requireGestureRecognizerToFail 异常: %@", e); }
+        failOnOurPans(g);
         linked++;
     }];
     CFTimeInterval dt = (CACurrentMediaTime() - t0) * 1000.0;
@@ -305,7 +326,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 #pragma mark - UIGestureRecognizerDelegate
 
 // 只在"落在边缘 + 可返回 + 不在黑名单"时，手势才接管，否则放行给 App 自身
-- (BOOL)gestureRecognizerShouldBegin:(UIPanGestureRecognizer *)pan {
+- (BOOL)gestureRecognizerShouldBegin:(UIScreenEdgePanGestureRecognizer *)pan {
     if (self.interacting) { OBLog(@"shouldBegin=NO (已在交互中)"); return NO; }
     BOOL allowed = [ObackPreferences isAllowed];
     if (!allowed) { OBLog(@"shouldBegin=NO (isAllowed=NO, bid=%@)", NSBundle.mainBundle.bundleIdentifier); return NO; }
@@ -316,13 +337,19 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     CGFloat w = win.bounds.size.width;
     if (w <= 0) { OBLog(@"shouldBegin=NO (window width=0)"); return NO; }
 
+    // 方案 A 改用屏幕边缘 pan：每个 pan 实例已固定 edges（左/右），系统据此判定是否处于边缘，
+    // 并自带「边缘优先于滚动」优先级——列表页也能稳定接管返回。triggerWidth 仅作「更窄」二次约束
+    //（系统边缘本身已 ≤ triggerWidth，故实际为上限收紧；用户设更小值才生效）。
     ObackEdge edge = ObackEdgeLeft;
     BOOL isEdge = NO;
-    if (p.leftEnabled && loc.x <= p.triggerWidth)            { edge = ObackEdgeLeft;  isEdge = YES; }
-    else if (p.rightEnabled && loc.x >= w - p.triggerWidth)  { edge = ObackEdgeRight; isEdge = YES; }
+    if (p.leftEnabled && (pan.edges & UIRectEdgeLeft) && loc.x <= p.triggerWidth) {
+        edge = ObackEdgeLeft;  isEdge = YES;
+    } else if (p.rightEnabled && (pan.edges & UIRectEdgeRight) && loc.x >= w - p.triggerWidth) {
+        edge = ObackEdgeRight; isEdge = YES;
+    }
     if (!isEdge) {
-        OBLog(@"shouldBegin=NO (不在边缘: x=%.1f w=%.1f triggerW=%.1f left=%d right=%d)",
-              loc.x, w, p.triggerWidth, p.leftEnabled, p.rightEnabled);
+        OBLog(@"shouldBegin=NO (该边缘未启用/超宽: pan.edges=%ld x=%.1f w=%.1f triggerW=%.1f left=%d right=%d)",
+              (long)pan.edges, loc.x, w, p.triggerWidth, p.leftEnabled, p.rightEnabled);
         return NO;
     }
 

@@ -175,9 +175,14 @@ static BOOL oback_shouldBackOff(void) {
     UIWindow *win = self.view.window;
     if (!win) win = self.topViewController.view.window;
     if (win) {
-        id pan = objc_getAssociatedObject(win, kPanKey);
-        if (pan) {
-            @try { [self.interactivePopGestureRecognizer requireGestureRecognizerToFail:pan]; }
+        id pans = objc_getAssociatedObject(win, kPanKey);
+        if ([pans isKindOfClass:[NSArray class]]) {
+            for (id pan in pans) {
+                @try { [self.interactivePopGestureRecognizer requireGestureRecognizerToFail:pan]; }
+                @catch (NSException *e) {}
+            }
+        } else if (pans) {
+            @try { [self.interactivePopGestureRecognizer requireGestureRecognizerToFail:pans]; }
             @catch (NSException *e) {}
         }
     }
