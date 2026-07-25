@@ -130,7 +130,8 @@ static void OBApplyParallax(CGFloat percent,
 // 中断式动画器：速度感知弹簧的核心。系统对交互转场会暂停它并按 updateWithPercent 设定 fractionComplete，
 // finish 时 ObackInteractiveTransition 调 [animator applyReleaseVelocity] 更新弹簧初速度后由系统续完。
 - (id<UIViewImplicitlyAnimating>)interruptibleAnimatorForTransition:(id<UIViewControllerContextTransitioning>)ctx {
-    OBLog(@"interruptible ENTER (pa=%p)", _propertyAnimator);
+    self.context = ctx;   // 交互转场下系统不调 animateTransition:，必须在此存 context
+    OBLog(@"interruptible ENTER (pa=%p ctx=%p)", _propertyAnimator, ctx);
     if (_propertyAnimator) {
         // double-fetch（微信等 App 的 UIKit 会对同一转场调两次该方法）：
         // 缓存命中时确保动画器处于可 scrub 的 Active(paused) 态，
@@ -320,11 +321,13 @@ static void OBApplyParallax(CGFloat percent,
 }
 
 #pragma mark - UIViewControllerInteractiveTransitioning
-// 必选方法。此处无需保存 context：动画器由 self.animator 持有，completeTransition 在其 completion 调用。
-// （不再继承 UIPercentDrivenInteractiveTransition：它内部靠驱动 animateTransition: 里的 UIView 动画，
-//  而本 tweak 的动画在 interruptibleAnimatorForTransition: 的 UIViewPropertyAnimator 里，二者并存时
-//  在微信等自定义 nav 下会导致动画器不被续跑→completeTransition 永不触发→界面冻结。）
+// 必选方法。交互转场入口：把 context 交给 animator（animateTransition: 在交互模式下不会被调用），
+// forceFinishIfNeeded 依赖它调 completeTransition。
 - (void)startInteractiveTransition:(id<UIViewControllerContextTransitioning>)transitionContext {
+    // 交互转场入口：系统不调 animateTransition:，在此把 context 交给 animator，
+    // 确保 forceFinishIfNeeded 能拿到 context 调 completeTransition。
+    self.animator.context = transitionContext;
+    OBLog(@"startInteractiveTransition (ctx=%p animator=%p)", transitionContext, self.animator);
 }
 
 // 直接驱动中断式动画器的 fractionComplete（Apple 推荐：实现 interruptibleAnimatorForTransition: 时
