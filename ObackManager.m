@@ -491,6 +491,14 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
             return NO;
         }
         self.currentParallaxToView = YES;   // nav pop（系统原生交互转场，不 reparent toView）
+
+        // 【稳定版·双返回根治】即时禁用原生 interactivePop：无论 App（如微信）在何时把原生手势
+        // 重新 enabled=YES（常在它自身 VC 的 viewDidAppear 之后），都在我们 pan 真正接管返回的
+        // 「起滑瞬间」再关一次，确保本次触摸只有我们的单驱动，杜绝"一次滑动弹两层"。
+        // 配合 Tweak.xm 的 viewDidLoad/viewDidAppear/viewDidLayoutSubviews 持久禁用 + 这里即时禁用，
+        // 形成三道防线（参考 FDFullscreenPopGesture 的 re-assert 套路）。仅置 enabled=NO，
+        // 不碰视图/不进自定义转场，对默认路径零回归风险。
+        nav.interactivePopGestureRecognizer.enabled = NO;
     } else {
         if (top.presentingViewController != nil) {
             self.currentParallaxToView = NO;  // modal dismiss（方案B 自定义，只移 sheet）
@@ -531,6 +539,27 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     _indicatorAnchor = loc;
     _indicatorStartX = loc.x;
     return YES;
+}
+
+// 【稳定版·双返回根治】让我们的边缘 pan 要求「其它边缘返回手势 / scrollView 的 pan」先失败，
+// 从根上杜绝两套手势同时识别导致"一次滑动弹两层"。这是 OUR 自己的 delegate 决策
+// （对手无法用其 delegate 的 shouldRequireFailureOfGestureRecognizer: 否决），故即便 App/插件
+// 私有边缘手势的 delegate 返回 NO 也无效——比单纯 API requireGestureRecognizerToFail: 更稳。
+// 语义安全：对手识别→我们被取消（仅对手返回，单层）；对手不识别→我们接管（单层）；
+// 不会出现双触发，也不会丢失返回（最差情形=优雅降级为 App 原生单层返回）。
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    if (gestureRecognizer == otherGestureRecognizer) return NO;
+    // 不要求我们自己的另一个边缘 pan（左/右）失败——它们 edges 互斥，本就不会同触发
+    if (otherGestureRecognizer.delegate == self &&
+        [otherGestureRecognizer isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) {
+        return NO;
+    }
+    // 要求其它「屏幕边缘返回手势」(含系统原生 interactivePop 及 App/插件私有边缘手势) 与
+    // 所有 UIScrollView 的 pan 先失败——保证边缘起滑时只有我们的单驱动返回。
+    if ([otherGestureRecognizer isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return YES;
+    if ([otherGestureRecognizer.view isKindOfClass:[UIScrollView class]]) return YES;
+    return NO;
 }
 
 #pragma mark - 手势处理
