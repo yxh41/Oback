@@ -156,25 +156,41 @@ static void OBApplyParallax(CGFloat percent,
 
     UIView *dim = nil;
     if (self.parallaxToView) {
-        // 【关键修复】nav pop：底页(toView) 用「快照」呈现，绝不重挂载真实 toView 进 container。
+        // 【关键修复】nav pop：底页(toView) 用「离屏渲染的图像」呈现，绝不重挂载真实 toView 进 container。
         // 真实 toView 内部多为 UIScrollView，一旦 reparent 进 containerView，其 safeAreaInsets/
         // contentInset 会随 superview 变化被重算 → 底部 TabBar/功能入口错位、被滚出视口
         // （华为健康/微信「底部空白」根因，与 toView 是否 transform 无关）。
-        // 系统原生 pop 的底页本就完全静止，因此用 snapshotViewAfterScreenUpdates: 取一张像素级
-        // 静态快照铺在 container 最底层即可——快照是离屏图片，reparent 它永不伤真实 scrollView；
+        // 系统原生 pop 的底页本就完全静止，故用 drawViewHierarchyInRect:afterScreenUpdates:YES 渲染出
+        // 一张当前内容的静态图像铺底——图像是离屏像素，reparent 它永不伤真实 scrollView；
         // 转场结束 completeTransition 后，真实 toView（从未移动）原样显露，零 layout 扰动、零空白。
         // 只把当前页(fromView)挂入 container 做滑出；不创建 dim（底页无需压暗、避免遮挡）。
         if (fromView.superview != container) [container addSubview:fromView];
-        UIView *snap = [toView snapshotViewAfterScreenUpdates:NO];
-        if (snap) {
-            snap.frame = container.bounds;
-            snap.userInteractionEnabled = NO;
-            [container insertSubview:snap belowSubview:fromView];
-            OBLog(@"interruptible: nav pop 使用底页快照(避免底部空白)");
+        // 用「离屏渲染底页图像」作容器最底层，绝不重挂载真实 toView（避免底部空白根因）。
+        // 旧方案 snapshotViewAfterScreenUpdates:NO 在交互转场此刻 toView 尚未进窗口/未渲染，
+        // 永远返回 nil → 每次都退回挂真实 toView → 重挂载破坏 scrollView 布局 → 底部空白
+        // （oback_debug(38).log 实测每次都打「快照失败」印证）。
+        // 改用 drawViewHierarchyInRect:afterScreenUpdates:YES：强制离屏渲染 toView 当前内容
+        // （无论是否进窗口都能拿到正确像素），转成 UIImageView 铺底。图像是静态像素，
+        // reparent 它永不伤真实 scrollView；completeTransition 后真实 toView（从未被移动）
+        // 原样显露，零 layout 扰动、零空白。
+        UIImage *snapImg = nil;
+        CGRect snapRect = toView.bounds;
+        if (snapRect.size.width < 1.0 || snapRect.size.height < 1.0) snapRect = container.bounds;
+        UIGraphicsBeginImageContextWithOptions(snapRect.size, NO, 0);
+        [toView drawViewHierarchyInRect:snapRect afterScreenUpdates:YES];
+        snapImg = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+        if (snapImg) {
+            UIImageView *iv = [[[UIImageView alloc] initWithImage:snapImg] autorelease];
+            iv.frame = container.bounds;
+            iv.userInteractionEnabled = NO;
+            iv.contentMode = UIViewContentModeScaleToFill;
+            [container insertSubview:iv belowSubview:fromView];
+            OBLog(@"interruptible: nav pop 使用底页图像快照(避免底部空白)");
         } else if (toView.superview != container) {
-            // 兜底：极端情况下快照取不到，仍挂真实 toView（保证不空白）
+            // 兜底：极端情况下图像取不到，仍挂真实 toView（保证不空白，等同旧行为）
             [container insertSubview:toView atIndex:0];
-            OBLog(@"interruptible: nav pop 快照失败，退回到挂真实 toView");
+            OBLog(@"interruptible: nav pop 图像快照失败，退回到挂真实 toView");
         }
     } else {
         // 弹窗 dismiss 方案B：底层 presenting(toView) 不碰 transform；目的页正常挂载，

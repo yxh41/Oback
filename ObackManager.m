@@ -304,24 +304,10 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         return NO;
     }
 
-    // 边缘内滑与下方横向滚动列表冲突时，让位给滚动（左右边缘通用）
-    UIScrollView *sv = [self scrollViewAtPoint:loc inView:win];
-    if (sv) {
-        CGFloat maxX = sv.contentSize.width - sv.bounds.size.width;
-        BOOL canScrollHoriz = (maxX > 1.0);
-        if (canScrollHoriz) {
-            // 左边缘内滑且列表还能向左滚 -> 放行给滚动
-            if (edge == ObackEdgeLeft && sv.contentOffset.x > 1.0) {
-                OBLog(@"shouldBegin=NO (让位横向滚动, 左边缘)");
-                return NO;
-            }
-            // 右边缘内滑且列表还能向右滚 -> 放行给滚动
-            if (edge == ObackEdgeRight && sv.contentOffset.x < maxX - 1.0) {
-                OBLog(@"shouldBegin=NO (让位横向滚动, 右边缘)");
-                return NO;
-            }
-        }
-    }
+    // 边缘返回优先：不再"让位横向滚动"。横向 scrollView 的 pan 已在 _linkNavPopGesturesInWindow
+    // 里被设为失败于我们的边缘 pan（requireGestureRecognizerToFail）——从边缘起滑时我们的手势
+    // 优先接管返回，从中间横滑时我们的 pan 不 begin 故放行给滚动，互不干扰。
+    // 这样朋友圈详情等横向分页容器也能从最左/右边缘触发返回（修复"朋友圈无作用"）。
 
     self.currentEdge = edge;
     OBLog(@"shouldBegin=YES (edge=%@ nav.childCount=%lu presenting=%d)",
