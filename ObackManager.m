@@ -1017,9 +1017,12 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
             CGPoint now = [touch locationInView:self.view];
             CGFloat dx = now.x - self.startPoint.x;
             CGFloat dy = now.y - self.startPoint.y;
-            // 累计位移超阈值后判定方向，纵向则直接失败，放行给底层滚动
-            if (fabs(dx) >= 8.0 || fabs(dy) >= 8.0) {
-                if (fabs(dy) > fabs(dx)) {
+            // 放松「仅横向」判定（稳定性修复）：极端边缘起滑应优先判为返回，贴合 OPPO 行为。
+            // 旧逻辑：前 8pt 内只要纵向>横向即判失败 → 拇指斜滑被误杀 → 「有时要划好几次才触发」。
+            // 新逻辑：仅当位移明显偏纵向(dy > 2*dx)且已超过较大阈值(14pt)才失败、放行底层滚动；
+            // 轻微对角/横向均视为返回意图，边缘返回成功率大幅提升。
+            if (fabs(dx) >= 14.0 || fabs(dy) >= 14.0) {
+                if (fabs(dy) > 2.0 * fabs(dx)) {
                     self.state = UIGestureRecognizerStateFailed;
                     return;
                 }
