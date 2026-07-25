@@ -103,6 +103,9 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     UIView *_indicator;          // 边缘方向指示胶囊
     CGPoint _indicatorAnchor;    // 手势起点（胶囊初始垂直位置）
     CGFloat _indicatorStartX;    // 手势起点 x（用于计算跟随位移）
+    CADisplayLink *_indicatorLink; // 胶囊平滑：每帧插值到目标位置（手势中跑，结束即停）
+    CGPoint _indicatorTarget;    // 胶囊目标中心（updateIndicator 写入，tick 插值）
+    CGFloat _indicatorTargetScale; // 胶囊目标缩放
     ObackAnimator *_watchAnimator; // MRC 强引用：兜底收尾定时器期间持有动画器，避免 UIKit 释放成野指针
     id     _navPopTarget;        // 方案A: 系统原生 nav pop 的私有 target(_UINavigationInteractiveTransition)，
                                  // 驱动 handleNavigationTransition: 用（assign，由 nav 内部持有，转场期间有效）
@@ -295,6 +298,11 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 // 从根上消除「一次滑动弹两层」（含插件场景）。
 - (void)_linkNavPopGesturesInWindow:(UIWindow *)win {
     if (!win) return;
+    // 性能：同一 window 500ms 内不重复全树遍历（windowBecameKey / 已挂载重链可能密集触发）
+    static NSTimeInterval __lastLinkTS = 0;
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (now - __lastLinkTS < 0.5) return;
+    __lastLinkTS = now;
     NSArray *pans = objc_getAssociatedObject(win, kPanKey);
     if (![pans isKindOfClass:[NSArray class]] || pans.count == 0) {
         OBLog(@"linkNav: 本 window 无 Oback pan，跳过链接"); return;
@@ -875,6 +883,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         [_indicator.layer removeAllAnimations];   // 杀掉进行中的淡出/弹回动画
         [_indicator removeFromSuperview];
         _indicator = nil;
+        [self _stopIndicatorLink];   // 停掉上一轮的平滑插值（showIndicator 之后会重建）
     }
     ObackEdgeIndicator *ind = [[ObackEdgeIndicator alloc] initWithEdge:edge];
     ind.center = [self indicatorHomeCenterForEdge:edge basePoint:loc window:win];
@@ -883,6 +892,14 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     [win addSubview:ind];
     [win bringSubviewToFront:ind];
     _indicator = ind;
+    // 启动胶囊平滑插值（CADisplayLink 每帧驱动；手势结束在 dismissIndicator* 停掉，仅手势中跑，功耗可忽略）
+    if (!_indicatorLink) {
+        _indicatorLink = [[CADisplayLink displayLinkWithTarget:self
+                                                      selector:@selector(_obIndicatorTick:)] retain];
+        [_indicatorLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    }
+    _indicatorTarget = ind.center;
+    _indicatorTargetScale = 0.85;
     OBLog(@"indicator shown (edge=%@ y=%.0f)", edge == ObackEdgeLeft ? @"左" : @"右", loc.y);
     [UIView animateWithDuration:0.15 delay:0 options:UIViewAnimationOptionCurveEaseOut
                      animations:^{ ind.alpha = 0.9; } completion:nil];
@@ -908,16 +925,17 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     CGFloat dir = (self.currentEdge == ObackEdgeLeft) ? 1.0 : -1.0;
     CGFloat travel = MIN(fabs(dx), kIndicatorMaxTravel) * dir;   // 跟随手指，最多移动 kIndicatorMaxTravel
     CGPoint home = [self indicatorHomeCenterForEdge:self.currentEdge basePoint:_indicatorAnchor window:win];
-    CGFloat s = 0.85 + 0.15 * MIN(1.0, _currentPercent / 0.3);   // 拉动越大，胶囊越饱满
-    _indicator.center = CGPointMake(home.x + travel, home.y);
-    _indicator.transform = CGAffineTransformMakeScale(s, s);
+    // 仅更新目标位置/缩放，真正位移由 CADisplayLink(_obIndicatorTick:) 每帧插值 → 平滑不抖
+    _indicatorTarget = CGPointMake(home.x + travel, home.y);
+    _indicatorTargetScale = 0.85 + 0.15 * MIN(1.0, _currentPercent / 0.3);
     _indicator.alpha = 0.9;
-    [win bringSubviewToFront:_indicator];
+    // 不再每帧 [win bringSubviewToFront:]（O(n) 主窗口子视图重排）；仅在 showIndicator 时置顶一次
 }
 
 - (void)dismissIndicatorCommitted:(BOOL)committed params:(ObackParams *)p window:(UIWindow *)win {
     UIView *ind = _indicator;
     _indicator = nil;
+    [self _stopIndicatorLink];   // 手势结束：停平滑插值，胶囊交给 UIView 动画淡出/弹回
     if (!ind) return;
     if (committed) {
         // 提交返回：放大淡出
@@ -938,6 +956,30 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
             ind.alpha = 0.0;
             ind.transform = CGAffineTransformMakeScale(0.6, 0.6);
         } completion:^(BOOL f) { [ind removeFromSuperview]; }];
+    }
+}
+
+#pragma mark - 胶囊平滑（CADisplayLink 每帧插值）
+
+- (void)_obIndicatorTick:(CADisplayLink *)link {
+    if (!_indicator) { [self _stopIndicatorLink]; return; }
+    // 每帧向目标位置/缩放靠近 35%，快速滑动时平滑跟随、消除抖动
+    static const CGFloat k = 0.35;
+    CGPoint c = _indicator.center;
+    c.x += (_indicatorTarget.x - c.x) * k;
+    c.y += (_indicatorTarget.y - c.y) * k;
+    _indicator.center = c;
+    CGFloat sc = _indicator.transform.a;          // 当前 x 缩放（transform 仅等比缩放）
+    sc += (_indicatorTargetScale - sc) * k;
+    _indicator.transform = CGAffineTransformMakeScale(sc, sc);
+    _indicator.alpha = 0.9;
+}
+
+- (void)_stopIndicatorLink {
+    if (_indicatorLink) {
+        [_indicatorLink invalidate];
+        [_indicatorLink release];
+        _indicatorLink = nil;
     }
 }
 

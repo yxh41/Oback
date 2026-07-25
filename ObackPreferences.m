@@ -82,12 +82,44 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     return [self _bundleId:bid inList:raw];
 }
 
-// 调试日志总开关：设置面板「调试日志」(key=debugLog)，默认开（保持既有诊断能力）；
-// 日用机可关闭以节省磁盘写盘。
+// 调试日志总开关：设置面板「调试日志」(key=debugLog)。
+// 默认关（日用机省电省盘）；开启后 30 分钟自动过期写回关闭，防止忘记关一直刷 syslog 偷电。
+// 内存缓存 5s，避免每次同步 NSUserDefaults IO（OBLog 调用频率不低，即便关闭仍走此检查）。
+static NSNumber *__obDebugLogCache = nil;
+static NSTimeInterval __obDebugLogCacheTS = 0;
+static NSTimeInterval __obDebugLogOpenedAt = 0;
+#define OB_DEBUG_LOG_CACHE_TTL 5.0
+#define OB_DEBUG_LOG_EXPIRE   1800.0   // 30 分钟
+
 + (BOOL)debugLogEnabled {
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (__obDebugLogCache && (now - __obDebugLogCacheTS) < OB_DEBUG_LOG_CACHE_TTL) {
+        return [__obDebugLogCache boolValue];
+    }
     NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
     id v = [d objectForKey:@"debugLog"];
-    return v ? [v boolValue] : YES;   // 未设置 → 默认开
+    BOOL enabled = v ? [v boolValue] : NO;   // 未设置 → 默认关
+    if (enabled) {
+        // 刚从关闭切到开启：记录开启时刻，用于自动过期
+        if (!(__obDebugLogCache && [__obDebugLogCache boolValue])) {
+            __obDebugLogOpenedAt = now;
+        }
+        // 开启超过 30 分钟自动过期：写回关闭，避免忘记关持续偷电
+        if (__obDebugLogOpenedAt > 0 && (now - __obDebugLogOpenedAt) > OB_DEBUG_LOG_EXPIRE) {
+            enabled = NO;
+            [d setBool:NO forKey:@"debugLog"];
+            [d synchronize];
+            __obDebugLogOpenedAt = 0;
+        }
+    } else {
+        __obDebugLogOpenedAt = 0;
+    }
+    [d release];
+    NSNumber *nc = [@(enabled) retain];   // MRC：静态变量持有，必须 retain（autorelease 会在 drain 后野指针）
+    [__obDebugLogCache release];
+    __obDebugLogCache = nc;
+    __obDebugLogCacheTS = now;
+    return enabled;
 }
 
 // 双返回诊断开关：设置面板「双返回诊断」(key=doubleReturnDiag)，默认关。
