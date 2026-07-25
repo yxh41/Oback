@@ -239,9 +239,9 @@ static void OBApplyParallax(CGFloat percent,
             fromView.layer.masksToBounds = NO;
             toView.transform   = CGAffineTransformIdentity;
             toView.alpha      = 1.0;
-            // 遮罩淡出
+            // 遮罩淡出：容器中除 from/to 外仅我们加的 dim，全部淡出
             for (UIView *sub in container.subviews) {
-                if (sub != fromView && sub != toView && sub.layer.subviews.count == 0) {
+                if (sub != fromView && sub != toView) {
                     sub.alpha = 0.0;
                 }
             }
@@ -253,9 +253,9 @@ static void OBApplyParallax(CGFloat percent,
             fromView.layer.masksToBounds = NO;
             toView.transform   = CGAffineTransformIdentity;
             toView.alpha      = 1.0;
-            // 清除遮罩
+            // 清除遮罩：容器中除 from/to 外仅我们加的 dim，全部淡出
             for (UIView *sub in container.subviews) {
-                if (sub != fromView && sub != toView && sub.layer.subviews.count == 0) {
+                if (sub != fromView && sub != toView) {
                     sub.alpha = 0.0;
                 }
             }
