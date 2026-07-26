@@ -303,26 +303,29 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         return;
     }
     NSArray *existing = objc_getAssociatedObject(nav, kNavPansKey);
-    if ([existing isKindOfClass:[NSArray class]] && existing.count == 2) return;  // 已挂过，幂等
+    if ([existing isKindOfClass:[NSArray class]] && existing.count >= 1) return;  // 已挂过，幂等
     UIView *navView = nav.view;            // 触发加载；为 nil 时下面 addGestureRecognizer 无操作，下次链接重试
     if (!navView) { OBLog(@"attachNavPan: nav.view 尚为 nil，跳过（下次链接重试）"); return; }
     NSMutableArray *pans = [NSMutableArray array];
-    UIRectEdge edges[2] = { UIRectEdgeLeft, UIRectEdgeRight };
-    for (NSUInteger i = 0; i < 2; i++) {
-        ObackPanGestureRecognizer *pan = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
-                                                                                     action:@selector(handlePan:)] autorelease];
-        pan.delegate = self;
-        pan.maximumNumberOfTouches = 1;
-        pan.cancelsTouchesInView = NO;
-        pan.delaysTouchesBegan   = NO;
-        pan.edges = edges[i];
-        objc_setAssociatedObject(pan, kPanKindKey, @"nav", OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(pan, kObackNavKey, nav, OBJC_ASSOCIATION_ASSIGN);  // 绑定所属 nav，gesture 判定/驱动时直接读，不依赖容器枚举
-        [navView addGestureRecognizer:pan];
-        [pans addObject:pan];
-    }
+    // 仅挂「左缘」pan 到 nav.view：左缘走方案A 系统原生交互 pop，需要 nav.view 层级的滚动优先级
+    // （列表页才能稳定压过 scrollView 的 pan）。右缘返回本质是非交互 pop（松手才 popViewControllerAnimated:），
+    // 不需要 nav.view 的滚动优先级，故改由 window 级 panR 直接接管（见 gestureRecognizerShouldBegin）。
+    // 去掉 nav.view 右缘 pan 可消除「window 右缘 pan(panR) + nav.view 右缘 pan」双右缘共存导致的
+    // requireGestureRecognizerToFail: 失败依赖脆弱（panR 在有 nav 时 shouldBegin 直接 NO 成死 pan），
+    // 这正是 QQ 等 App 右缘冲突复发、且"之前能用的那套（单一权威右缘 pan）"差异的根因。
+    ObackPanGestureRecognizer *pan = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
+                                                                                 action:@selector(handlePan:)] autorelease];
+    pan.delegate = self;
+    pan.maximumNumberOfTouches = 1;
+    pan.cancelsTouchesInView = NO;
+    pan.delaysTouchesBegan   = NO;
+    pan.edges = UIRectEdgeLeft;
+    objc_setAssociatedObject(pan, kPanKindKey, @"nav", OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(pan, kObackNavKey, nav, OBJC_ASSOCIATION_ASSIGN);  // 绑定所属 nav，gesture 判定/驱动时直接读，不依赖容器枚举
+    [navView addGestureRecognizer:pan];
+    [pans addObject:pan];
     objc_setAssociatedObject(nav, kNavPansKey, pans, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    OBLog(@"attachNavPan: nav=%@ pans=%lu on nav.view", NSStringFromClass([nav class]), (unsigned long)pans.count);
+    OBLog(@"attachNavPan: nav=%@ pans=%lu on nav.view (仅左缘)", NSStringFromClass([nav class]), (unsigned long)pans.count);
 }
 
 // 让窗口内所有「边缘返回手势」失败于我们的 window pan。
@@ -406,6 +409,18 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
                 }
                 linked++;
             }];
+            // 诊断（双返回诊断开关）：列出本 window 内所有「对手 pan」类名+宿主，确认 QQ 等 App 的
+            // 右缘手势是否被发现并挂上 requireGestureRecognizerToFail: 我们的右缘 pan（验证链接是否生效）。
+            if ([ObackPreferences doubleReturnDiagEnabled]) {
+                NSMutableArray *opp = [NSMutableArray array];
+                [self _enumeratePansInView:win depth:0 block:^(UIPanGestureRecognizer *g){
+                    if (g.delegate == self) return;
+                    [opp addObject:[NSString stringWithFormat:@"%@@%@",
+                                    NSStringFromClass([g class]), NSStringFromClass([g.view class])]];
+                }];
+                OBLog(@"diag[右缘链接] 右缘 pan=%lu 个；对手 pan 共 %lu → %@",
+                      (unsigned long)rightPans.count, (unsigned long)opp.count, opp);
+            }
         }
     }
     CFTimeInterval dt = (CACurrentMediaTime() - t0) * 1000.0;
@@ -557,8 +572,18 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         if (top.presentingViewController != nil) {
             self.currentParallaxToView = NO;  // modal dismiss（方案B 自定义，只移 sheet）
         } else if (nav && nav.viewControllers.count > 1) {
-            OBLog(@"shouldBegin(modal)=NO (有 nav pop 可接管，交给 nav pan)");
-            return NO;
+            // 右缘：window pan 直接接管非交互 pop（rightSimplePop）——不再 defer 给已废弃的 nav.view 右缘 pan。
+            // 关键修复：此前右缘在有 nav 可返回时把 shouldBegin 让给 nav 右缘 pan，导致 window 右缘 pan
+            // 成"死 pan"（永不 begin），requireGestureRecognizerToFail: 失败依赖脆弱、压不住 QQ 右缘手势。
+            // 现在右缘统一由单一 window pan(panR) 独占：有 nav 即 begin→rightSimplePop 松手返回；
+            // 中间起滑 panR 不 begin→QQ 原手势正常。左缘仍 defer 给 nav.view 左缘 pan（拿滚动优先级，方案A）。
+            if (self.currentEdge == ObackEdgeRight) {
+                self.currentParallaxToView = NO;
+                self.rightSimplePop = YES;
+            } else {
+                OBLog(@"shouldBegin(modal)=NO (有 nav pop 可接管，交给 nav pan)");
+                return NO;
+            }
         } else {
             OBLog(@"shouldBegin(modal)=NO (无 modal 也无 nav pop)");
             return NO;
