@@ -16,6 +16,12 @@ Theos(Logos)+ObjC(MRC)，Windows 编写，GitHub Actions(roothide theos, arm64e)
   每个类 dealloc 释放所有 retain 属性。`autorelease]]` 多一个 `]` 即错（clang expected identifier）。
 - **系统进程/triggerWidth/nav**：`com.apple.*`+包管理器排除；`triggerWidth` 默认 40（≥35）；nav pop 仅手势时接 `ObackAnimator`。
 - **默认全局生效**：`whitelistMode` 默认 NO（全局+黑名单），否则主功能没效果。
+- **黑名单失效排查铁律**：黑名单「拦不住」但 App 里仍有胶囊/仍崩 → 99% 是「列表存的 bid ≠ App 运行时 `mainBundle.bundleIdentifier`」
+  （大小写/后缀变体/同名不同 bid 两个包），**不是守卫没生效**。所有注入入口
+  （start / attachToWindow / _linkNavPopGesturesInWindow / shouldBegin / Tweak 的 viewDidLoad·viewDidAppear·setDelegate）
+  均有 `isAllowed` 守卫，返回 0 时绝不可能出现胶囊或崩溃。确证手段：删 `oback_debug.log`→冷启目标 App→复现
+  →看首行 `[oback-diag] bid=<真实bid> isAllowed=0/1`。（1f3efa1 起 isAllowed 大小写不敏感+点分隔前缀兜底，
+  且设置面板每行显示真实 bundle id，便于核对/补选。）
 - **版本号**：`control` 静态 `0.1.0`，CI 注入哈希成 `0.1.0+<sha>`；本地构建保持 `0.1.0`。
 
 ## 架构决策（feat/navbar-coordination）
