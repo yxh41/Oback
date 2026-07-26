@@ -577,7 +577,10 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
             // 成"死 pan"（永不 begin），requireGestureRecognizerToFail: 失败依赖脆弱、压不住 QQ 右缘手势。
             // 现在右缘统一由单一 window pan(panR) 独占：有 nav 即 begin→rightSimplePop 松手返回；
             // 中间起滑 panR 不 begin→QQ 原手势正常。左缘仍 defer 给 nav.view 左缘 pan（拿滚动优先级，方案A）。
-            if (self.currentEdge == ObackEdgeRight) {
+            // 注意：必须用本次手势的局部 edge 判定，而非 self.currentEdge——后者在本方法末尾(line 593)
+            // 才被赋值，此刻仍是上一手势的值；若用它会让右缘在「非右缘手势之后 / 首次」误判为 NO，
+            // 导致右缘几乎永远不触发（5ac6935 回归根因，已修复）。
+            if (edge == ObackEdgeRight) {
                 self.currentParallaxToView = NO;
                 self.rightSimplePop = YES;
             } else {
