@@ -11,6 +11,7 @@
 #import <UIKit/UIKit.h>
 #import <Preferences/PSSpecifier.h>
 #import <objc/runtime.h>
+#import "ObackPrefsBridge.h"   // 重置时同步清空全局 plist（绕过 roothide per-app NSUserDefaults 容器化）
 
 // ── 每个滑块 key 对应的单位后缀 ──────────────────────────────
 static NSDictionary *_obSliderUnits(void) {
@@ -175,6 +176,8 @@ static NSDictionary *_obSliderUnits(void) {
     NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:domain];
     [d removePersistentDomainForName:domain];
     [d synchronize];
+    // 同步清空全局文件（roothide 跨 App 共享来源）：否则 tweak 侧仍读得到旧黑名单/白名单
+    oback_removeGlobalPrefs();
 
     // 丢掉缓存的右侧数值标签（reload 后 willDisplayCell: 会按新默认值重建）
     _valueLabels = [NSMutableDictionary dictionary];

@@ -16,6 +16,7 @@
 #import "ObackAppListController.h"
 #import <Preferences/PSSpecifier.h>
 #import <UIKit/UIKit.h>
+#import "ObackPrefsBridge.h"   // 直接读写全局 plist（绕过 roothide per-app NSUserDefaults 容器化）
 
 static NSString *const kDomain = @"com.zlhkf.oback";
 
@@ -158,6 +159,9 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 }
 
 - (NSArray *)_selectedApps {
+    // 优先读全局文件（跨 App 真相源），兜底 NSUserDefaults 域
+    NSArray *g = oback_globalPrefs()[[self _storeKey]];
+    if ([g isKindOfClass:[NSArray class]]) return g;
     NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
     return [d arrayForKey:[self _storeKey]] ?: @[];
 }
@@ -324,6 +328,9 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     else [arr addObject:bid];
     [d setObject:arr forKey:[self _storeKey]];
     [d synchronize];
+    // 同时写全局文件（roothide 跨 App 共享来源）：手动 NSUserDefaults 写入会被容器化到「设置」App 副本，
+    // tweak 读不到；直接写全局文件才能被注入到其它 App 的 tweak 读到，黑名单/白名单才真正生效。
+    oback_setGlobalPref([self _storeKey], arr);
     _specifiers = nil;   // 清空以触发重建，使「选中项置顶」排序生效
     [self reloadSpecifiers];
 }

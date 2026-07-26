@@ -2,12 +2,60 @@
 
 // 与设置面板 Root.plist 的 suite / key 保持一致
 static NSString *const kDomain = @"com.zlhkf.oback";
+// 全局偏好文件：PreferenceLoader（标准开关/滑块）写入此处，跨所有 App 共享。
+// roothide 下，本 tweak 通过 NSUserDefaults(suiteName:) 读取可能落到「注入进程自身的容器副本」
+// （尤其是黑名单这种不在标准 cell 机制内、由 ObackAppListController 手动 NSUserDefaults 写入的项），
+// 导致「设置里勾选了、tweak 却读不到」——黑名单因此永远无效、永远注入。
+// 故所有读取直接读本全局文件（raw 文件读，绕过 per-app 容器化），NSUserDefaults 域仅作兜底。
+static NSString *const kGlobalPlistPath = @"/var/mobile/Library/Preferences/com.zlhkf.oback.plist";
 
 @implementation ObackPreferences
 
+#pragma mark - 合并偏好（全局文件优先 + NSUserDefaults 域兜底，带短时缓存）
+
+static NSDictionary *__obMergedPrefs = nil;
+static NSTimeInterval __obMergedPrefsTS = 0;
+#define OB_MERGED_PREFS_TTL 2.0
+
++ (NSDictionary *)_mergedPrefs {
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (__obMergedPrefs && (now - __obMergedPrefsTS) < OB_MERGED_PREFS_TTL) {
+        return __obMergedPrefs;
+    }
+    // 1) 全局文件（跨 App 共享来源，PreferenceLoader/设置页写入处）
+    NSDictionary *g = [NSDictionary dictionaryWithContentsOfFile:kGlobalPlistPath];
+    if (!g) g = [NSDictionary dictionary];
+    // 2) NSUserDefaults 域（兜底：非 roothide 或 suite 未被隔离的环境）
+    NSUserDefaults *d = [[[NSUserDefaults alloc] initWithSuiteName:kDomain] autorelease];
+    NSDictionary *suite = [d dictionaryRepresentation];
+    if (!suite) suite = [NSDictionary dictionary];
+    // 合并：全局文件优先（它才是跨 App 真相源）
+    NSMutableDictionary *m = [NSMutableDictionary dictionaryWithDictionary:suite];
+    [m addEntriesFromDictionary:g];   // 同名 key 以全局文件为准
+    NSDictionary *result = [m copy];   // MRC: copy 返回 retained(+1)，交给静态持有
+    [__obMergedPrefs release];
+    __obMergedPrefs = result;
+    __obMergedPrefsTS = now;
+    return __obMergedPrefs;
+}
+
+// 写回：同时写全局文件 + NSUserDefaults 域（保证「设置」与「tweak」两侧读写一致）
++ (void)_setObject:(id)value forKey:(NSString *)key {
+    if (!key) return;
+    NSUserDefaults *d = [[[NSUserDefaults alloc] initWithSuiteName:kDomain] autorelease];
+    if (value) [d setObject:value forKey:key]; else [d removeObjectForKey:key];
+    [d synchronize];
+    // 全局文件（roothide 跨 App 共享来源）：读-改-写。写失败（部分 App 无写权限）静默忽略，
+    // 不影响读取端——读取端本就优先读此文件，而「设置」App 有写权限会把它写对。
+    NSMutableDictionary *g = [NSMutableDictionary dictionaryWithContentsOfFile:kGlobalPlistPath];
+    if (!g) g = [NSMutableDictionary dictionary];
+    if (value) g[key] = value; else [g removeObjectForKey:key];
+    [g writeToFile:kGlobalPlistPath atomically:YES];
+}
+
 + (ObackParams *)params {
     ObackParams *p = [ObackParams defaults];
-    NSUserDefaults *d = [[[NSUserDefaults alloc] initWithSuiteName:kDomain] autorelease];
+    NSDictionary *d = [self _mergedPrefs];
     id v;
     if ((v = [d objectForKey:@"triggerWidth"]))     p.triggerWidth     = [v doubleValue];
     if ((v = [d objectForKey:@"parallaxOffset"]))   p.parallaxOffset   = [v doubleValue];
@@ -19,7 +67,7 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     if ((v = [d objectForKey:@"commitRatio"]))      p.commitRatio      = [v doubleValue];
     if ((v = [d objectForKey:@"commitVelocity"]))   p.commitVelocity   = [v doubleValue];
     if ((v = [d objectForKey:@"leftEnabled"]))      p.leftEnabled      = [v boolValue];
-    if ((v = [d objectForKey:@"rightEnabled"]))     p.rightEnabled     = [v boolValue];
+    if ((v = [d objectForKey:@"rightEnabled"]))      p.rightEnabled     = [v boolValue];
     if ((v = [d objectForKey:@"hapticEnabled"]))    p.hapticEnabled    = [v boolValue];
     if ((v = [d objectForKey:@"springEnabled"]))    p.springEnabled    = [v boolValue];
     if ((v = [d objectForKey:@"cardCornerEnabled"])) p.cardCornerEnabled = [v boolValue];
@@ -59,7 +107,7 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 //  新版用 whitelistApps / blacklistApps 数组（设置页 App 选择器写入）；
 //  旧版用 whitelistRaw / blacklistRaw 逗号分隔字符串，做了兼容。
 + (BOOL)isAllowed {
-    NSUserDefaults *d = [[[NSUserDefaults alloc] initWithSuiteName:kDomain] autorelease];
+    NSDictionary *d = [self _mergedPrefs];
     NSString *bid = NSBundle.mainBundle.bundleIdentifier;
     if (!bid) return NO;
 
@@ -67,31 +115,31 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     BOOL whitelistMode = wm ? [wm boolValue] : NO;   // 未设置 → 默认全局生效（黑名单模式），符合"全局注入"设计
 
     if (whitelistMode) {
-        NSArray *white = [d arrayForKey:@"whitelistApps"];
+        NSArray *white = [d objectForKey:@"whitelistApps"];
         if (white) return [white containsObject:bid];
         // 兼容旧版字符串
-        return [self _bundleId:bid inList:[d stringForKey:@"whitelistRaw"]];
+        return [self _bundleId:bid inList:[d objectForKey:@"whitelistRaw"]];
     } else {
-        NSArray *black = [d arrayForKey:@"blacklistApps"];
+        NSArray *black = [d objectForKey:@"blacklistApps"];
         if (black) {
             if (black.count == 0) return YES;
             return ![self _bid:bid matchesList:black];
         }
         // 兼容旧版字符串
-        NSString *raw = [d stringForKey:@"blacklistRaw"];
+        NSString *raw = [d objectForKey:@"blacklistRaw"];
         if (!raw.length) return YES;
         return ![self _bundleId:bid inList:raw];
     }
 }
 
 + (BOOL)isBlacklisted {
-    NSUserDefaults *d = [[[NSUserDefaults alloc] initWithSuiteName:kDomain] autorelease];
+    NSDictionary *d = [self _mergedPrefs];
     NSString *bid = NSBundle.mainBundle.bundleIdentifier;
     if (!bid) return NO;
-    NSArray *black = [d arrayForKey:@"blacklistApps"];
+    NSArray *black = [d objectForKey:@"blacklistApps"];
     if (black) return [self _bid:bid matchesList:black];
     // 兼容旧版字符串
-    NSString *raw = [d stringForKey:@"blacklistRaw"];
+    NSString *raw = [d objectForKey:@"blacklistRaw"];
     if (!raw.length) return NO;
     return [self _bundleId:bid inList:raw];
 }
@@ -103,14 +151,14 @@ static NSNumber *__obDebugLogCache = nil;
 static NSTimeInterval __obDebugLogCacheTS = 0;
 static NSTimeInterval __obDebugLogOpenedAt = 0;
 #define OB_DEBUG_LOG_CACHE_TTL 5.0
-#define OB_DEBUG_LOG_EXPIRE   1800.0   // 30 分钟
+#define OB_DEBUG_LOG_EXPIRE   1800.0
 
 + (BOOL)debugLogEnabled {
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     if (__obDebugLogCache && (now - __obDebugLogCacheTS) < OB_DEBUG_LOG_CACHE_TTL) {
         return [__obDebugLogCache boolValue];
     }
-    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    NSDictionary *d = [self _mergedPrefs];
     id v = [d objectForKey:@"debugLog"];
     BOOL enabled = v ? [v boolValue] : NO;   // 未设置 → 默认关
     if (enabled) {
@@ -121,14 +169,12 @@ static NSTimeInterval __obDebugLogOpenedAt = 0;
         // 开启超过 30 分钟自动过期：写回关闭，避免忘记关持续偷电
         if (__obDebugLogOpenedAt > 0 && (now - __obDebugLogOpenedAt) > OB_DEBUG_LOG_EXPIRE) {
             enabled = NO;
-            [d setBool:NO forKey:@"debugLog"];
-            [d synchronize];
+            [self _setObject:@NO forKey:@"debugLog"];
             __obDebugLogOpenedAt = 0;
         }
     } else {
         __obDebugLogOpenedAt = 0;
     }
-    [d release];
     NSNumber *nc = [@(enabled) retain];   // MRC：静态变量持有，必须 retain（autorelease 会在 drain 后野指针）
     [__obDebugLogCache release];
     __obDebugLogCache = nc;
@@ -140,9 +186,8 @@ static NSTimeInterval __obDebugLogOpenedAt = 0;
 // 开 → nav pop 走自定义 ObackAnimator 视差转场（当前页平移+投影，灵敏度滑块对导航返回也生效）；
 // 关（默认）→ 系统原生 pop（方案A，最稳）。实验功能，需多 App 真机验证。
 + (BOOL)navParallaxEnabled {
-    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    NSDictionary *d = [self _mergedPrefs];
     id v = [d objectForKey:@"navParallax"];
-    [d release];
     return v ? [v boolValue] : NO;   // 未设置 → 默认关
 }
 
@@ -150,7 +195,7 @@ static NSTimeInterval __obDebugLogOpenedAt = 0;
 // 开启后，每次边缘起滑补链时把本 window 所有边缘返回手势的精确类名打进日志，
 // 便于定位「一次滑动返回两层」中的「第二层」是系统原生还是某插件私有手势。
 + (BOOL)doubleReturnDiagEnabled {
-    NSUserDefaults *d = [[[NSUserDefaults alloc] initWithSuiteName:kDomain] autorelease];
+    NSDictionary *d = [self _mergedPrefs];
     id v = [d objectForKey:@"doubleReturnDiag"];
     return v ? [v boolValue] : NO;   // 未设置 → 默认关
 }

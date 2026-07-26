@@ -124,13 +124,15 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 - (void)start {
     if (_started) return;
     _started = YES;
-    // 诊断横幅：打印当前 bid + 黑白名单状态，便于确认①装的是哪个包②黑名单数组是否真正加载/命中。
+    // 诊断横幅：直接 NSLog 到 syslog（全局、不受 roothide 容器隔离、也不受「调试日志」开关门控），
+    // 即便调试日志关闭，也能在 Mac 上 `log stream | grep Oback-diag` 抓到本 App 真实 bid 与名单状态，
+    // 用于确认①装的是哪个包②黑名单数组是否真正加载/命中（此前文件日志因容器隔离抓不到拼多多）。
     {
-        NSUserDefaults *d = [[[NSUserDefaults alloc] initWithSuiteName:@"com.zlhkf.oback"] autorelease];
-        OBLog(@"[oback-diag] bid=%@ whitelistMode=%@ blacklistApps=%@ isAllowed=%d",
+        NSDictionary *d = [ObackPreferences _mergedPrefs];
+        NSLog(@"[Oback-diag] bid=%@ whitelistMode=%@ blacklistApps=%@ isAllowed=%d",
               NSBundle.mainBundle.bundleIdentifier,
-              [d objectForKey:@"whitelistMode"],
-              [d arrayForKey:@"blacklistApps"],
+              d[@"whitelistMode"],
+              d[@"blacklistApps"],
               [ObackPreferences isAllowed]);
     }
     // 黑白名单铁律：黑名单 App 完全不注入（不挂手势/不关系统手势/不链 nav），从根避免黑名单 App 因注入闪退。
