@@ -53,11 +53,13 @@ static BOOL oback_shouldBackOff(void) {
     [ObackManager shared].currentAnimator = nil;   // 先清，避免残留上一轮动画器
     // 仅在我们手势驱动返回时接管 pop 动画；普通返回按钮走 App 原生转场（避免破坏/黑屏）
     if (operation == UINavigationControllerOperationPop && interacting) {
-        if ([ObackPreferences navParallaxEnabled]) {
-            // 实验：自定义 nav 视差转场。转场交互态已由 handleNavigationTransition: 启动
-            // （driveSystemNavPopBegin，与方案A 同款入口），此处返回自定义 ObackAnimator(parallaxToView=YES)
-            // 接管动画；交互由 interactionController 返回的 ObackInteractiveTransition 驱动（update/finish/cancel）。
-            // 风险：个别 App 离屏快照/自定义转场可能空白或冻结，需多 App 真机验证；默认关。
+        if ([ObackPreferences navParallaxEnabled] || [ObackManager shared].currentEdge == ObackEdgeRight) {
+            // 自定义 nav 视差转场（parallaxToView=YES，使用离屏快照铺底，绝不重挂载真实 toView，安全无空白）。
+            // 进入条件：navParallaxEnabled 或右缘。右缘由 ObackManager 在 triggerTransitionInWindow 调
+            // popViewControllerAnimated: 启动自定义交互转场（interactionController 返回 self.interactive 接管 scrub，
+            // 方向由 OBApplyParallax 的 edge 分支处理，修正方案A 左缘语义导致的右缘负向反 scrub）；
+            // 左缘 navParallax 实验时则由 driveSystemNavPopBegin 经 handleNavigationTransition: 启动。
+            // 风险：个别 App 离屏快照/自定义转场可能空白或冻结，需多 App 真机验证；默认关（仅右缘强制开）。
             ObackAnimator *a = [[[ObackAnimator alloc] initWithEdge:[ObackManager shared].currentEdge
                                                               params:[ObackPreferences params]] autorelease];
             a.parallaxToView = YES;

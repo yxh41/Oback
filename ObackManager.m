@@ -576,7 +576,10 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // 方案 A：nav pop 改为驱动系统原生交互 pop（根除自定义转场 reparent toView 导致的空白/损坏）。
     // 在手势 Began(位移=0)即启动系统原生交互转场，由后续 updateTransition 的横向位移 scrub。
     // modal dismiss（currentParallaxToView=NO）走方案B 自定义转场，不在此启动。
-    if (self.currentParallaxToView) {
+    // 右缘固定走自定义镜像转场（ObackAnimator + self.interactive 手动 scrub），不走方案A 系统原生
+    // handleNavigationTransition:（左缘语义，右缘负向位移被反 scrub → 触发不稳）。右缘改由
+    // triggerTransitionInWindow 调 popViewControllerAnimated: 触发自定义交互转场。
+    if (self.currentParallaxToView && self.currentEdge != ObackEdgeRight) {
         [self driveSystemNavPopBeginWithPan:pan window:win];
     }
 
@@ -619,7 +622,14 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
               nav.delegate ? NSStringFromClass([nav.delegate class]) : @"(nil)",
               (int)[[nav.delegate class] isSubclassOfClass:NSClassFromString(@"ObackNavDelegate")]);
         self.currentParallaxToView = YES;   // nav pop 视差（移动上一页）
-        if (self.interacting) {
+        if (self.currentEdge == ObackEdgeRight) {
+            // 右缘固定走自定义镜像转场：真正触发 pop，由 nav delegate(ObackNavDelegate) 返回
+            // ObackAnimator(parallaxToView=YES) + interactionController 返回 self.interactive 接管，
+            // 后续 updateTransition 用 self.interactive updateWithPercent 做 scrub（不再喂
+            // handleNavigationTransition:）。方向由 OBApplyParallax 的 edge 分支处理，正确无误。
+            OBLog(@"trigger: nav pop 右缘自定义镜像转场，popViewControllerAnimated");
+            [nav popViewControllerAnimated:YES];
+        } else if (self.interacting) {
             // 方案 A：交互 pop 已在 beginTransition 通过 handleNavigationTransition: 启动，
             // 此处不再调用 popViewControllerAnimated:（否则会触发第二次转场/黑屏）。
             OBLog(@"trigger: nav pop 已启动(系统原生交互)，忽略重复 popViewControllerAnimated");
@@ -665,7 +675,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     }
 
     _currentPercent = p;
-    if (self.currentParallaxToView && [ObackPreferences navParallaxEnabled]) {
+    if (self.currentParallaxToView && ([ObackPreferences navParallaxEnabled] || self.currentEdge == ObackEdgeRight)) {
         // 实验：自定义 nav 视差 scrub（同 modal 方案B 机制，驱动 animator 的 fractionComplete）
         if (self.interactive) [self.interactive updateWithPercent:p];
     } else if (self.currentParallaxToView) {
@@ -716,8 +726,8 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // 灵敏度滑块只对 modal dismiss(方案B 自定义转场)生效——这是为换取"零冻结/原生手感"的取舍，
     // 不回退到自定义 nav 转场（那曾是导致黑屏/冻结的根因）。
     if (self.currentParallaxToView) {
-        if ([ObackPreferences navParallaxEnabled]) {
-            // 实验：自定义 nav 视差收尾（同 modal 方案B 机制，复用已验证的 forceFinishIfNeeded）
+        if ([ObackPreferences navParallaxEnabled] || self.currentEdge == ObackEdgeRight) {
+            // 实验：自定义 nav 视差收尾（同 modal 方案B 机制，含右缘固定自定义镜像转场；复用已验证的 forceFinishIfNeeded）
             if (_transitionTriggered) {
                 if (commit) [self.interactive finish];
                 else {
@@ -866,8 +876,8 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     ObackParams *p = [ObackPreferences params];
     if (_indicator) [self dismissIndicatorCommitted:NO params:p window:win];
     if (self.currentParallaxToView) {
-        if ([ObackPreferences navParallaxEnabled]) {
-            // 实验：自定义 nav 视差取消（同 modal 方案B：驱动 animator 反向回弹 + watchdog 兜底收尾）
+        if ([ObackPreferences navParallaxEnabled] || self.currentEdge == ObackEdgeRight) {
+            // 实验：自定义 nav 视差取消（同 modal 方案B：含右缘固定自定义镜像转场；驱动 animator 反向回弹 + watchdog 兜底收尾）
             if (_transitionTriggered && self.interactive) [self.interactive cancel];
             [self _scheduleCompletionWatchdog];
         } else {
