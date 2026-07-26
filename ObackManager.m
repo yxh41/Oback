@@ -176,7 +176,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // 导致 shouldBegin=YES（胶囊出现）却永远进不了 Began（无返回）——日志实证。屏幕边缘 pan 自带
     // 「边缘优先于滚动」的系统级优先级，正是原生 interactivePop 在列表页也能用的原理，从根上根治。
     ObackPanGestureRecognizer *panL = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
-                                                                                 action:@selector(handlePan:)]] autorelease];
+                                                                                 action:@selector(handlePan:)] autorelease];
     panL.delegate = self;
     panL.maximumNumberOfTouches = 1;
     // 仍设 NO：pan 只观察、绝不吞掉 App 触摸（修复朋友圈点不进详情 / Flutter 类 app 像打不开）。
@@ -185,7 +185,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     panL.edges = UIRectEdgeLeft;
 
     ObackPanGestureRecognizer *panR = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
-                                                                                 action:@selector(handlePan:)]] autorelease];
+                                                                                 action:@selector(handlePan:)] autorelease];
     panR.delegate = self;
     panR.maximumNumberOfTouches = 1;
     panR.cancelsTouchesInView = NO;
@@ -277,7 +277,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     UIRectEdge edges[2] = { UIRectEdgeLeft, UIRectEdgeRight };
     for (NSUInteger i = 0; i < 2; i++) {
         ObackPanGestureRecognizer *pan = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
-                                                                                     action:@selector(handlePan:)]] autorelease];
+                                                                                     action:@selector(handlePan:)] autorelease];
         pan.delegate = self;
         pan.maximumNumberOfTouches = 1;
         pan.cancelsTouchesInView = NO;
