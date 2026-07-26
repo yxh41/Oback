@@ -307,25 +307,28 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     UIView *navView = nav.view;            // 触发加载；为 nil 时下面 addGestureRecognizer 无操作，下次链接重试
     if (!navView) { OBLog(@"attachNavPan: nav.view 尚为 nil，跳过（下次链接重试）"); return; }
     NSMutableArray *pans = [NSMutableArray array];
-    // 仅挂「左缘」pan 到 nav.view：左缘走方案A 系统原生交互 pop，需要 nav.view 层级的滚动优先级
-    // （列表页才能稳定压过 scrollView 的 pan）。右缘返回本质是非交互 pop（松手才 popViewControllerAnimated:），
-    // 不需要 nav.view 的滚动优先级，故改由 window 级 panR 直接接管（见 gestureRecognizerShouldBegin）。
-    // 去掉 nav.view 右缘 pan 可消除「window 右缘 pan(panR) + nav.view 右缘 pan」双右缘共存导致的
-    // requireGestureRecognizerToFail: 失败依赖脆弱（panR 在有 nav 时 shouldBegin 直接 NO 成死 pan），
-    // 这正是 QQ 等 App 右缘冲突复发、且"之前能用的那套（单一权威右缘 pan）"差异的根因。
-    ObackPanGestureRecognizer *pan = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
-                                                                                 action:@selector(handlePan:)] autorelease];
-    pan.delegate = self;
-    pan.maximumNumberOfTouches = 1;
-    pan.cancelsTouchesInView = NO;
-    pan.delaysTouchesBegan   = NO;
-    pan.edges = UIRectEdgeLeft;
-    objc_setAssociatedObject(pan, kPanKindKey, @"nav", OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(pan, kObackNavKey, nav, OBJC_ASSOCIATION_ASSIGN);  // 绑定所属 nav，gesture 判定/驱动时直接读，不依赖容器枚举
-    [navView addGestureRecognizer:pan];
-    [pans addObject:pan];
+    // nav.view 同时挂「左缘 + 右缘」两个边缘 pan：右缘返回与左缘走完全一致的挂载模型
+    // （右缘本质是非交互 pop：rightSimplePop 松手提交，零空白/不破坏导航栏）。
+    // 此前(5ac6935)误删 nav.view 右缘 pan、改由 window 级 panR 独占，但 window 级
+    // UIScreenEdgePanGestureRecognizer 在部分 App（QQ 聊天等）根本不 begin → 右缘失效/被对手抢走。
+    // 恢复与左缘一致的 nav.view 右缘 pan：window panR 在「有 nav 可返回」时 defer 给它（shouldBegin NO），
+    // 右缘由 nav.view 右缘 pan 稳定接管——正是「之前能用的那套」。左缘窗口级 pan 同理 defer 给 nav 左缘 pan。
+    UIRectEdge edges[2] = { UIRectEdgeLeft, UIRectEdgeRight };
+    for (NSUInteger i = 0; i < 2; i++) {
+        ObackPanGestureRecognizer *pan = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
+                                                                                     action:@selector(handlePan:)] autorelease];
+        pan.delegate = self;
+        pan.maximumNumberOfTouches = 1;
+        pan.cancelsTouchesInView = NO;
+        pan.delaysTouchesBegan   = NO;
+        pan.edges = edges[i];
+        objc_setAssociatedObject(pan, kPanKindKey, @"nav", OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(pan, kObackNavKey, nav, OBJC_ASSOCIATION_ASSIGN);  // 绑定所属 nav，gesture 判定/驱动时直接读，不依赖容器枚举
+        [navView addGestureRecognizer:pan];
+        [pans addObject:pan];
+    }
     objc_setAssociatedObject(nav, kNavPansKey, pans, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    OBLog(@"attachNavPan: nav=%@ pans=%lu on nav.view (仅左缘)", NSStringFromClass([nav class]), (unsigned long)pans.count);
+    OBLog(@"attachNavPan: nav=%@ pans=%lu on nav.view (左缘+右缘)", NSStringFromClass([nav class]), (unsigned long)pans.count);
 }
 
 // 让窗口内所有「边缘返回手势」失败于我们的 window pan。
@@ -572,21 +575,13 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         if (top.presentingViewController != nil) {
             self.currentParallaxToView = NO;  // modal dismiss（方案B 自定义，只移 sheet）
         } else if (nav && nav.viewControllers.count > 1) {
-            // 右缘：window pan 直接接管非交互 pop（rightSimplePop）——不再 defer 给已废弃的 nav.view 右缘 pan。
-            // 关键修复：此前右缘在有 nav 可返回时把 shouldBegin 让给 nav 右缘 pan，导致 window 右缘 pan
-            // 成"死 pan"（永不 begin），requireGestureRecognizerToFail: 失败依赖脆弱、压不住 QQ 右缘手势。
-            // 现在右缘统一由单一 window pan(panR) 独占：有 nav 即 begin→rightSimplePop 松手返回；
-            // 中间起滑 panR 不 begin→QQ 原手势正常。左缘仍 defer 给 nav.view 左缘 pan（拿滚动优先级，方案A）。
-            // 注意：必须用本次手势的局部 edge 判定，而非 self.currentEdge——后者在本方法末尾(line 593)
-            // 才被赋值，此刻仍是上一手势的值；若用它会让右缘在「非右缘手势之后 / 首次」误判为 NO，
-            // 导致右缘几乎永远不触发（5ac6935 回归根因，已修复）。
-            if (edge == ObackEdgeRight) {
-                self.currentParallaxToView = NO;
-                self.rightSimplePop = YES;
-            } else {
-                OBLog(@"shouldBegin(modal)=NO (有 nav pop 可接管，交给 nav pan)");
-                return NO;
-            }
+            // 有 nav 可返回：左缘/右缘都 defer 给 nav.view 上对应的边缘 pan 接管。
+            // 右缘 pan 已恢复挂到 nav.view（与左缘完全一致），由 nav.view 右缘 pan 稳定接管——
+            // window 级 UIScreenEdgePanGestureRecognizer 在部分 App（QQ 聊天等）不 begin，
+            // 这是 5ac6935 把右缘挪到 window 级后右缘失效/被对手抢走的根因；恢复 nav.view 右缘 pan
+            // 即回到「之前能用的那套」。window pan 在此直接 NO，左缘同理（已验证稳定）。
+            OBLog(@"shouldBegin(modal)=NO (有 nav pop 可接管，交给 nav.view 边缘 pan)");
+            return NO;
         } else {
             OBLog(@"shouldBegin(modal)=NO (无 modal 也无 nav pop)");
             return NO;
