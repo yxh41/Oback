@@ -7,7 +7,7 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 
 + (ObackParams *)params {
     ObackParams *p = [ObackParams defaults];
-    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    NSUserDefaults *d = [[[NSUserDefaults alloc] initWithSuiteName:kDomain] autorelease];
     id v;
     if ((v = [d objectForKey:@"triggerWidth"]))     p.triggerWidth     = [v doubleValue];
     if ((v = [d objectForKey:@"parallaxOffset"]))   p.parallaxOffset   = [v doubleValue];
@@ -45,7 +45,7 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 //  新版用 whitelistApps / blacklistApps 数组（设置页 App 选择器写入）；
 //  旧版用 whitelistRaw / blacklistRaw 逗号分隔字符串，做了兼容。
 + (BOOL)isAllowed {
-    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    NSUserDefaults *d = [[[NSUserDefaults alloc] initWithSuiteName:kDomain] autorelease];
     NSString *bid = NSBundle.mainBundle.bundleIdentifier;
     if (!bid) return NO;
 
@@ -71,7 +71,7 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 }
 
 + (BOOL)isBlacklisted {
-    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    NSUserDefaults *d = [[[NSUserDefaults alloc] initWithSuiteName:kDomain] autorelease];
     NSString *bid = NSBundle.mainBundle.bundleIdentifier;
     if (!bid) return NO;
     NSArray *black = [d arrayForKey:@"blacklistApps"];
@@ -136,7 +136,7 @@ static NSTimeInterval __obDebugLogOpenedAt = 0;
 // 开启后，每次边缘起滑补链时把本 window 所有边缘返回手势的精确类名打进日志，
 // 便于定位「一次滑动返回两层」中的「第二层」是系统原生还是某插件私有手势。
 + (BOOL)doubleReturnDiagEnabled {
-    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    NSUserDefaults *d = [[[NSUserDefaults alloc] initWithSuiteName:kDomain] autorelease];
     id v = [d objectForKey:@"doubleReturnDiag"];
     return v ? [v boolValue] : NO;   // 未设置 → 默认关
 }

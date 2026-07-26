@@ -60,11 +60,6 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 @property (nonatomic, assign) CGFloat releasePercent;
 // finish=NO / cancel=YES：供 completion 决定 completeTransition 方向（避免反向动画 finalPosition 误判导致取消却提交了 pop）
 @property (nonatomic, assign) BOOL interactiveCancelled;
-// 导航栏协同（实验）：nav pop 自定义转场时，隐藏活的导航栏、叠加其快照随内容淡出，
-// 转场结束恢复活 bar，消除"内容/bar 不同步"的导航栏损坏。仅 navParallax 开启且 parallaxToView=YES 时启用。
-@property (nonatomic, retain) UIView *navBarSnapshotView;                 // 活 bar 的快照叠加层（retain）
-@property (nonatomic, assign) UINavigationController *navControllerForBar; // 转场结束恢复活 bar（assign 避免成环，MRC 无 __weak）
-- (void)restoreNavBar;   // 恢复活 bar 并移除快照（幂等）
 - (instancetype)initWithEdge:(ObackEdge)edge params:(ObackParams *)params;
 // 在 finish/cancel 前调用：用真实松手速度更新弹簧初速度（速度感知弹簧的关键；取消时速度已清零→温和回弹）
 - (void)applyReleaseVelocity;

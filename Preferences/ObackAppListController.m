@@ -158,14 +158,14 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 }
 
 - (NSArray *)_selectedApps {
-    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    NSUserDefaults *d = [[[NSUserDefaults alloc] initWithSuiteName:kDomain] autorelease];
     return [d arrayForKey:[self _storeKey]] ?: @[];
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
 
-    UISearchController *searchController = [[UISearchController alloc] initWithSearchResultsController:nil];
+    UISearchController *searchController = [[[UISearchController alloc] initWithSearchResultsController:nil] autorelease];
     searchController.searchResultsUpdater = self;
     searchController.obscuresBackgroundDuringPresentation = NO;
     searchController.searchBar.placeholder = @"搜索应用名称或 bundle id";
@@ -304,7 +304,7 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     CGFloat pt = 29.0; // 与系统「设置」App 列表图标同尺寸
     if (img.size.width <= pt && img.size.height <= pt) return img;
     CGSize target = CGSizeMake(pt, pt); // 点；渲染器按设备 scale 出图
-    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:target];
+    UIGraphicsImageRenderer *r = [[[UIGraphicsImageRenderer alloc] initWithSize:target] autorelease];
     return [r imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull ctx) {
         [img drawInRect:CGRectMake(0, 0, target.width, target.height)];
     }];
@@ -314,8 +314,8 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 - (void)_toggleApp:(PSSpecifier *)spec {
     NSString *bid = [spec propertyForKey:@"appBundleID"];
     if (!bid) return;
-    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
-    NSMutableArray *arr = [[d arrayForKey:[self _storeKey]] mutableCopy] ?: [NSMutableArray array];
+    NSUserDefaults *d = [[[NSUserDefaults alloc] initWithSuiteName:kDomain] autorelease];
+    NSMutableArray *arr = [[[d arrayForKey:[self _storeKey]] mutableCopy] autorelease] ?: [NSMutableArray array];
     if ([arr containsObject:bid]) [arr removeObject:bid];
     else [arr addObject:bid];
     [d setObject:arr forKey:[self _storeKey]];

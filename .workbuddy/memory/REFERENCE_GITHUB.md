@@ -67,3 +67,41 @@ UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:tar
 OPPO 的"强视差"可先用边缘胶囊 + 系统视差顶着，真机验证稳定后再决定是否上方案 B 做增强。
 
 **待决策**：要我直接重构 nav pop 到方案 A，还是保留 OPPO 强视差、先用方案 B 的正确快照顺序修掉当前空白？
+
+---
+
+## 补充（2026-07-26 稳定版整改新增参考）
+
+### 双返回根治的两条关键手法（已落地 59089cd）
+1. **即时禁用原生手势**：在自建 pan 的 `gestureRecognizerShouldBegin:` 确认有效 nav pop 的瞬间，再 `nav.interactivePopGestureRecognizer.enabled = NO`。FDFullscreenPopGesture 的对应手法是在 `pushViewController:` 里每次 re-assert 禁用——我们同时用了「持久禁用(viewDidLoad/viewDidAppear/viewDidLayoutSubviews) + 起滑即时禁用」双保险，压死 App（微信）事后重开原生手势的窗口。
+2. **`gestureRecognizer:shouldRequireFailureOfGestureRecognizer:` 要求对手先失败**：OUR 自己的 delegate 决策，对手无法用其 `shouldRequireFailureOfGestureRecognizer:` 返回 NO 来否决（这正是单纯 API `requireGestureRecognizerToFail:` 的漏洞——对手 delegate 可否决）。语义：对手识别→我们被取消（单层 App 原生返回）；对手不识别→我们接管（单层）；不会双触发也不丢返回。参考 TZScrollViewPopGesture 的优先级思路（`shouldBeRequiredToFailByGestureRecognizer` 反向），但我们用正向 `shouldRequireFailureOfGestureRecognizer` 更可控。
+
+### SwipeBackKit（新增参考，2026-07-26 WebSearch 发现）
+- Android 风格双缘（左+右）+ 驱动**真实 UIKit 转场**（`.began` 即 `popViewController(animated:)` + `UIPercentDrivenInteractiveTransition`；`.changed` 调 `update(progress)` 实时 scrub；`.ended` 按距离+速度阈值 finish/cancel）。→ 证实我们的「UIPercentDrivenInteractiveTransition + 首次横向拖动才触发」冻结修法方向正确。
+- 视差：当前 VC 100% 速度滑出、上一页 30% 速度探入（与我们的 parallaxOffset 思路一致）。
+- **右缘处理**：双缘都驱动真实系统转场（右缘=镜像）。说明右缘若要"稳"，必须走自定义镜像转场而非把右缘 pan 喂给系统左原点 `handleNavigationTransition:`（方案A 右缘几何错配的根因）——印证我们「右缘默认关、真要稳需另写右原点路径」的决策。
+- scrollView 冲突：边缘手势仅在 scrollView 处于最左/最右时才赢——与我们的边缘优先级一致。
+
+### FDFullscreenPopGesture 关键代码（确认写法）
+```objc
+// fd_pushViewController:animated: 里，每次 push 都：
+if (![self.interactivePopGestureRecognizer.view.gestureRecognizers containsObject:self.fd_fullscreenPopGestureRecognizer]) {
+    [self.interactivePopGestureRecognizer.view addGestureRecognizer:self.fd_fullscreenPopGestureRecognizer];
+    NSArray *internalTargets = [self.interactivePopGestureRecognizer valueForKey:@"targets"];
+    id internalTarget = [internalTargets.firstObject valueForKey:@"target"];
+    SEL internalAction = NSSelectorFromString(@"handleNavigationTransition:");
+    self.fd_fullscreenPopGestureRecognizer.delegate = self.fd_popGestureRecognizerDelegate;
+    [self.fd_fullscreenPopGestureRecognizer addTarget:internalTarget action:internalAction];
+    self.interactivePopGestureRecognizer.enabled = NO;   // 关系统原生
+}
+// delegate 的 gestureRecognizerShouldBegin: 门控：vc.count>1 / 非禁用 / 起点在左缘内 / 非 _isTransitioning / 方向左→右
+```
+
+### TZScrollViewPopGesture 关键代码（scrollView 共存 + 边缘优先）
+```objc
+// 自建 pan：target=nav.interactivePopGestureRecognizer.delegate, action=handleNavigationTransition:
+pan.maximumNumberOfTouches = 1; pan.delegate = self;
+self.interactivePopGestureRecognizer.enabled = NO;
+// gestureRecognizerShouldBegin: 要求 (offset.x>0 且 location.x<=40)
+// gestureRecognizer:shouldBeRequiredToFailByGestureRecognizer: 返回 YES → 边缘手势优先于 scrollView
+```

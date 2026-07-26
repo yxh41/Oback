@@ -33,6 +33,7 @@ void OBLog(NSString *fmt, ...) {
     }
     // 同时进 syslog（可用 syslog 工具实时看）
     NSLog(@"%@", line);
+    [msg release];
 }
 
 #pragma mark - 仅识别横向的 pan（避免纵向滑动误触发返回）
@@ -174,8 +175,8 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // 普通 window 级 pan 在可滚动列表（朋友圈 feed / 聊天列表）上会被 scrollView 的 pan 抢赢识别，
     // 导致 shouldBegin=YES（胶囊出现）却永远进不了 Began（无返回）——日志实证。屏幕边缘 pan 自带
     // 「边缘优先于滚动」的系统级优先级，正是原生 interactivePop 在列表页也能用的原理，从根上根治。
-    ObackPanGestureRecognizer *panL = [[ObackPanGestureRecognizer alloc] initWithTarget:self
-                                                                                 action:@selector(handlePan:)];
+    ObackPanGestureRecognizer *panL = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
+                                                                                 action:@selector(handlePan:)]] autorelease];
     panL.delegate = self;
     panL.maximumNumberOfTouches = 1;
     // 仍设 NO：pan 只观察、绝不吞掉 App 触摸（修复朋友圈点不进详情 / Flutter 类 app 像打不开）。
@@ -183,8 +184,8 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     panL.delaysTouchesBegan   = NO;
     panL.edges = UIRectEdgeLeft;
 
-    ObackPanGestureRecognizer *panR = [[ObackPanGestureRecognizer alloc] initWithTarget:self
-                                                                                 action:@selector(handlePan:)];
+    ObackPanGestureRecognizer *panR = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
+                                                                                 action:@selector(handlePan:)]] autorelease];
     panR.delegate = self;
     panR.maximumNumberOfTouches = 1;
     panR.cancelsTouchesInView = NO;
@@ -275,8 +276,8 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     NSMutableArray *pans = [NSMutableArray array];
     UIRectEdge edges[2] = { UIRectEdgeLeft, UIRectEdgeRight };
     for (NSUInteger i = 0; i < 2; i++) {
-        ObackPanGestureRecognizer *pan = [[ObackPanGestureRecognizer alloc] initWithTarget:self
-                                                                                     action:@selector(handlePan:)];
+        ObackPanGestureRecognizer *pan = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
+                                                                                     action:@selector(handlePan:)]] autorelease];
         pan.delegate = self;
         pan.maximumNumberOfTouches = 1;
         pan.cancelsTouchesInView = NO;
@@ -491,14 +492,6 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
             return NO;
         }
         self.currentParallaxToView = YES;   // nav pop（系统原生交互转场，不 reparent toView）
-
-        // 【稳定版·双返回根治】即时禁用原生 interactivePop：无论 App（如微信）在何时把原生手势
-        // 重新 enabled=YES（常在它自身 VC 的 viewDidAppear 之后），都在我们 pan 真正接管返回的
-        // 「起滑瞬间」再关一次，确保本次触摸只有我们的单驱动，杜绝"一次滑动弹两层"。
-        // 配合 Tweak.xm 的 viewDidLoad/viewDidAppear/viewDidLayoutSubviews 持久禁用 + 这里即时禁用，
-        // 形成三道防线（参考 FDFullscreenPopGesture 的 re-assert 套路）。仅置 enabled=NO，
-        // 不碰视图/不进自定义转场，对默认路径零回归风险。
-        nav.interactivePopGestureRecognizer.enabled = NO;
     } else {
         if (top.presentingViewController != nil) {
             self.currentParallaxToView = NO;  // modal dismiss（方案B 自定义，只移 sheet）
@@ -518,7 +511,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
           (unsigned long)nav.viewControllers.count, top.presentingViewController != nil,
           self.currentParallaxToView);
     if (p.hapticEnabled) {
-        UIImpactFeedbackGenerator *g = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+        UIImpactFeedbackGenerator *g = [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] autorelease];
         [g impactOccurred];
     }
     // 轻量精准补链（替代原先每次手势全树遍历 _linkNavPopGesturesInWindow:，根除起点卡顿）：
@@ -539,27 +532,6 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     _indicatorAnchor = loc;
     _indicatorStartX = loc.x;
     return YES;
-}
-
-// 【稳定版·双返回根治】让我们的边缘 pan 要求「其它边缘返回手势 / scrollView 的 pan」先失败，
-// 从根上杜绝两套手势同时识别导致"一次滑动弹两层"。这是 OUR 自己的 delegate 决策
-// （对手无法用其 delegate 的 shouldRequireFailureOfGestureRecognizer: 否决），故即便 App/插件
-// 私有边缘手势的 delegate 返回 NO 也无效——比单纯 API requireGestureRecognizerToFail: 更稳。
-// 语义安全：对手识别→我们被取消（仅对手返回，单层）；对手不识别→我们接管（单层）；
-// 不会出现双触发，也不会丢失返回（最差情形=优雅降级为 App 原生单层返回）。
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
-shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
-    if (gestureRecognizer == otherGestureRecognizer) return NO;
-    // 不要求我们自己的另一个边缘 pan（左/右）失败——它们 edges 互斥，本就不会同触发
-    if (otherGestureRecognizer.delegate == self &&
-        [otherGestureRecognizer isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) {
-        return NO;
-    }
-    // 要求其它「屏幕边缘返回手势」(含系统原生 interactivePop 及 App/插件私有边缘手势) 与
-    // 所有 UIScrollView 的 pan 先失败——保证边缘起滑时只有我们的单驱动返回。
-    if ([otherGestureRecognizer isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return YES;
-    if ([otherGestureRecognizer.view isKindOfClass:[UIScrollView class]]) return YES;
-    return NO;
 }
 
 #pragma mark - 手势处理
@@ -597,19 +569,14 @@ shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)otherGestureRecog
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(dismissIndicatorSafety) object:nil];
 
     ObackParams *p = [ObackPreferences params];
-    self.interactive = [[ObackInteractiveTransition alloc] initWithEdge:self.currentEdge params:p];
+    self.interactive = [[[ObackInteractiveTransition alloc] initWithEdge:self.currentEdge params:p] autorelease];
     self.interacting = YES;
     _transitionTriggered = NO;
 
     // 方案 A：nav pop 改为驱动系统原生交互 pop（根除自定义转场 reparent toView 导致的空白/损坏）。
     // 在手势 Began(位移=0)即启动系统原生交互转场，由后续 updateTransition 的横向位移 scrub。
     // modal dismiss（currentParallaxToView=NO）走方案B 自定义转场，不在此启动。
-    // 【导航视差（实验）】开启时：此处不启动系统原生交互 pop —— 改由 triggerTransitionInWindow:
-    // 调 popViewControllerAnimated: 触发纯自定义交互转场（ObackNavDelegate 返回自定义 animator +
-    // interactive controller，本管理器经 updateWithPercent/finish/cancel 单驱动）。若此处仍喂
-    // handleNavigationTransition:，系统原生交互转场会与我们的自定义 animator 争抢 fractionComplete
-    // （双驱动→抖动/不稳定），故必须排除。
-    if (self.currentParallaxToView && ![ObackPreferences navParallaxEnabled]) {
+    if (self.currentParallaxToView) {
         [self driveSystemNavPopBeginWithPan:pan window:win];
     }
 
@@ -652,14 +619,12 @@ shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)otherGestureRecog
               nav.delegate ? NSStringFromClass([nav.delegate class]) : @"(nil)",
               (int)[[nav.delegate class] isSubclassOfClass:NSClassFromString(@"ObackNavDelegate")]);
         self.currentParallaxToView = YES;   // nav pop 视差（移动上一页）
-        if (self.interacting && ![ObackPreferences navParallaxEnabled]) {
+        if (self.interacting) {
             // 方案 A：交互 pop 已在 beginTransition 通过 handleNavigationTransition: 启动，
             // 此处不再调用 popViewControllerAnimated:（否则会触发第二次转场/黑屏）。
             OBLog(@"trigger: nav pop 已启动(系统原生交互)，忽略重复 popViewControllerAnimated");
         } else {
-            // 非交互兜底（快滑零位移：endTransition 先把 interacting 置 NO 再走此路径）；
-            // 或【导航视差（实验）】交互态：触发 popViewControllerAnimated: 启动纯自定义交互转场，
-            // 由 ObackNavDelegate 返回自定义 animator + interactive controller，本管理器单驱动。
+            // 非交互兜底（快滑零位移：endTransition 先把 interacting 置 NO 再走此路径）
             [nav popViewControllerAnimated:YES];
         }
     } else if (top.presentingViewController) {
@@ -672,7 +637,7 @@ shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)otherGestureRecog
         if ([existing isKindOfClass:[ObackTransitioningDelegate class]]) {
             td = (ObackTransitioningDelegate *)existing;
         } else {
-            td = [[ObackTransitioningDelegate alloc] init];
+            td = [[[ObackTransitioningDelegate alloc] init] autorelease];
             td.original = existing;
             top.transitioningDelegate = td;
         }
@@ -1006,7 +971,7 @@ shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)otherGestureRecog
         _indicator = nil;
         [self _stopIndicatorLink];   // 停掉上一轮的平滑插值（showIndicator 之后会重建）
     }
-    ObackEdgeIndicator *ind = [[ObackEdgeIndicator alloc] initWithEdge:edge];
+    ObackEdgeIndicator *ind = [[[ObackEdgeIndicator alloc] initWithEdge:edge] autorelease];
     ind.center = [self indicatorHomeCenterForEdge:edge basePoint:loc window:win];
     ind.alpha = 0.0;
     ind.transform = CGAffineTransformMakeScale(0.85, 0.85);

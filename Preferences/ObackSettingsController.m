@@ -93,7 +93,7 @@ static NSDictionary *_obSliderUnits(void) {
     // ── 创建/复用右侧数值标签（小字、靠上、紧凑） ──
     UILabel *lbl = _valueLabels[key];
     if (!lbl || !lbl.superview) {
-        lbl = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 60, 18)];
+        lbl = [[[UILabel alloc] initWithFrame:CGRectMake(0, 0, 60, 18)] autorelease];
         lbl.textAlignment = NSTextAlignmentRight;
         lbl.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
         if (@available(iOS 13.0, *)) {
@@ -172,7 +172,7 @@ static NSDictionary *_obSliderUnits(void) {
 // 真正执行重置：清空 com.zlhkf.oback 域 → 重建 specifiers → 表格回弹默认值
 - (void)_obPerformReset {
     NSString *domain = @"com.zlhkf.oback";
-    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:domain];
+    NSUserDefaults *d = [[[NSUserDefaults alloc] initWithSuiteName:domain] autorelease];
     [d removePersistentDomainForName:domain];
     [d synchronize];
 
