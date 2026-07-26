@@ -270,6 +270,18 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         [self _enumerateScrollPansInView:sub depth:depth + 1 block:block];
 }
 
+// 收集窗口视图树里所有 UIPanGestureRecognizer（含 plain / 屏幕边缘 / 滚动），用于让"对手手势"
+// 失败于我们的右缘 pan（Oback 独占右缘返回）。排除我们自己的 pan（delegate==self）。
+- (void)_enumeratePansInView:(UIView *)view depth:(NSUInteger)depth
+                        block:(void(^)(UIPanGestureRecognizer *g))block {
+    if (!view || !block || depth > 40) return;
+    for (UIGestureRecognizer *g in view.gestureRecognizers) {
+        if ([g isKindOfClass:[UIPanGestureRecognizer class]]) block((UIPanGestureRecognizer *)g);
+    }
+    for (UIView *sub in view.subviews)
+        [self _enumeratePansInView:sub depth:depth + 1 block:block];
+}
+
 // 从 pan 解析出真正的 UIWindow：nav pop 的边缘 pan 挂在 nav.view 上（pan.view 是 UIView 非 window），
 // 其 window 需从 pan.view.window 取；window modal pan 的 pan.view 本身是 UIWindow。
 - (UIWindow *)_windowForPan:(UIPanGestureRecognizer *)pan {
@@ -374,6 +386,28 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         failOnOurPans(g);
         linked++;
     }];
+    // [2026-07-26 QQ 右缘修复] 让窗口内所有「对手 pan」（QQ 等 App 自定义的右缘手势，通常是 plain
+    // UIPanGestureRecognizer，少数是屏幕边缘 pan）失败于我们的**右缘 pan**：Oback 独占右缘返回，
+    // 对手在右缘让步（单向 requireGestureRecognizerToFail:，对手无法否决，无死锁）；
+    // 边缘外（中间）我们的右缘 pan 不 begin → 对手 pan 正常触发（QQ 原手势保留）。
+    // 仅对右缘 pan 做此单向链接——左缘保持 shouldRequireFailureOf 的让步逻辑，不影响微信修复。
+    // 注：对手 pan 在中间起滑时，因我们的右缘 pan 不进入识别（起点不在右缘），require 依赖立即解除、
+    // 不引入感知延迟；仅在右缘才短暂等待 Oback 判定，符合"边缘=Oback/中间=QQ"。
+    {
+        NSMutableArray *rightPans = [NSMutableArray array];
+        for (ObackPanGestureRecognizer *op in allOurPans) {
+            if (op.edges & UIRectEdgeRight) [rightPans addObject:op];
+        }
+        if (rightPans.count) {
+            [self _enumeratePansInView:win depth:0 block:^(UIPanGestureRecognizer *g){
+                if (g.delegate == self) return;            // 跳过我们自己的 pan（避免自引用）
+                for (ObackPanGestureRecognizer *rp in rightPans) {
+                    @try { [g requireGestureRecognizerToFail:rp]; } @catch (NSException *e) {}
+                }
+                linked++;
+            }];
+        }
+    }
     CFTimeInterval dt = (CACurrentMediaTime() - t0) * 1000.0;
     OBLog(@"linkNav: 链接 %lu 个返回手势 (耗时 %.2f ms) @window=%@",
           (unsigned long)linked, dt, NSStringFromClass([win class]));
@@ -708,7 +742,11 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     UIScreenEdgePanGestureRecognizer *mg = (UIScreenEdgePanGestureRecognizer *)g;
     UIScreenEdgePanGestureRecognizer *og = (UIScreenEdgePanGestureRecognizer *)other;
     if ((mg.edges & og.edges) == 0) return NO;   // 不同边（左/右）互不干涉
-    return YES;                                   // 同边边缘手势：我们的 pan 让步于对手（单层返回，杜绝双触发）
+    // [2026-07-26 QQ 右缘修复] 右缘：Oback 必须独占返回（用户要"右缘返回"），不再向对手同边屏幕边缘
+    // 手势让步。让步改由下方 _linkNavPopGesturesInWindow 对"对手手势"显式 requireGestureRecognizerToFail:
+    // 我们的右缘 pan（单向：对手无法否决，无死锁）。左缘仍保留让步（保微信等左缘双返回修复）。
+    if (mg.edges & UIRectEdgeRight) return NO;
+    return YES;                                   // 同边（左）边缘手势：我们的 pan 让步于对手（单层返回，杜绝双触发）
 }
 
 - (void)updateTransition:(UIPanGestureRecognizer *)pan {
