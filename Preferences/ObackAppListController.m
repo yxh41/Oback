@@ -215,7 +215,11 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     NSString *bid = app[@"bundleID"];
     NSString *name = app[@"name"];
 
-    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name
+    // 显示名称后附 bundle id，便于核对黑名单选中的是否就是 App 实际运行的 bid
+    //（避免「列表里看着是拼多多商家版、实际运行 bid 不同」导致黑名单拦不住）。
+    NSString *title = [NSString stringWithFormat:@"%@  (%@)", name, bid];
+
+    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:title
                                                   target:self
                                                      set:nil
                                                      get:nil

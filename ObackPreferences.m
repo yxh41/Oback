@@ -39,6 +39,20 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     return NO;
 }
 
+// 黑名单/白名单匹配：大小写不敏感 + 前缀兜底（黑名单项是 bid 的「点分隔前缀」时亦命中，
+// 用于同 App 的不同构建/变体，如 com.xunmeng.merchant 亦命中 com.xunmeng.merchant.phone）。
++ (BOOL)_bid:(NSString *)bid matchesList:(NSArray *)list {
+    if (!list.count || !bid.length) return NO;
+    NSString *lb = [bid lowercaseString];
+    for (NSString *entry in list) {
+        if (![entry isKindOfClass:[NSString class]] || !entry.length) continue;
+        NSString *le = [entry lowercaseString];
+        if ([le isEqualToString:lb]) return YES;
+        if ([lb hasPrefix:le] && [lb length] > [le length] && [lb characterAtIndex:[le length]] == '.') return YES;
+    }
+    return NO;
+}
+
 // 是否允许当前 App 生效：
 //  - whitelistMode 未设置或 YES：只有白名单内的 App 生效（空白名单 = 全部不生效）
 //  - whitelistMode == NO：回到全局生效 + 黑名单排除（原逻辑）
@@ -61,7 +75,7 @@ static NSString *const kDomain = @"com.zlhkf.oback";
         NSArray *black = [d arrayForKey:@"blacklistApps"];
         if (black) {
             if (black.count == 0) return YES;
-            return ![black containsObject:bid];
+            return ![self _bid:bid matchesList:black];
         }
         // 兼容旧版字符串
         NSString *raw = [d stringForKey:@"blacklistRaw"];
@@ -75,7 +89,7 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     NSString *bid = NSBundle.mainBundle.bundleIdentifier;
     if (!bid) return NO;
     NSArray *black = [d arrayForKey:@"blacklistApps"];
-    if (black) return [black containsObject:bid];
+    if (black) return [self _bid:bid matchesList:black];
     // 兼容旧版字符串
     NSString *raw = [d stringForKey:@"blacklistRaw"];
     if (!raw.length) return NO;
