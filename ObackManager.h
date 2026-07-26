@@ -15,6 +15,7 @@
 @property (nonatomic, assign) ObackAnimator *currentAnimator;           // 当前手势驱动的动画器（finish 前用于改弹簧速度；assign 避免成环，MRC 无 __weak）
 @property (nonatomic, retain) id currentTD;                             // 本次手势驱动的 modal dismiss 转场转发器
 @property (nonatomic, assign) BOOL currentParallaxToView;               // 当前手势是否弹窗 dismiss(只动 sheet)
+@property (nonatomic, assign) BOOL rightSimplePop;                       // 右缘非交互 pop 标记（不走系统交互驱动，避免几何错配空白）
 @property (nonatomic, assign) CGFloat releaseVelocity;  // 松手时前向(朝返回方向)速度 (pt/s)，供 ObackAnimator 做动量继承
 @property (nonatomic, assign) CGFloat releasePercent;   // 松手时拖动进度 (0~1)，供 ObackAnimator 计算动态收尾时长
 @end

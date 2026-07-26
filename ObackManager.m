@@ -124,6 +124,11 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 - (void)start {
     if (_started) return;
     _started = YES;
+    // 黑白名单铁律：黑名单 App 完全不注入（不挂手势/不关系统手势/不链 nav），从根避免黑名单 App 因注入闪退。
+    if (![ObackPreferences isAllowed]) {
+        OBLog(@"start: isAllowed=NO (bid=%@)，Oback 完全不注入（黑白名单排除生效）", NSBundle.mainBundle.bundleIdentifier);
+        return;
+    }
     // 扩展进程(分享/动作/键盘等 appex)内无边缘返回需求，且常为 _UIHostedWindow / keyWindow=null，
     // 直接跳过挂载，避免无意义的手势注入与日志噪声（如 com.tencent.xin.sharetimeline）。
     if ([[[NSBundle mainBundle] infoDictionary] objectForKey:@"NSExtension"]) {
@@ -161,6 +166,11 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 
 - (void)attachToWindow:(UIWindow *)win {
     if (!win) return;
+    // 黑白名单铁律：黑名单 App 完全不注入（所有入口 attachToWindow 统一拦截，覆盖 start / windowBecameKey / swizzle）
+    if (![ObackPreferences isAllowed]) {
+        OBLog(@"attachToWindow: SKIP（isAllowed=NO, bid=%@）", NSBundle.mainBundle.bundleIdentifier);
+        return;
+    }
     // 诊断性黑名单：部分纯 Flutter / 单屏 app（如 im.xym.marknow）报告「打不开」。
     // 分析显示本 tweak 对其基本是无操作（无 nav 可关、无手势可链），但为彻底排除
     // window 级 pan 注入影响其启动，直接跳过挂载。装上此版本后若 marknow 能打开 → 证实是
@@ -299,6 +309,10 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 // 从根上消除「一次滑动弹两层」（含插件场景）。
 - (void)_linkNavPopGesturesInWindow:(UIWindow *)win {
     if (!win) return;
+    if (![ObackPreferences isAllowed]) {
+        OBLog(@"linkNav: SKIP（isAllowed=NO, bid=%@）", NSBundle.mainBundle.bundleIdentifier);
+        return;
+    }
     // 性能：同一 window 500ms 内不重复全树遍历（windowBecameKey / 已挂载重链可能密集触发）
     static NSTimeInterval __lastLinkTS = 0;
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
@@ -336,16 +350,12 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
             return;
         }
         nav.interactivePopGestureRecognizer.enabled = NO;
-        failOnOurPans(nav.interactivePopGestureRecognizer);
         linked++;
     }];
-    // 第二道防线：枚举窗口里所有 UIScreenEdgePanGestureRecognizer（含插件自定义的边缘返回手势），
-    // 让它们全部失败于我们的 pan——plugin 私有的边缘手势也能压住，杜绝「一次滑动弹两层」。
-    [self _enumerateEdgeGesturesInView:win depth:0 block:^(UIScreenEdgePanGestureRecognizer *g){
-        if (g.delegate == self) return;   // 跳过我们自己的边缘 pan（避免 requireGestureRecognizerToFail 自引用）
-        failOnOurPans(g);
-        linked++;
-    }];
+    // 注：窗口内「其它边缘返回手势 / 系统 interactivePop」不再用 requireGestureRecognizerToFail: 显式枚举
+    // （易与对手 delegate 互锁、且 WeChat 重开 enabled 后失效）；改由 ObackManager 的
+    // gestureRecognizer:shouldRequireFailureOfGestureRecognizer: 单向让步处理（OUR delegate 决策，
+    // 对手不可否决，无死锁）—— 见下方新增方法。
     // 第三道防线：枚举窗口里所有 UIScrollView 的 pan（含纵向表视图 / 横向分页容器）。
     // 让它们失败于我们的 pan——从边缘起滑时 ourPan 优先接管返回（无论横/纵 scroll），
     // 从中间滑动时 ourPan 不 begin 故放行给滚动，互不干扰。
@@ -492,7 +502,12 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         // 原生边缘返回与我们的 pan 同时驱动同一 _UINavigationInteractiveTransition → 双返回。
         // 起滑瞬间(shouldBegin 确认有效 pop)再压死一次，确保本次只有我们的 pan 驱动转场。
         nav.interactivePopGestureRecognizer.enabled = NO;
-        self.currentParallaxToView = YES;   // nav pop（系统原生/右缘自定义，不 reparent toView）
+        if (edge == ObackEdgeRight) {
+            self.currentParallaxToView = NO;
+            self.rightSimplePop = YES;   // 右缘：非交互 pop（松手提交才 popViewControllerAnimated:，零空白/不破坏导航栏/不进自定义转场）
+        } else {
+            self.currentParallaxToView = YES;   // nav pop（左缘：系统原生交互转场）
+        }
     } else {
         if (top.presentingViewController != nil) {
             self.currentParallaxToView = NO;  // modal dismiss（方案B 自定义，只移 sheet）
@@ -658,11 +673,30 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     }
 }
 
+// 单向让步（根治微信双返回 + QQ 等右缘冲突）：当我们的边缘 pan(g) 与另一个边缘返回手势(other, 同边)竞争时，
+// 让 OUR pan 要求 other 先失败——OUR delegate 决策，对手无法否决，且不会与对手的 requireToFail 互锁死锁。
+// 结果：对手识别→我们取消（单层原生返回）；对手不识别→我们接管（单层 Oback 返回）。绝不会双触发。
+// 注意：scrollView 的 pan 协调仍由 shouldBegin 内的 requireGestureRecognizerToFail: 显式处理（other 非边缘，此处不拦）。
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g
+ shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)other {
+    if (g == other || other == nil) return NO;
+    if (![g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return NO;  // 仅我们的边缘 pan 参与决策
+    if (other.delegate == self) return NO;                                      // 跳过自己的另一个 pan（避免自引用死锁）
+    if (![other isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return NO;
+    UIScreenEdgePanGestureRecognizer *mg = (UIScreenEdgePanGestureRecognizer *)g;
+    UIScreenEdgePanGestureRecognizer *og = (UIScreenEdgePanGestureRecognizer *)other;
+    if ((mg.edges & og.edges) == 0) return NO;   // 不同边（左/右）互不干涉
+    return YES;                                   // 同边边缘手势：我们的 pan 让步于对手（单层返回，杜绝双触发）
+}
+
 - (void)updateTransition:(UIPanGestureRecognizer *)pan {
     if (!self.interacting) return;
     UIWindow *win = [self _windowForPan:pan];
     CGFloat w = win.bounds.size.width;
     if (w <= 0) return;
+
+    // 右缘非交互 pop：仅更新胶囊，绝不 scrub / 绝不触发交互转场（避免方案A 左原点语义导致的右缘负向反 scrub 与几何错配空白）
+    if (self.rightSimplePop) { [self updateIndicatorWithPan:pan window:win]; return; }
 
     CGPoint t = [pan translationInView:win];
     CGFloat dir = (self.currentEdge == ObackEdgeLeft) ? 1.0 : -1.0;
@@ -693,6 +727,42 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     if (!self.interacting) return;
     UIWindow *win = [self _windowForPan:pan];
     CGFloat w = win.bounds.size.width;
+    // ===== 右缘非交互 pop（零空白修复）=====
+    // 右缘不喂系统左原点 handleNavigationTransition:（会算错底页坐标→空白），也不进自定义视差转场；
+    // 松手提交才 popViewControllerAnimated: 非交互返回——方向天然正确、导航栏不破坏、零空白。
+    if (self.rightSimplePop) {
+        CGPoint v = [pan velocityInView:win];
+        CGFloat dir = (self.currentEdge == ObackEdgeLeft) ? 1.0 : -1.0;
+        CGFloat vel = dir * v.x;
+        CGFloat projected = _currentPercent;
+        if (w > 0) projected += (vel * 0.12) / w;
+        projected = MAX(0.0, MIN(1.0, projected));
+        CGFloat effective = MAX(_currentPercent, projected);
+        ObackParams *p = [ObackPreferences params];
+        BOOL commit = (effective > p.commitRatio) || (vel > p.commitVelocity);
+        NSString *kind = objc_getAssociatedObject(pan, kPanKindKey);
+        UINavigationController *nav = nil;
+        if ([kind isEqualToString:@"nav"]) {
+            nav = objc_getAssociatedObject(pan, kObackNavKey);
+        }
+        if (!nav) {
+            UIViewController *top = [self topMost:win.rootViewController];
+            nav = top.navigationController;
+            if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
+        }
+        if (commit && nav && nav.viewControllers.count > 1) {
+            [nav popViewControllerAnimated:YES];
+        }
+        self.interacting = NO;
+        self.interactive = nil;
+        self.currentAnimator = nil;
+        _navPopTarget = nil;
+        _currentPercent = 0;
+        _transitionTriggered = NO;
+        self.rightSimplePop = NO;
+        OBLog(@"endTransition: 右缘非交互 pop (commit=%d nav=%@)", commit, nav ? NSStringFromClass([nav class]) : @"nil");
+        return;
+    }
     CGPoint v = [pan velocityInView:win];
     CGFloat dir = (self.currentEdge == ObackEdgeLeft) ? 1.0 : -1.0;
     CGFloat vel = dir * v.x;   // 前向(朝返回方向)为正
@@ -901,6 +971,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     _navPopTarget = nil;
     _currentPercent = 0;
     _transitionTriggered = NO;
+    self.rightSimplePop = NO;     // 复位：避免残留导致下次手势误判右缘非交互
 }
 
 #pragma mark - 方案 A：驱动系统原生 nav pop

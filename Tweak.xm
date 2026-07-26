@@ -53,13 +53,12 @@ static BOOL oback_shouldBackOff(void) {
     [ObackManager shared].currentAnimator = nil;   // 先清，避免残留上一轮动画器
     // 仅在我们手势驱动返回时接管 pop 动画；普通返回按钮走 App 原生转场（避免破坏/黑屏）
     if (operation == UINavigationControllerOperationPop && interacting) {
-        if ([ObackPreferences navParallaxEnabled] || [ObackManager shared].currentEdge == ObackEdgeRight) {
-            // 自定义 nav 视差转场（parallaxToView=YES，使用离屏快照铺底，绝不重挂载真实 toView，安全无空白）。
-            // 进入条件：navParallaxEnabled 或右缘。右缘由 ObackManager 在 triggerTransitionInWindow 调
-            // popViewControllerAnimated: 启动自定义交互转场（interactionController 返回 self.interactive 接管 scrub，
-            // 方向由 OBApplyParallax 的 edge 分支处理，修正方案A 左缘语义导致的右缘负向反 scrub）；
-            // 左缘 navParallax 实验时则由 driveSystemNavPopBegin 经 handleNavigationTransition: 启动。
-            // 风险：个别 App 离屏快照/自定义转场可能空白或冻结，需多 App 真机验证；默认关（仅右缘强制开）。
+        if ([ObackPreferences navParallaxEnabled]) {
+            // 实验：自定义 nav 视差转场（parallaxToView=YES）。转场交互态由 handleNavigationTransition:
+            // （driveSystemNavPopBegin，与方案A 同款入口）启动，此处返回自定义 ObackAnimator 接管动画；
+            // 交互由 interactionController 返回的 ObackInteractiveTransition 驱动（update/finish/cancel）。
+            // 注意：右缘不再强制走此路径——右缘改由 ObackManager 的 rightSimplePop 在松手提交时
+            // popViewControllerAnimated: 非交互返回（零空白、方向天然正确、不破坏导航栏）。默认关。
             ObackAnimator *a = [[[ObackAnimator alloc] initWithEdge:[ObackManager shared].currentEdge
                                                               params:[ObackPreferences params]] autorelease];
             a.parallaxToView = YES;
@@ -183,24 +182,12 @@ static BOOL oback_shouldBackOff(void) {
         objc_setAssociatedObject(self, kNavDelegateKey, fd, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     fd.original = delegate;
-    // 关闭系统自带左边缘返回，避免和我们手势双重触发
+    // 关闭系统自带左边缘返回（避免和我们手势同时驱动 handleNavigationTransition: 造成双返回）。
+    // 不再对其设 requireGestureRecognizerToFail: —— 让步改由 ObackManager 的
+    // gestureRecognizer:shouldRequireFailureOfGestureRecognizer: 单向处理（OUR delegate 决策，
+    // 对手无法否决，且避免与系统手势互锁导致两边都不 begin）。微信等事后重开 enabled 时，
+    // 我们的边缘 pan 会让步给它（单层原生返回），绝不会双触发。
     self.interactivePopGestureRecognizer.enabled = NO;
-    // 让原生手势"失败于"我们的 window pan：即使 App 后续把 enabled 重新置 YES（微信常这么做），
-    // 原生手势的 begin 仍须等我们的手势先失败，从根上杜绝"一次滑动被两套手势各弹一层"的双返回。
-    UIWindow *win = self.view.window;
-    if (!win) win = self.topViewController.view.window;
-    if (win) {
-        id pans = objc_getAssociatedObject(win, kPanKey);
-        if ([pans isKindOfClass:[NSArray class]]) {
-            for (id pan in pans) {
-                @try { [self.interactivePopGestureRecognizer requireGestureRecognizerToFail:pan]; }
-                @catch (NSException *e) {}
-            }
-        } else if (pans) {
-            @try { [self.interactivePopGestureRecognizer requireGestureRecognizerToFail:pans]; }
-            @catch (NSException *e) {}
-        }
-    }
     %orig(fd);
 }
 
