@@ -491,7 +491,12 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
                   (unsigned long)nav.viewControllers.count);
             return NO;
         }
-        self.currentParallaxToView = YES;   // nav pop（系统原生交互转场，不 reparent toView）
+        // 即时禁用系统原生 interactivePop：微信等 App 在 viewDidAppear 后会把
+        // interactivePopGestureRecognizer.enabled 重新置 YES，linkNav 的禁用被绕过 →
+        // 原生边缘返回与我们的 pan 同时驱动同一 _UINavigationInteractiveTransition → 双返回。
+        // 起滑瞬间(shouldBegin 确认有效 pop)再压死一次，确保本次只有我们的 pan 驱动转场。
+        nav.interactivePopGestureRecognizer.enabled = NO;
+        self.currentParallaxToView = YES;   // nav pop（系统原生/右缘自定义，不 reparent toView）
     } else {
         if (top.presentingViewController != nil) {
             self.currentParallaxToView = NO;  // modal dismiss（方案B 自定义，只移 sheet）
