@@ -124,6 +124,15 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 - (void)start {
     if (_started) return;
     _started = YES;
+    // 诊断横幅：打印当前 bid + 黑白名单状态，便于确认①装的是哪个包②黑名单数组是否真正加载/命中。
+    {
+        NSUserDefaults *d = [[[NSUserDefaults alloc] initWithSuiteName:@"com.zlhkf.oback"] autorelease];
+        OBLog(@"[oback-diag] bid=%@ whitelistMode=%@ blacklistApps=%@ isAllowed=%d",
+              NSBundle.mainBundle.bundleIdentifier,
+              [d objectForKey:@"whitelistMode"],
+              [d arrayForKey:@"blacklistApps"],
+              [ObackPreferences isAllowed]);
+    }
     // 黑白名单铁律：黑名单 App 完全不注入（不挂手势/不关系统手势/不链 nav），从根避免黑名单 App 因注入闪退。
     if (![ObackPreferences isAllowed]) {
         OBLog(@"start: isAllowed=NO (bid=%@)，Oback 完全不注入（黑白名单排除生效）", NSBundle.mainBundle.bundleIdentifier);
@@ -569,12 +578,16 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // 新手势开始：清空上一次松手速度/进度，避免遗留值串入本次动画
     self.releaseVelocity = 0;
     self.releasePercent  = 0;
-    // 诊断：确认本次手势是否真正进入 beginTransition（朋友圈此前"胶囊出现但无返回"疑似未到此）。
+    // 诊断：确认本次手势是否真正进入 beginTransition，并打印触发 pan 的身份（window pan / nav pan）。
+    // 若一次滑动同时出现两条 beginTransition 且 panView 分别为 UIWindow 与 nav.view，则双返回根因是
+    // window pan 与 nav pan 同时开火（二者 delegate 均为 self，shouldRequireFailureOf 会互相跳过而不协调）。
     {
         UIWindow *dbgWin = [self _windowForPan:pan];
-        OBLog(@"beginTransition: entered (parallaxToView=%d top=%@)",
+        OBLog(@"beginTransition: entered (parallaxToView=%d top=%@ panView=%@ kind=%@)",
               self.currentParallaxToView,
-              NSStringFromClass([[self topMost:dbgWin.rootViewController] class]));
+              NSStringFromClass([[self topMost:dbgWin.rootViewController] class]),
+              NSStringFromClass([[pan view] class]),
+              objc_getAssociatedObject(pan, kPanKindKey) ?: @"window");
     }
 
     UIWindow *win = [self _windowForPan:pan];
@@ -681,7 +694,14 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
  shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)other {
     if (g == other || other == nil) return NO;
     if (![g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return NO;  // 仅我们的边缘 pan 参与决策
-    if (other.delegate == self) return NO;                                      // 跳过自己的另一个 pan（避免自引用死锁）
+    if (other.delegate == self) {
+        // 同为我们的 pan：仅让 nav pan 单向对 window pan 让步（无死锁），杜绝同边双开火 → 双返回。
+        // window pan 始终不向 nav pan 让步，故不会互锁；其余自身组合（window↔window / nav↔nav 同边）仍跳过。
+        BOOL gIsWindow = [[g view] isKindOfClass:[UIWindow class]];
+        BOOL oIsWindow = [[other view] isKindOfClass:[UIWindow class]];
+        if (!gIsWindow && oIsWindow) return YES;   // nav pan 让步于 window pan
+        return NO;
+    }
     if (![other isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return NO;
     UIScreenEdgePanGestureRecognizer *mg = (UIScreenEdgePanGestureRecognizer *)g;
     UIScreenEdgePanGestureRecognizer *og = (UIScreenEdgePanGestureRecognizer *)other;
@@ -695,8 +715,19 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     CGFloat w = win.bounds.size.width;
     if (w <= 0) return;
 
-    // 右缘非交互 pop：仅更新胶囊，绝不 scrub / 绝不触发交互转场（避免方案A 左原点语义导致的右缘负向反 scrub 与几何错配空白）
-    if (self.rightSimplePop) { [self updateIndicatorWithPan:pan window:win]; return; }
+    // 右缘非交互 pop：仅更新胶囊 + 记录位移进度，绝不 scrub / 绝不触发交互转场
+    // （避免方案A 左原点语义导致的右缘负向反 scrub 与几何错配空白）。
+    // 关键修复：此前未在此更新 _currentPercent，松手时进度恒为 0、仅靠速度投影，
+    // 慢速内滑永远不 commit → 右缘只出胶囊不返回。现按位移同步进度，正常内滑即可提交。
+    if (self.rightSimplePop) {
+        CGPoint t = [pan translationInView:win];
+        CGFloat dir = (self.currentEdge == ObackEdgeLeft) ? 1.0 : -1.0;
+        CGFloat p = dir * t.x / w;
+        p = MAX(0.0, MIN(1.0, p));
+        _currentPercent = p;
+        [self updateIndicatorWithPan:pan window:win];
+        return;
+    }
 
     CGPoint t = [pan translationInView:win];
     CGFloat dir = (self.currentEdge == ObackEdgeLeft) ? 1.0 : -1.0;
@@ -751,8 +782,12 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
             if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
         }
         if (commit && nav && nav.viewControllers.count > 1) {
-            [nav popViewControllerAnimated:YES];
+            @try { [nav popViewControllerAnimated:YES]; }
+            @catch (NSException *e) { OBLog(@"endTransition 右缘 pop 异常: %@", e); }
         }
+        // 关键修复：右缘分支此前漏调 dismissIndicatorCommitted，胶囊永远残留屏幕。
+        // 提交→放大淡出；取消→弹回边缘，与左右边缘行为一致。
+        if (_indicator) [self dismissIndicatorCommitted:commit params:p window:win];
         self.interacting = NO;
         self.interactive = nil;
         self.currentAnimator = nil;
