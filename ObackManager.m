@@ -400,18 +400,14 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 
 #pragma mark - 排除名单（不干预的页面）
 
-// 不干预的视图控制器：其所在 nav 不挂我们的边缘 pan、不关原生 interactivePop，交原生处理。
-// 当前仅微信朋友圈（WCTimeLineViewController 及其相关）：整屏滚动信息流与我们的边缘 pan
-// 存在手势竞争——我们的 pan 在 shouldBegin=YES 后仍进不了 Began（被朋友圈 scrollView/原生
-// 手势抢走），且 swizzle 关掉原生 interactivePop 后会把朋友圈原本可用的原生边缘返回也弄没。
-// 用户明确要求「不干预朋友圈」，故整页跳过，保留微信原生边缘返回。
+// 不干预的视图控制器（排除名单）。
+// 机制保留作为「未来特定 App 需要跳过时的扩展点」：命中后其所在 nav 不挂我们的边缘 pan、
+// 不关原生 interactivePop、shouldBegin 直接 NO，交原生处理。
+// 当前名单为空——微信朋友圈（WCTimeLine）的排除已于 2026-07-26 移除：右缘改用自定义转场 +
+// 起滑即时禁用系统 interactivePop + 直接调 handleNavigationTransition: 驱动原生 pop 后，
+// 当初加排除的两个理由（手势抢、原生返回被关没）均已缓解，故朋友圈也由 Oback 接管边缘返回。
 - (BOOL)_isExcludedViewController:(UIViewController *)vc {
     if (!vc) return NO;
-    NSString *name = NSStringFromClass([vc class]);
-    if ([name isEqualToString:@"WCTimeLineViewController"] ||
-        [name rangeOfString:@"WCTimeLine"].location != NSNotFound) {
-        return YES;
-    }
     return NO;
 }
 
