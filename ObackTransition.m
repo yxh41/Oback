@@ -68,9 +68,9 @@ static void OBApplyParallax(CGFloat percent,
     ObackParams *p = [[ObackParams alloc] init];
     p.triggerWidth     = 40.0;   // 边缘触发宽度：24 太窄（用户常从 25~32pt 起滑，判为"不在边缘"），放宽到 40
     p.leftEnabled      = YES;
-    p.rightEnabled     = NO;    // 【稳定版】右缘返回默认关：方案A 把 pan 喂给系统 handleNavigationTransition:（左原点语义），
-                                // 右缘几何错配→手感差/易误触；左缘已是 iOS 原生预期、最稳。需右缘可在设置开启
-                                //（届时走方案A右缘，已知非一等公民，非完美实现前保持默认关）。
+    p.rightEnabled     = YES;   // 【稳定版】右缘返回默认开（用户要求可触发）。注：方案A 把右缘 pan 直接喂给系统
+                                // handleNavigationTransition:（左原点语义），右缘几何为镜像→方向/跟手不如左缘完美；
+                                // 已知非一等公民。要真正"好用"需另写右原点自定义镜像转场（见待办），届时替换此路径。
     p.hapticEnabled    = YES;
     p.parallaxOffset   = 0.30;
     p.previousScaleMin = 0.92;
