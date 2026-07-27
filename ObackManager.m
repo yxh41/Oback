@@ -828,10 +828,26 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     CGFloat p = dir * t.x / w;
     p = MAX(0.0, MIN(1.0, p));
 
-    // 首次横向拖动（p>0）才真正触发（modal/右缘路径在此触发；nav 路径已在 begin 启动，这里不再触发）
+    // 首次横向拖动（p>0）才真正触发
     if (!_transitionTriggered && p > 0.001) {
-        [self triggerTransitionInWindow:win withPan:pan];
-        _transitionTriggered = YES;
+        if (self.currentParallaxToView && self.currentEdge != ObackEdgeRight && _navPopProbeFailed) {
+            // 微信等自定义nav(非交互路径)：首次横拖才 popViewControllerAnimated:（同右缘节奏）。
+            // 不在 Began 即 pop，避免撕裂视图层级导致手势收不到终态、胶囊残留。
+            UINavigationController *navP = nil;
+            NSString *kindP = objc_getAssociatedObject(pan, kPanKindKey);
+            if ([kindP isEqualToString:@"nav"]) navP = objc_getAssociatedObject(pan, kObackNavKey);
+            if (!navP) {
+                UIViewController *topP = [self topMost:win.rootViewController];
+                navP = topP.navigationController;
+                if (!navP && [topP isKindOfClass:[UINavigationController class]]) navP = (UINavigationController *)topP;
+            }
+            if (navP) { @try { [navP popViewControllerAnimated:YES]; } @catch (NSException *e) {} }
+            _transitionTriggered = YES;
+        } else {
+            // modal/右缘路径在此触发；nav 方案A路径已在 begin 启动，这里不再触发
+            [self triggerTransitionInWindow:win withPan:pan];
+            _transitionTriggered = YES;
+        }
     }
 
     // [运行时探测切换] 左缘 nav pop：首次横向拖动实测系统交互转场是否真进入 interactive 态。
@@ -1186,13 +1202,13 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // 绝不调用 handleNavigationTransition:（否则会自污染 isInteractive 信号，且微信有 machinery 却不渲染
     // 导致转场不可见）。直接走非交互 popViewControllerAnimated:，方向正确、永不失效（代价不跟手）。
     if (![self _navPopShouldDriveSystemNav:nav]) {
-        OBLog(@"navPop: 判定为非标准nav(自定义/已知不配合), 直接非交互 pop (nav=%@, bid=%@)",
+        OBLog(@"navPop: 判定为非标准nav(自定义/已知不配合), 首次横拖时非交互 pop (nav=%@, bid=%@)",
               NSStringFromClass([nav class]), [[NSBundle mainBundle] bundleIdentifier]);
         _navPopTarget = nil;
-        _navPopProbeFailed = YES;     // update 阶段不再喂系统转场，避免冲突
-        [nav popViewControllerAnimated:YES];
-        self.interacting = NO;
-        _transitionTriggered = YES;
+        _navPopProbeFailed = YES;     // 标记非交互路径：update 首次横拖才 pop(同右缘节奏)，
+                                      // 避免 Began 即 pop 撕裂视图层级使手势收不到终态→胶囊残留。
+                                      // 此处不 pop / 不置 interacting=NO / 不置 _transitionTriggered，
+                                      // 让手势走完整生命周期，由 endTransition 可靠收胶囊(见 rightSimplePop 同机制)。
         return;
     }
 
