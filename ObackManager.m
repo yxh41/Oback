@@ -131,11 +131,12 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // 用于确认①装的是哪个包②黑名单数组是否真正加载/命中（此前文件日志因容器隔离抓不到拼多多）。
     {
         NSDictionary *d = [ObackPreferences _mergedPrefs];
-        NSLog(@"[Oback-diag] bid=%@ whitelistMode=%@ blacklistApps=%@ isAllowed=%d",
+        NSLog(@"[Oback-diag] bid=%@ whitelistMode=%@ blacklistApps=%@ isAllowed=%d debugLog=%@",
               NSBundle.mainBundle.bundleIdentifier,
               d[@"whitelistMode"],
               d[@"blacklistApps"],
-              [ObackPreferences isAllowed]);
+              [ObackPreferences isAllowed],
+              d[@"debugLog"]);
     }
     // 黑白名单铁律：黑名单 App 完全不注入（不挂手势/不关系统手势/不链 nav），从根避免黑名单 App 因注入闪退。
     if (![ObackPreferences isAllowed]) {

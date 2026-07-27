@@ -35,6 +35,18 @@ static NSDictionary *_obSliderUnits(void) {
     NSMutableDictionary<NSString *, UILabel *> *_valueLabels; // key → 右侧数值标签
 }
 
+#pragma mark - 跨 App 写入桥（roothide 容器隔离修复，与黑名单 adcaf5f 同思路）
+
+// roothide 下 PreferenceLoader 的标准 cell 写入经 NSUserDefaults(suiteName:) 会落到「设置」App 自身容器副本，
+// 而 tweak 注入其它 App 时读的是全局文件（见 ObackPreferences._mergedPrefs 优先读全局文件）。
+// 故每个标准开关/滑块的变更都额外镜像写一份到全局文件，确保「设置」与「tweak」命中同一物理文件。
+// 否则如「调试日志」开关会看似能拨动、tweak 却永远读不到（恒为默认 NO → 不写日志）。
+- (void)setPreferenceValue:(id)value forSpecifier:(PSSpecifier *)specifier {
+    [super setPreferenceValue:value forSpecifier:specifier];
+    NSString *key = [specifier propertyForKey:@"key"];
+    if (key) oback_setGlobalPref(key, value);
+}
+
 - (NSArray *)specifiers {
     if (!_specifiers) {
         _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];

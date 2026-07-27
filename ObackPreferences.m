@@ -161,20 +161,9 @@ static NSTimeInterval __obDebugLogOpenedAt = 0;
     NSDictionary *d = [self _mergedPrefs];
     id v = [d objectForKey:@"debugLog"];
     BOOL enabled = v ? [v boolValue] : NO;   // 未设置 → 默认关
-    if (enabled) {
-        // 刚从关闭切到开启：记录开启时刻，用于自动过期
-        if (!(__obDebugLogCache && [__obDebugLogCache boolValue])) {
-            __obDebugLogOpenedAt = now;
-        }
-        // 开启超过 30 分钟自动过期：写回关闭，避免忘记关持续偷电
-        if (__obDebugLogOpenedAt > 0 && (now - __obDebugLogOpenedAt) > OB_DEBUG_LOG_EXPIRE) {
-            enabled = NO;
-            [self _setObject:@NO forKey:@"debugLog"];
-            __obDebugLogOpenedAt = 0;
-        }
-    } else {
-        __obDebugLogOpenedAt = 0;
-    }
+    // 不再做自动过期写回：调试期间用户常驻开，自动关闭会导致「开了一会就没日志」的困惑；
+    // 由用户手动关闭即可（开关默认关，日用机省电）。__obDebugLogOpenedAt 不再使用。
+    __obDebugLogOpenedAt = 0;
     NSNumber *nc = [@(enabled) retain];   // MRC：静态变量持有，必须 retain（autorelease 会在 drain 后野指针）
     [__obDebugLogCache release];
     __obDebugLogCache = nc;
