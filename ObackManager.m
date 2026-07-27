@@ -770,9 +770,6 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
             OBLog(@"trigger: nav pop 自定义视差/兜底，popViewControllerAnimated");
             [nav popViewControllerAnimated:YES];
         }
-            // 非交互兜底（快滑零位移：endTransition 先把 interacting 置 NO 再走此路径）
-            [nav popViewControllerAnimated:YES];
-        }
     } else if (top.presentingViewController) {
         // 方案B（安全恢复弹窗 dismiss 视差）：只移动被 dismiss 的 sheet(fromView)，
         // 绝不碰底层 presenting(toView)（黑屏根因），也不加深遮罩（避免已可见背景闪暗）。
