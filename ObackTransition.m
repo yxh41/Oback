@@ -180,6 +180,28 @@ static void OBApplyParallax(CGFloat percent,
         [container insertSubview:dim aboveSubview:toView];
     }
     [container bringSubviewToFront:fromView];
+
+    // ── 导航栏协同引擎（实验 nav 视差专用）──────────────────────────────
+    // 自定义 nav pop 转场中，live UINavigationBar 由 nav controller 私有持有、不随 container 的
+    // fromView/toView 移动 → 转场期间导航栏不跟手、转场后易损坏/消失。故：快照真实 bar，挂到
+    // fromView 上随其平移（OBApplyParallax 平移 fromView 时 snapshot 作为子视图一起动），转场结束
+    // （含 cancel / watchdog 兜底 / dealloc）由 _restoreNavBar 还原真实 bar。仅 nav pop(parallaxToView=YES) 触发。
+    if (self.parallaxToView && !_navBarSnapshot) {
+        UINavigationController *navC = from.navigationController ?: to.navigationController;
+        UINavigationBar *realBar = navC.navigationBar;
+        if (navC && realBar && !navC.navigationBarHidden) {
+            _navBarWasHidden = realBar.hidden;
+            _navBarSnapshot = [[realBar snapshotViewAfterScreenUpdates:NO] retain];   // MRC：snapshot 默认 autorelease，retain 持有
+            _navBarSnapshot.userInteractionEnabled = NO;
+            _navBarSnapshot.frame = [realBar convertRect:realBar.bounds toView:fromView];
+            [fromView addSubview:_navBarSnapshot];   // 作为 fromView 子视图，随其 transform 平移
+            realBar.hidden = YES;                    // 隐藏真实 bar，避免转场期间重复/错位
+            _navBarNav = navC;                        // assign，不 retain（避免循环引用）
+            OBLog(@"navBar 快照: 隐藏真实 bar，挂载 snapshot 到 fromView (nav=%@)",
+                  NSStringFromClass([navC class]));
+        }
+    }
+
     if (dim) [dim release];   // MRC：已加入 container 被其 retain，释放我们的所有权（nil 时跳过）
 
     [self applyShadowTo:fromView];
@@ -203,6 +225,7 @@ static void OBApplyParallax(CGFloat percent,
         if (blockSelf.completed) { blockSelf = nil; return; }   // 已被 manager 兜底收尾 → 防重复 completeTransition
         blockSelf.completed = YES;
         if (blockSelf.context) [blockSelf.context completeTransition:!cancelled];
+        [blockSelf _restoreNavBar];   // 还原真实导航栏（实验 nav 视差）
         OBLog(@"animator done (cancelled=%d)", cancelled);
         blockSelf = nil;   // 打破循环引用（MRC 无 __weak）
     }];
@@ -244,6 +267,21 @@ static void OBApplyParallax(CGFloat percent,
 // completion 里做 cleanup；completeTransition 由 completion + dispatch_after(0.3s) 双重
 // 保险确保一定被调用，避免某些 App 中 completion 延迟 1~2 秒导致界面冻结。
 // _completed 守卫防重复（finish/cancel 先调一次，watchdog 0.5s 后调则直接返回）。
+// 还原真实导航栏（与 _navBarSnapshot 配对）：转场完成/取消/watchdog 兜底、dealloc 均调用，
+// 确保真实 bar 必还原（hidden 写回原值），杜绝导航栏永久消失。_navBarSnapshot 非空才执行（幂等）。
+- (void)_restoreNavBar {
+    if (!_navBarSnapshot) return;
+    [_navBarSnapshot removeFromSuperview];
+    [_navBarSnapshot release];
+    _navBarSnapshot = nil;
+    if (_navBarNav) {
+        @try { _navBarNav.navigationBar.hidden = _navBarWasHidden; }
+        @catch (NSException *e) { OBLog(@"restoreNavBar hidden 写回异常: %@", e.reason); }
+        _navBarNav = nil;
+    }
+    OBLog(@"navBar 还原: 真实 bar 显示恢复 (hidden=%d)", _navBarWasHidden);
+}
+
 - (void)forceFinishIfNeeded {
     if (_completed) return;
     _completed = YES;
@@ -307,6 +345,7 @@ static void OBApplyParallax(CGFloat percent,
         } @catch (NSException *exception) {
             OBLog(@"forceComplete completeTransition CRASH: %@", exception.reason);
         }
+        [self _restoreNavBar];   // 还原真实导航栏（实验 nav 视差）
         // 显式清理所有非 from/to 子视图（dim 遮罩等）
         NSArray *subs = [[container.subviews copy] autorelease];
         for (UIView *sub in subs) {
@@ -328,6 +367,7 @@ static void OBApplyParallax(CGFloat percent,
         } @catch (NSException *exception) {
             OBLog(@"forceComplete completeTransition CRASH (dispatch_after): %@", exception.reason);
         }
+        [self _restoreNavBar];   // 还原真实导航栏（实验 nav 视差）
         NSArray *subs = [[container.subviews copy] autorelease];
         for (UIView *sub in subs) {
             if (sub != fromView && sub != toView) [sub removeFromSuperview];
@@ -342,6 +382,7 @@ static void OBApplyParallax(CGFloat percent,
 - (void)dealloc {
     if (_params) [_params release];
     [_propertyAnimator release];
+    if (_navBarSnapshot) [_navBarSnapshot release];   // 兜底（正常路径已在 _restoreNavBar 释放）
     [super dealloc];
 }
 
