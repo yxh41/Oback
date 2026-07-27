@@ -110,6 +110,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     ObackAnimator *_watchAnimator; // MRC 强引用：兜底收尾定时器期间持有动画器，避免 UIKit 释放成野指针
     id     _navPopTarget;        // 方案A: 系统原生 nav pop 的私有 target(_UINavigationInteractiveTransition)，
                                  // 驱动 handleNavigationTransition: 用（assign，由 nav 内部持有，转场期间有效）
+    BOOL   _navPopProbeFailed;   // 运行时探测: 方案A 系统交互转场未启动(自定义nav不配合)→ YES, 已切非交互 pop
 }
 
 + (instancetype)shared {
@@ -830,6 +831,30 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     if (!_transitionTriggered && p > 0.001) {
         [self triggerTransitionInWindow:win withPan:pan];
         _transitionTriggered = YES;
+        // [运行时探测切换] 方案A 已在 begin 驱动(handleNavigationTransition:)，此处首次横向拖动即实测
+        // 系统交互转场是否真进入 interactive 态：标准 nav → 继续跟手；微信等自定义 nav 永不 interactive
+        // → 当场切非交互 popViewControllerAnimated:（永不失效，代价不跟手）。避免依赖不可靠的 _targets 非空识别。
+        if (self.currentParallaxToView && self.currentEdge != ObackEdgeRight && !_navPopProbeFailed) {
+            UINavigationController *navP = nil;
+            NSString *kindP = objc_getAssociatedObject(pan, kPanKindKey);
+            if ([kindP isEqualToString:@"nav"]) navP = objc_getAssociatedObject(pan, kObackNavKey);
+            if (!navP) {
+                UIViewController *topP = [self topMost:win.rootViewController];
+                navP = topP.navigationController;
+                if (!navP && [topP isKindOfClass:[UINavigationController class]]) navP = (UINavigationController *)topP;
+            }
+            if (navP) {
+                id tc = [navP.topViewController transitionCoordinator];
+                BOOL interactive = (tc && [tc respondsToSelector:@selector(isInteractive)] && [tc isInteractive]);
+                if (!interactive) {
+                    OBLog(@"navPop 探测: 系统交互转场未启动(自定义nav?), 切非交互 pop (nav=%@)",
+                          NSStringFromClass([navP class]));
+                    _navPopProbeFailed = YES;
+                    _navPopTarget = nil;   // 后续 _callSystemNavPop: 直接 return，避免重复驱动系统转场
+                    @try { [navP popViewControllerAnimated:YES]; } @catch (NSException *e) {}
+                }
+            }
+        }
     }
 
     _currentPercent = p;
@@ -837,8 +862,9 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         // 实验：自定义 nav 视差 scrub（同 modal 方案B 机制，驱动 animator 的 fractionComplete）
         if (self.interactive) [self.interactive updateWithPercent:p];
     } else if (self.currentParallaxToView) {
-        // 方案 A：nav pop 用系统原生交互转场，直接把当前 pan 喂给 handleNavigationTransition: 做 scrub
-        [self _callSystemNavPop:pan];
+        // 方案 A：nav pop 用系统原生交互转场，直接把当前 pan 喂给 handleNavigationTransition: 做 scrub。
+        // 探测失败(_navPopProbeFailed)已切非交互 pop，此处不再喂系统转场(避免冲突)，仅保留胶囊反馈。
+        if (!_navPopProbeFailed) [self _callSystemNavPop:pan];
     } else {
         if (self.interactive) [self.interactive updateWithPercent:p];
     }
@@ -951,6 +977,17 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
             _currentPercent = 0;
             _transitionTriggered = NO;
             OBLog(@"endTransition: nav pop 自定义视差收尾 (commit=%d)", commit);
+            return;
+        }
+        if (_navPopProbeFailed) {
+            // 探测失败已切非交互 pop：此处仅复位状态，不再喂系统转场（避免与已进行的非交互 pop 冲突）
+            OBLog(@"endTransition: nav pop 探测失败→非交互返回复位 (commit=%d)", commit);
+            self.interacting = NO;
+            _navPopTarget = nil;
+            self.interactive = nil;
+            self.currentAnimator = nil;
+            _currentPercent = 0;
+            _transitionTriggered = NO;
             return;
         }
         [self _callSystemNavPop:pan];
@@ -1081,7 +1118,8 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         } else {
             // 方案 A：nav pop 用系统原生交互转场，把当前 pan(Failed/Cancelled)喂给 handleNavigationTransition:
             // 让系统取消原生 pop；无自定义动画器，无需 watchdog/interactive cancel。
-            if (_transitionTriggered) [self _callSystemNavPop:pan];
+            // 探测失败(_navPopProbeFailed)已切非交互 pop，不再喂系统转场(避免冲突)，直接走下方复位。
+            if (_transitionTriggered && !_navPopProbeFailed) [self _callSystemNavPop:pan];
         }
         // 兜底：若系统 target 取不到导致原生 pop 从未启动（driveSystemNavPopBegin 降级为非交互 pop），
         // 此处 _navPopTarget 为 nil，_callSystemNavPop 为空操作，无需额外处理。
@@ -1147,6 +1185,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     }
     // 系统原生 interactivePopGestureRecognizer 保持 disabled（避免它自己触发 double），
     // 直接把我们的 pan 作为 sender 喂给它的私有 action。
+    _navPopProbeFailed = NO;   // 每次左缘 begin 重置探测标记；首次横向拖动时在 updateTransition 实测系统转场是否真启动
     [self _callSystemNavPop:pan];
     _transitionTriggered = YES;
     [self _scheduleNavPopWatchdog:nav];   // 安全看门狗：防个别 App(如 Filza) 系统交互转场卡死冻结
