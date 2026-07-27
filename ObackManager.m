@@ -52,32 +52,109 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 
 #pragma mark - 边缘方向指示胶囊（OPPO 风格：跟随手指、带方向箭头）
 
+typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
+    ObackCapsuleEffectClassic   = 0,   // 经典：白药丸 + 柔和阴影 + 深色箭头
+    ObackCapsuleEffectGlow      = 1,   // 发光：彩色外发光
+    ObackCapsuleEffectNeon      = 2,   // 霓虹：霓虹描边 + 强发光
+    ObackCapsuleEffectGradient  = 3,   // 流光：动态渐变填充
+    ObackCapsuleEffectFrosted   = 4,   // 毛玻璃：半透明磨砂
+    ObackCapsuleEffectBreathing = 5,   // 呼吸：跟随中轻微脉冲
+};
+
 @interface ObackEdgeIndicator : UIView
 - (instancetype)initWithEdge:(ObackEdge)edge;
+- (void)stopEffectAnimations;   // 收起时停掉渐变等循环动画，避免与淡出动画冲突/残留
+- (BOOL)isBreathing;            // 供 CADisplayLink 插值判断是否叠加呼吸脉冲
 @end
 
 @implementation ObackEdgeIndicator {
     ObackEdge _edge;
     CAShapeLayer *_chevron;
+    CAGradientLayer *_gradientLayer; // 流光特效：渐变填充层（弱引用，由 layer 树持有）
+    BOOL _breathing;                // 呼吸特效：在平滑插值里叠加正弦脉冲
 }
+
 - (instancetype)initWithEdge:(ObackEdge)edge {
     if (self = [super initWithFrame:CGRectMake(0, 0, 56, 32)]) {
         _edge = edge;
-        // 默认：白色半透明胶囊 + 柔和阴影
-        self.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.9];
+        // 默认（经典）外观先铺底，后续按特效覆盖
         self.layer.cornerRadius = 16;
+        self.userInteractionEnabled = NO;
+        self.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.9];
         self.layer.shadowColor = [UIColor blackColor].CGColor;
         self.layer.shadowOpacity = 0.2;
         self.layer.shadowRadius = 6;
         self.layer.shadowOffset = CGSizeZero;
-        self.userInteractionEnabled = NO;
 
-        // 方向 chevron（深色，保证在白底/暗底都可见）
+        // 读取设置项（跨 App 全局文件），决定胶囊特效；读取失败（极少）回落经典
+        NSInteger fx = ObackCapsuleEffectClassic;
+        @try { fx = [ObackPreferences capsuleEffect]; } @catch (NSException *e) { fx = ObackCapsuleEffectClassic; }
+
+        UIColor *glow = [UIColor colorWithRed:0.0 green:0.76 blue:1.0 alpha:1.0]; // 青蓝发光色（发光/霓虹共用）
+
+        switch (fx) {
+            case ObackCapsuleEffectGlow: {           // 发光：彩色外发光
+                self.layer.shadowColor = glow.CGColor;
+                self.layer.shadowOpacity = 0.6;
+                self.layer.shadowRadius = 14;
+                break;
+            }
+            case ObackCapsuleEffectNeon: {           // 霓虹：描边 + 强发光
+                self.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.12];
+                self.layer.borderWidth = 2.0;
+                self.layer.borderColor = glow.CGColor;
+                self.layer.shadowColor = glow.CGColor;
+                self.layer.shadowOpacity = 0.9;
+                self.layer.shadowRadius = 18;
+                break;
+            }
+            case ObackCapsuleEffectGradient: {       // 流光：动态渐变填充
+                self.backgroundColor = [UIColor clearColor];
+                CAGradientLayer *g = [CAGradientLayer layer];
+                g.frame = self.bounds;
+                g.cornerRadius = 16;
+                g.colors = @[ (__bridge id)[UIColor whiteColor].CGColor,
+                              (__bridge id)[UIColor colorWithRed:0.55 green:0.82 blue:1.0 alpha:1.0].CGColor,
+                              (__bridge id)[UIColor whiteColor].CGColor ];
+                g.startPoint = CGPointMake(0, 0);
+                g.endPoint = CGPointMake(1, 0);
+                [self.layer insertSublayer:g atIndex:0];
+                _gradientLayer = g;
+                CABasicAnimation *a1 = [CABasicAnimation animationWithKeyPath:@"startPoint"];
+                a1.fromValue = [NSValue valueWithCGPoint:CGPointMake(0, 0)];
+                a1.toValue   = [NSValue valueWithCGPoint:CGPointMake(1, 0)];
+                a1.duration = 1.6; a1.repeatCount = HUGE_VALF; a1.autoreverses = YES;
+                [g addAnimation:a1 forKey:@"obFlowStart"];
+                CABasicAnimation *a2 = [CABasicAnimation animationWithKeyPath:@"endPoint"];
+                a2.fromValue = [NSValue valueWithCGPoint:CGPointMake(1, 0)];
+                a2.toValue   = [NSValue valueWithCGPoint:CGPointMake(0, 0)];
+                a2.duration = 1.6; a2.repeatCount = HUGE_VALF; a2.autoreverses = YES;
+                [g addAnimation:a2 forKey:@"obFlowEnd"];
+                break;
+            }
+            case ObackCapsuleEffectFrosted: {        // 毛玻璃：半透明磨砂
+                self.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.5];
+                self.layer.borderWidth = 1.0;
+                self.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.6].CGColor;
+                self.layer.shadowColor = [UIColor blackColor].CGColor;
+                self.layer.shadowOpacity = 0.15;
+                self.layer.shadowRadius = 8;
+                break;
+            }
+            case ObackCapsuleEffectBreathing: {      // 呼吸：在插值里叠加脉冲（见 _obIndicatorTick:）
+                _breathing = YES;
+                break;
+            }
+            default: break;                          // 经典 / 未知 → 基础外观
+        }
+
+        // 方向 chevron（深色，保证在浅色药丸上可见；霓虹下改用发光色）
         _chevron = [CAShapeLayer layer];
         _chevron.lineWidth = 3.0;
         _chevron.lineCap = kCALineCapRound;
         _chevron.lineJoin = kCALineJoinRound;
-        _chevron.strokeColor = [UIColor colorWithWhite:0.25 alpha:1.0].CGColor;
+        _chevron.strokeColor = (fx == ObackCapsuleEffectNeon) ? glow.CGColor
+                                 : [UIColor colorWithWhite:0.25 alpha:1.0].CGColor;
         _chevron.fillColor = nil;
         CGFloat cx = 28, cy = 16;
         UIBezierPath *path = [UIBezierPath bezierPath];
@@ -95,6 +172,18 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     }
     return self;
 }
+
+- (void)stopEffectAnimations {
+    // 仅停掉流光循环动画（冻结在当前帧），保留渐变层本身，
+    // 避免收起淡出时胶囊「丢失身体」只剩箭头。层随视图 dealloc 自动释放。
+    if (_gradientLayer) {
+        [_gradientLayer removeAllAnimations];
+        _gradientLayer = nil;
+    }
+}
+
+- (BOOL)isBreathing { return _breathing; }
+
 @end
 
 @implementation ObackManager {
@@ -1344,6 +1433,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     UIView *ind = _indicator;
     _indicator = nil;
     [self _stopIndicatorLink];   // 手势结束：停平滑插值，胶囊交给 UIView 动画淡出/弹回
+    [(ObackEdgeIndicator *)ind stopEffectAnimations];   // 停渐变等循环动画，避免与下方淡出动画冲突
     if (!ind) return;
     if (committed) {
         // 提交返回：放大淡出
@@ -1377,10 +1467,18 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     c.x += (_indicatorTarget.x - c.x) * k;
     c.y += (_indicatorTarget.y - c.y) * k;
     _indicator.center = c;
+    CGFloat targetScale = _indicatorTargetScale;
+    CGFloat targetAlpha = 0.9;
+    if ([(ObackEdgeIndicator *)_indicator isBreathing]) {
+        double t = CACurrentMediaTime();
+        double s = sin(t * 4.0);                  // ≈1.57s 周期
+        targetScale *= (1.0 + 0.05 * s);         // 缩放 ±5% 脉冲
+        targetAlpha = 0.9 + 0.08 * s;            // 透明度 ±0.08 脉冲
+    }
     CGFloat sc = _indicator.transform.a;          // 当前 x 缩放（transform 仅等比缩放）
-    sc += (_indicatorTargetScale - sc) * k;
+    sc += (targetScale - sc) * k;
     _indicator.transform = CGAffineTransformMakeScale(sc, sc);
-    _indicator.alpha = 0.9;
+    _indicator.alpha = targetAlpha;
 }
 
 - (void)_stopIndicatorLink {
