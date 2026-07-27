@@ -111,6 +111,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     id     _navPopTarget;        // 方案A: 系统原生 nav pop 的私有 target(_UINavigationInteractiveTransition)，
                                  // 驱动 handleNavigationTransition: 用（assign，由 nav 内部持有，转场期间有效）
     BOOL   _navPopProbeFailed;   // 运行时探测: 方案A 系统交互转场未启动(自定义nav不配合)→ YES, 已切非交互 pop
+    BOOL   _navPopProbed;        // 运行时探测门控: 独立于 _transitionTriggered，确保左缘 nav 首次横拖必探测一次
 }
 
 + (instancetype)shared {
@@ -827,14 +828,21 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     CGFloat p = dir * t.x / w;
     p = MAX(0.0, MIN(1.0, p));
 
-    // 首次横向拖动（p>0）才真正触发（modal 路径在此触发 dismiss；nav 路径已在 begin 启动，这里不再触发）
+    // 首次横向拖动（p>0）才真正触发（modal/右缘路径在此触发；nav 路径已在 begin 启动，这里不再触发）
     if (!_transitionTriggered && p > 0.001) {
         [self triggerTransitionInWindow:win withPan:pan];
         _transitionTriggered = YES;
-        // [运行时探测切换] 方案A 已在 begin 驱动(handleNavigationTransition:)，此处首次横向拖动即实测
-        // 系统交互转场是否真进入 interactive 态：标准 nav → 继续跟手；微信等自定义 nav 永不 interactive
-        // → 当场切非交互 popViewControllerAnimated:（永不失效，代价不跟手）。避免依赖不可靠的 _targets 非空识别。
-        if (self.currentParallaxToView && self.currentEdge != ObackEdgeRight && !_navPopProbeFailed) {
+    }
+
+    // [运行时探测切换] 左缘 nav pop：首次横向拖动实测系统交互转场是否真进入 interactive 态。
+    // 关键修复：原探测错误地嵌在 `if(!_transitionTriggered)` 内——而左缘 nav 路径在 begin 已置
+    // _transitionTriggered=YES（driveSystemNavPopBeginWithPan 第1190行），导致探测永不执行、
+    // _navPopProbeFailed 恒为 NO、微信等自定义 nav 永远走方案A 而失效。现改用 _navPopProbed 单独门控，
+    // 确保首次横向拖动必跑一次。标准 nav → interactive=YES 继续方案A 跟手；微信等自定义 nav →
+    // 永不 interactive，当场切非交互 popViewControllerAnimated:（永不失效，代价不跟手）。
+    if (self.currentParallaxToView && self.currentEdge != ObackEdgeRight && !_navPopProbed) {
+        _navPopProbed = YES;
+        if (!_navPopProbeFailed) {
             UINavigationController *navP = nil;
             NSString *kindP = objc_getAssociatedObject(pan, kPanKindKey);
             if ([kindP isEqualToString:@"nav"]) navP = objc_getAssociatedObject(pan, kObackNavKey);
@@ -1186,6 +1194,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // 系统原生 interactivePopGestureRecognizer 保持 disabled（避免它自己触发 double），
     // 直接把我们的 pan 作为 sender 喂给它的私有 action。
     _navPopProbeFailed = NO;   // 每次左缘 begin 重置探测标记；首次横向拖动时在 updateTransition 实测系统转场是否真启动
+    _navPopProbed = NO;        // 探测门控同步重置（独立于 _transitionTriggered，避免上次手势残留）
     [self _callSystemNavPop:pan];
     _transitionTriggered = YES;
     [self _scheduleNavPopWatchdog:nav];   // 安全看门狗：防个别 App(如 Filza) 系统交互转场卡死冻结
