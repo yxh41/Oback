@@ -212,33 +212,11 @@
         </dict>
         <dict>
             <key>cell</key>
-            <string>PSMultiValueCell</string>
+            <string>PSLinkCell</string>
             <key>label</key>
             <string>胶囊风格</string>
-            <key>key</key>
-            <string>capsuleEffect</string>
-            <key>defaults</key>
-            <string>com.zlhkf.oback</string>
-            <key>default</key>
-            <integer>0</integer>
-            <key>Titles</key>
-            <array>
-                <string>经典</string>
-                <string>发光</string>
-                <string>霓虹</string>
-                <string>流光渐变</string>
-                <string>毛玻璃</string>
-                <string>呼吸</string>
-            </array>
-            <key>Values</key>
-            <array>
-                <integer>0</integer>
-                <integer>1</integer>
-                <integer>2</integer>
-                <integer>3</integer>
-                <integer>4</integer>
-                <integer>5</integer>
-            </array>
+            <key>detail</key>
+            <string>ObackCapsuleEffectController</string>
         </dict>
         <dict>
             <key>cell</key>
