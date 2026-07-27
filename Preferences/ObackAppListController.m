@@ -422,6 +422,91 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 
 @end
 
+#pragma mark - 胶囊特效选择器（替代 PSMultiValueCell）
+
+// 边缘指示胶囊的视觉风格选择器。
+// ⚠️ 为何不用 PSMultiValueCell：本环境（roothide / iOS 16.4.1 / 当前 PreferenceLoader）下
+// PSMultiValueCell 点击后 push 不出子列表、点了没反应；改用自定义 PSListController + 勾选，
+// 与黑白名单（ObackAppListController）同一套已验证稳定的写法。
+// 通过 oback_setGlobalPref 写全局文件（跨 App 真相源），tweak 侧 ObackPreferences.capsuleEffect 即可读到。
+@interface ObackCapsuleEffectController : PSListController
+@end
+
+@implementation ObackCapsuleEffectController {
+    NSArray *_titles;
+    NSArray *_values;
+}
+
+- (NSInteger)_currentEffect {
+    // 优先读跨 App 全局文件（真相源），兜底 NSUserDefaults 域；未设置 → 默认 0（经典）
+    id v = oback_globalPrefs()[@"capsuleEffect"];
+    if (v) return [v integerValue];
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:@"com.zlhkf.oback"];
+    return [d integerForKey:@"capsuleEffect"];
+}
+
+- (NSArray *)specifiers {
+    if (!_specifiers) {
+        _titles = @[@"经典", @"发光", @"霓虹", @"流光渐变", @"毛玻璃", @"呼吸"];
+        _values = @[@0, @1, @2, @3, @4, @5];
+        NSMutableArray *specs = [NSMutableArray array];
+
+        PSSpecifier *group = [PSSpecifier preferenceSpecifierNamed:@"胶囊风格"
+                                                            target:self
+                                                               set:nil
+                                                               get:nil
+                                                          detail:nil
+                                                               cell:PSGroupCell
+                                                               edit:nil];
+        [group setProperty:@"选择边缘指示胶囊的视觉风格，修改后下一次边缘手势即生效。" forKey:@"footerText"];
+        [specs addObject:group];
+
+        for (NSUInteger i = 0; i < _titles.count; i++) {
+            PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:_titles[i]
+                                                          target:self
+                                                             set:nil
+                                                             get:nil
+                                                        detail:nil
+                                                             cell:PSTitleValueCell
+                                                             edit:nil];
+            [s setProperty:_values[i] forKey:@"effectValue"];
+            [specs addObject:s];
+        }
+        _specifiers = specs;
+    }
+    return _specifiers;
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    // ⚠️ 不调 super：本环境 PSListController 未实现该方法，super 调用会 unrecognized selector 闪退。
+    PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
+    NSNumber *v = [spec propertyForKey:@"effectValue"];
+    if (v) {
+        cell.accessoryType = ([v integerValue] == [self _currentEffect])
+            ? UITableViewCellAccessoryCheckmark
+            : UITableViewCellAccessoryNone;
+    }
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
+    NSNumber *v = [spec propertyForKey:@"effectValue"];
+    if (v) {
+        // 写跨 App 全局文件（真相源）+ suite 兜底，tweak 注入其它 App 即能读到
+        oback_setGlobalPref(@"capsuleEffect", v);
+        NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:@"com.zlhkf.oback"];
+        [d setObject:v forKey:@"capsuleEffect"];
+        [d synchronize];
+        _specifiers = nil;   // 触发重建，刷新勾选
+        [self reloadSpecifiers];
+    } else if ([super respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
+        [super tableView:tableView didSelectRowAtIndexPath:indexPath];
+    }
+}
+
+@end
+
 #pragma mark - 薄子类（决定 mode）
 
 @implementation ObackWhiteListController
