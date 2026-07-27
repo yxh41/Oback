@@ -1181,11 +1181,26 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     if (!nav) { OBLog(@"navPop: 无 nav，放弃"); return; }
     // 兜底确保 ObackNavDelegate 就位（delegate:nil 时自动包装；已是 ObackNavDelegate 则幂等）
     [nav setDelegate:nav.delegate];
+
+    // [判定是否驱动方案A] 已知不配合系统交互转场的自定义nav(微信等)或取不到系统target，
+    // 绝不调用 handleNavigationTransition:（否则会自污染 isInteractive 信号，且微信有 machinery 却不渲染
+    // 导致转场不可见）。直接走非交互 popViewControllerAnimated:，方向正确、永不失效（代价不跟手）。
+    if (![self _navPopShouldDriveSystemNav:nav]) {
+        OBLog(@"navPop: 判定为非标准nav(自定义/已知不配合), 直接非交互 pop (nav=%@, bid=%@)",
+              NSStringFromClass([nav class]), [[NSBundle mainBundle] bundleIdentifier]);
+        _navPopTarget = nil;
+        _navPopProbeFailed = YES;     // update 阶段不再喂系统转场，避免冲突
+        [nav popViewControllerAnimated:YES];
+        self.interacting = NO;
+        _transitionTriggered = YES;
+        return;
+    }
+
     _navPopTarget = [self navPopSystemTargetForNav:nav];
     if (!_navPopTarget) {
-        // 极端兜底：取不到系统 target，降级为非交互 popViewControllerAnimated（interacting 置 NO
-        // 让 delegate 返回 nil → 系统默认转场），至少能返回，不卡死。
+        // 极端兜底：取不到系统 target，降级为非交互 popViewControllerAnimated
         OBLog(@"navPop: 取不到系统 target，降级为非交互 popViewControllerAnimated");
+        _navPopProbeFailed = YES;
         [nav popViewControllerAnimated:YES];
         self.interacting = NO;
         _transitionTriggered = YES;
@@ -1193,12 +1208,30 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     }
     // 系统原生 interactivePopGestureRecognizer 保持 disabled（避免它自己触发 double），
     // 直接把我们的 pan 作为 sender 喂给它的私有 action。
-    _navPopProbeFailed = NO;   // 每次左缘 begin 重置探测标记；首次横向拖动时在 updateTransition 实测系统转场是否真启动
+    _navPopProbeFailed = NO;   // 每次左缘 begin 重置探测标记
     _navPopProbed = NO;        // 探测门控同步重置（独立于 _transitionTriggered，避免上次手势残留）
     [self _callSystemNavPop:pan];
     _transitionTriggered = YES;
     [self _scheduleNavPopWatchdog:nav];   // 安全看门狗：防个别 App(如 Filza) 系统交互转场卡死冻结
     OBLog(@"navPop: 系统原生交互 pop 已启动 (target=%@)", NSStringFromClass([_navPopTarget class]));
+}
+
+// 判定左缘 nav pop 是否走方案A(驱动系统 handleNavigationTransition: 跟手)。
+// 返回 NO 的情形：
+//  1) 当前 App 命中"已知不配合系统交互转场的自定义nav"——典型为微信(com.tencent.xin)：
+//     其 nav 拥有完整的系统 interactivePop machinery(target 存在)但故意不渲染交互转场，
+//     纯结构探测(isInteractive)会被其自污染，必须用 bundle id / 类名精确命中；
+//  2) 取不到系统 interactivePop 私有 target(无 machinery 的 App)。
+// 其余标准 nav 返回 YES。
+- (BOOL)_navPopShouldDriveSystemNav:(UINavigationController *)nav {
+    NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
+    if (bid && [bid caseInsensitiveCompare:@"com.tencent.xin"] == NSOrderedSame) return NO; // 微信：有machinery但不渲染
+    // 类名兜底（防 bundle id 读取异常 / 微信变体）
+    NSString *navCls = NSStringFromClass([nav class]);
+    if (navCls && [navCls hasPrefix:@"MMUI"]) return NO; // 微信系自定义 nav
+    // 标准 nav：必须有可用的系统交互转场 target
+    id t = [self navPopSystemTargetForNav:nav];
+    return (t != nil);
 }
 
 // 把 window pan 作为 sender 喂给系统私有 action handleNavigationTransition:。
