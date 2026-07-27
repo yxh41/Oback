@@ -13,6 +13,13 @@
 #import <objc/runtime.h>
 #import "ObackPrefsBridge.h"   // 重置时同步清空全局 plist（绕过 roothide per-app NSUserDefaults 容器化）
 
+// roothide PSListController.h 未公开声明 setPreferenceValue:forSpecifier:，
+// 但 PreferenceLoader 运行时确实实现该方法；补前向声明让 [super setPreferenceValue:...]
+// 通过 -Werror 编译（否则 25c47cf 编译失败、不出 .deb）。
+@interface PSListController (ObackSetPrefForward)
+- (void)setPreferenceValue:(id)value forSpecifier:(PSSpecifier *)specifier;
+@end
+
 // ── 每个滑块 key 对应的单位后缀 ──────────────────────────────
 static NSDictionary *_obSliderUnits(void) {
     static NSDictionary *d = nil;
