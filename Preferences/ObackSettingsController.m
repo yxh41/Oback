@@ -13,9 +13,9 @@
 #import <objc/runtime.h>
 #import "ObackPrefsBridge.h"   // 重置时同步清空全局 plist（绕过 roothide per-app NSUserDefaults 容器化）
 
-// roothide PSListController.h 未公开声明 setPreferenceValue:forSpecifier:，
+// ⚠️ roothide 的 PSListController.h 未公开声明 setPreferenceValue:forSpecifier:，
 // 但 PreferenceLoader 运行时确实实现该方法；补前向声明让 [super setPreferenceValue:...]
-// 通过 -Werror 编译（否则 25c47cf 编译失败、不出 .deb）。
+// 通过 -Werror 编译。否则 25c47cf 会因 "no visible @interface declares the selector" 编译失败、不出 .deb。
 @interface PSListController (ObackSetPrefForward)
 - (void)setPreferenceValue:(id)value forSpecifier:(PSSpecifier *)specifier;
 @end
@@ -52,6 +52,24 @@ static NSDictionary *_obSliderUnits(void) {
     [super setPreferenceValue:value forSpecifier:specifier];
     NSString *key = [specifier propertyForKey:@"key"];
     if (key) oback_setGlobalPref(key, value);
+}
+
+// 兜底镜像：每次打开设置页，把各开关/滑块的当前值从「设置」App 自身容器(suite)同步到
+// 跨 App 共享全局文件。roothide 下标准 cell 的写入经 NSUserDefaults(suiteName:) 落「设置」App
+// 容器副本，tweak 注入其它 App 读的是全局文件（ObackPreferences._mergedPrefs 优先全局）；
+// 若 PreferenceLoader 不回调 setPreferenceValue:（部分 roothide 版本），仅靠本兜底即可让
+// 「设置」与「tweak」命中同一物理文件，避免「开关拨了但 tweak 读不到（恒为默认 NO → 不写日志）」。
+// 配合 setPreferenceValue: 的实时镜像，覆盖「回调被调用」与「不被调用」两种情形。
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    if (!_specifiers) [self specifiers];
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:@"com.zlhkf.oback"];   // ARC bundle：不用 autorelease（会编译失败）
+    for (PSSpecifier *spec in _specifiers) {
+        NSString *key = [spec propertyForKey:@"key"];
+        if (!key) continue;
+        id val = [d objectForKey:key];
+        if (val) oback_setGlobalPref(key, val);   // 仅镜像有显式值的 key；nil 跳过，避免清掉未设置项的默认
+    }
 }
 
 - (NSArray *)specifiers {
