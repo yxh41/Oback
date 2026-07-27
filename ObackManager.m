@@ -699,8 +699,19 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // 右缘固定走自定义镜像转场（ObackAnimator + self.interactive 手动 scrub），不走方案A 系统原生
     // handleNavigationTransition:（左缘语义，右缘负向位移被反 scrub → 触发不稳）。右缘改由
     // triggerTransitionInWindow 调 popViewControllerAnimated: 触发自定义交互转场。
+    // 实验 nav 视差：navParallaxEnabled 时左缘不抢跑系统原生 handleNavigationTransition:
+    // （该入口会强制走系统 _UINavigationInteractiveTransition，忽略自定义 interactionController →
+    // self.interactive 空转、视差无效）。改由首次横拖 triggerTransitionInWindow 触发自定义
+    // popViewControllerAnimated:（ObackNavDelegate 返回 ObackAnimator + self.interactive 接管 scrub，同右缘节奏）。
     if (self.currentParallaxToView && self.currentEdge != ObackEdgeRight) {
-        [self driveSystemNavPopBeginWithPan:pan window:win];
+        if (![ObackPreferences navParallaxEnabled]) {
+            [self driveSystemNavPopBeginWithPan:pan window:win];   // 方案A 系统原生交互 pop
+        } else {
+            // 跳过系统原生抢跑：重置探测标记，避免上次手势残留（driveSystemNavPopBeginWithPan 内会重置，此分支跳过它）
+            _navPopProbeFailed = NO;
+            _navPopProbed = NO;
+            OBLog(@"beginTransition: nav 视差实验模式，延迟自定义 pop 到首次横拖");
+        }
     }
 
     CGPoint loc = [pan locationInView:win];
@@ -749,11 +760,16 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
             // handleNavigationTransition:）。方向由 OBApplyParallax 的 edge 分支处理，正确无误。
             OBLog(@"trigger: nav pop 右缘自定义镜像转场，popViewControllerAnimated");
             [nav popViewControllerAnimated:YES];
-        } else if (self.interacting) {
+        } else if (self.interacting && ![ObackPreferences navParallaxEnabled]) {
             // 方案 A：交互 pop 已在 beginTransition 通过 handleNavigationTransition: 启动，
             // 此处不再调用 popViewControllerAnimated:（否则会触发第二次转场/黑屏）。
             OBLog(@"trigger: nav pop 已启动(系统原生交互)，忽略重复 popViewControllerAnimated");
         } else {
+            // 自定义 nav 视差(实验) 或 非交互兜底：真正触发 pop，由 nav delegate(ObackNavDelegate)
+            // 返回 ObackAnimator(parallaxToView=YES) + interactionController 返回 self.interactive 接管 scrub。
+            OBLog(@"trigger: nav pop 自定义视差/兜底，popViewControllerAnimated");
+            [nav popViewControllerAnimated:YES];
+        }
             // 非交互兜底（快滑零位移：endTransition 先把 interacting 置 NO 再走此路径）
             [nav popViewControllerAnimated:YES];
         }
@@ -857,7 +873,9 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // _navPopProbeFailed 恒为 NO、微信等自定义 nav 永远走方案A 而失效。现改用 _navPopProbed 单独门控，
     // 确保首次横向拖动必跑一次。标准 nav → interactive=YES 继续方案A 跟手；微信等自定义 nav →
     // 永不 interactive，当场切非交互 popViewControllerAnimated:（永不失效，代价不跟手）。
-    if (self.currentParallaxToView && self.currentEdge != ObackEdgeRight && !_navPopProbed) {
+    // 探测仅用于方案A 识别微信等自定义 nav（系统原生交互转场能否启动）。nav 视差实验走自定义转场，
+    // 其 transitionCoordinator 可能 interactive=NO → 误判 _navPopProbeFailed → 非交互重复 pop + 冲突，故跳过。
+    if (self.currentParallaxToView && self.currentEdge != ObackEdgeRight && !_navPopProbed && ![ObackPreferences navParallaxEnabled]) {
         _navPopProbed = YES;
         if (!_navPopProbeFailed) {
             UINavigationController *navP = nil;
