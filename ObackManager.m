@@ -228,6 +228,7 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
                                  // 驱动 handleNavigationTransition: 用（assign，由 nav 内部持有，转场期间有效）
     BOOL   _navPopProbeFailed;   // 运行时探测: 方案A 系统交互转场未启动(自定义nav不配合)→ YES, 已切非交互 pop
     BOOL   _navPopProbed;        // 运行时探测门控: 独立于 _transitionTriggered，确保左缘 nav 首次横拖必探测一次
+    UIGestureRecognizer *_simulOpponent; // 同时识别冲突: 左缘接管型nav场景下记下的对手pan(assign,借用系统持有), beginTransition 里取消以独占返回
 }
 
 + (instancetype)shared {
@@ -823,6 +824,11 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     ObackParams *p = [ObackPreferences params];
     self.interactive = [[[ObackInteractiveTransition alloc] initWithEdge:self.currentEdge params:p] autorelease];
     self.interacting = YES;
+    // 同时识别场景下取消对手(微信朋友圈内部 pan),确保 Oback 左缘 rightSimplePop 独占返回、杜绝双返回
+    if (_simulOpponent) {
+        [_simulOpponent setState:UIGestureRecognizerStateCancelled];
+        _simulOpponent = nil;
+    }
     _transitionTriggered = NO;
 
     // 方案 A：nav pop 改为驱动系统原生交互 pop（根除自定义转场 reparent toView 导致的空白/损坏）。
@@ -964,6 +970,29 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
         return NO;   // 接管型 nav：不让步，Oback 左缘独占接管（与右缘一致）
     }
     return YES;                                   // 同边（左）边缘手势：我们的 pan 让步于对手（单层返回，杜绝双触发）
+}
+
+// 同时识别（攻克朋友圈左缘被内部 pan 挤掉）：微信朋友圈(WCTimeLineViewController)内部挂了一个
+// 非屏幕边缘的普通 UIPanGestureRecognizer(微信自有横滑/返回实现)。shouldRequireFailureOf 第 941 行
+// 因对手非边缘手势直接 return NO(不建立失败依赖)；而本类未实现 shouldRecognizeSimultaneouslyWith
+// → 系统默认不允许同时识别 → 微信内部 pan 先 Began → 我们的左缘 pan 被判 Failed → 不进 beginTransition
+// → 胶囊显示(shouldBegin=YES)却无法返回。右缘朋友圈无此冲突(右侧无内部 pan)故正常。
+// 修复：仅对「左缘 + 接管型 nav(微信类)」返回 YES 允许同时识别，并在本 pan Began 时取消对手(_simulOpponent)
+// 以独占返回；标准 nav 与其他边保持默认(不影响现有让步/右缘独占逻辑)。
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g
+shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
+    if (g == other || other == nil) return NO;
+    if (![g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return NO;
+    UIScreenEdgePanGestureRecognizer *mg = (UIScreenEdgePanGestureRecognizer *)g;
+    if (!(mg.edges & UIRectEdgeLeft)) return NO;           // 仅左缘需要(右缘/标准 nav 无此冲突)
+    UIResponder *mnr = mg.view.nextResponder;
+    if (![mnr isKindOfClass:[UINavigationController class]]) return NO;
+    UINavigationController *mnav = (UINavigationController *)mnr;
+    if ([self _navPopShouldDriveSystemNav:mnav]) return NO; // 标准 nav 不动(让步逻辑已够)
+    _simulOpponent = other;                                // 记下对手, beginTransition 里取消它达成独占
+    OBLog(@"simultaneously: 左缘接管型nav(%@)允许与<%@:0x%p>同时识别",
+          NSStringFromClass([mnav class]), NSStringFromClass([other class]), other);
+    return YES;
 }
 
 - (void)updateTransition:(UIPanGestureRecognizer *)pan {
