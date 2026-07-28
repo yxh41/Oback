@@ -1120,6 +1120,12 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 
 - (void)endTransition:(UIPanGestureRecognizer *)pan {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(dismissIndicatorSafety) object:nil];
+    // [2026-07-28 崩溃修复] 收尾即清 _simulOpponent：该指针为 assign(未 retain)，
+    // 仅在 beginTransition 里取消对手用一次。若本次手势识别阶段曾记下对手(微信内部 pan/WKWebView pan)，
+    // 而本次中途被取消(未进 beginTransition)或走完 endTransition，对手 VC(如文章 WKWebView) pop 后
+    // 其手势随之释放 → 指针悬空；下一轮 beginTransition 再向悬空指针发 setState: 即 EXC_BAD_ACCESS。
+    // 故每个手势生命周期结束(含 !interacting 早退)都先清零，杜绝"第一次正常、第二次崩溃"的悬空崩溃。
+    _simulOpponent = nil;
     if (!self.interacting) return;
     UIWindow *win = [self _windowForPan:pan];
     CGFloat w = win.bounds.size.width;
@@ -1350,6 +1356,9 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 // 手势意外失败(Failed/超时等)时的紧急清理：取消转场+消除胶囊，防止残留
 - (void)abortTransition:(UIPanGestureRecognizer *)pan {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(dismissIndicatorSafety) object:nil];
+    // [2026-07-28 崩溃修复] 同 endTransition：手势失败/被取消时也清 _simulOpponent，
+    // 避免对手手势释放后悬空指针被下一轮 beginTransition 误用导致崩溃。
+    _simulOpponent = nil;
     // 手势意外失败（无明确释放速度）：清速度为 0，让取消动画走温和回弹（不继承动量）
     self.releaseVelocity = 0;
     self.releasePercent  = 0;
