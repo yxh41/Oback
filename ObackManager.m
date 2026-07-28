@@ -124,7 +124,7 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
                 CGFloat w = self.bounds.size.width;
                 CGFloat h = self.bounds.size.height;
                 // 渐变层 2 倍宽、含两个完全相同周期；平移刚好一个周期(w)后首尾一致 → 单向无缝流动。
-                // 每个周期内排布 4 个窄而柔的高光峰（全层 8 个），构成"细碎流光"而非单条扫光带。
+                // 每个周期仅 2 个宽柔峰（全层 4 个），峰更宽更淡、彼此拉开距离 → 光缓缓流过而非碎点闪，即舒缓流光。
                 CAGradientLayer *g = [CAGradientLayer layer];
                 g.frame = CGRectMake(0, 0, w * 2, h);
                 g.cornerRadius = 16;
@@ -133,35 +133,25 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
                 UIColor *cBase = [UIColor colorWithRed:0.30 green:0.58 blue:0.98 alpha:1.0]; // 基色（偏亮蓝，提亮以缩小与高光差距）
                 UIColor *cMid  = [UIColor colorWithRed:0.42 green:0.68 blue:1.0  alpha:1.0]; // 过渡（中蓝）
                 UIColor *cHi   = [UIColor colorWithRed:0.53 green:0.78 blue:1.0  alpha:1.0]; // 高光（仅略亮的蓝，绝非白）
-                // 33 个 stop：基,中,高,中,基 重复成 8 个窄柔峰，峰间用 base 留缝 → 细碎闪烁流动。
-                g.colors = @[ (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor,
-                              (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor,
-                              (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor,
-                              (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor,
-                              (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor,
-                              (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor,
-                              (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor,
-                              (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor,
-                              (__bridge id)cBase.CGColor ];
-                g.locations = @[ @0.0,     @0.03125, @0.0625,  @0.09375,
-                              @0.125,   @0.15625, @0.1875,  @0.21875,
-                              @0.25,    @0.28125, @0.3125,  @0.34375,
-                              @0.375,   @0.40625, @0.4375,  @0.46875,
-                              @0.5,     @0.53125, @0.5625,  @0.59375,
-                              @0.625,   @0.65625, @0.6875,  @0.71875,
-                              @0.75,    @0.78125, @0.8125,  @0.84375,
-                              @0.875,   @0.90625, @0.9375,  @0.96875,
-                              @1.0 ];
+                // 17 个 stop：每个周期仅 2 个宽柔峰（全层 4 个），峰间用更宽 base 留缝 → 舒缓流光（缓缓流过，非碎点闪）。
+                g.colors = @[ (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cBase.CGColor,
+                              (__bridge id)cMid.CGColor,   (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cBase.CGColor,
+                              (__bridge id)cMid.CGColor,   (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cBase.CGColor,
+                              (__bridge id)cMid.CGColor,   (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cBase.CGColor ];
+                g.locations = @[ @0.0,     @0.0625,  @0.125,   @0.1875,  @0.25,
+                              @0.3125,  @0.375,   @0.4375,  @0.5,
+                              @0.5625,  @0.625,   @0.6875,  @0.75,
+                              @0.8125,  @0.875,   @0.9375,  @1.0 ];
                 g.startPoint = CGPointMake(0, 0);
                 g.endPoint   = CGPointMake(1, 0);
                 [self.layer insertSublayer:g atIndex:0];
                 self.layer.masksToBounds = YES;   // 裁剪到圆角胶囊内（本特效无外阴影，可安全裁剪）
                 _gradientLayer = g;
-                // 连续向左平移一个周期，linear 无限循环 = 细碎流光（4.6s，更慢更柔、宁静不躁）
+                // 连续向左平移一个周期，linear 无限循环 = 舒缓流光（5.5s，更慢更宽、宁静柔和）
                 CABasicAnimation *flow = [CABasicAnimation animationWithKeyPath:@"transform.translation.x"];
                 flow.fromValue = @0;
                 flow.toValue   = @(-w);
-                flow.duration = 4.6;
+                flow.duration = 5.5;
                 flow.repeatCount = HUGE_VALF;
                 flow.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
                 [g addAnimation:flow forKey:@"obFlow"];
