@@ -119,32 +119,37 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
                 [self.layer addAnimation:pulse forKey:@"obNeonPulse"];
                 break;
             }
-            case ObackCapsuleEffectGradient: {       // 流光：无缝连续流动，根除来回硬扫动
+            case ObackCapsuleEffectGradient: {       // 流光：同色系柔和流光，根除硬界线与生硬感
                 self.backgroundColor = [UIColor clearColor];
                 CGFloat w = self.bounds.size.width;
                 CGFloat h = self.bounds.size.height;
-                // 渐变层做成 2 倍宽、含两个完全相同的周期；平移刚好一个周期(w)后首尾完全一致
-                // → 无限循环是「连续单向流动」，无任何回弹/跳变（旧版 start/end 双动画 autoreverse 才会硬倒回）。
+                // 渐变层 2 倍宽、含两个完全相同周期；平移刚好一个周期(w)后首尾一致 → 单向无缝流动。
                 CAGradientLayer *g = [CAGradientLayer layer];
                 g.frame = CGRectMake(0, 0, w * 2, h);
                 g.cornerRadius = 16;
-                UIColor *cBase = [UIColor colorWithRed:0.30 green:0.66 blue:1.0 alpha:1.0]; // 流光主色（天蓝）
-                UIColor *cHi   = [UIColor colorWithRed:0.92 green:0.97 blue:1.0 alpha:1.0]; // 高光（近白）
-                // 两个周期：[主,高,主,高,主]，周期 = 0.5 层宽 = w；平移 w 即无缝
-                g.colors = @[ (__bridge id)cBase.CGColor, (__bridge id)cHi.CGColor,
-                              (__bridge id)cBase.CGColor, (__bridge id)cHi.CGColor,
+                // 同色系柔和渐变：基色深蓝 → 高光浅蓝（均在蓝家族，非近白）→ 对比度低，
+                // 蓝白硬界线消失；高光只是"光掠过"的柔光，而非一条生硬亮带。
+                UIColor *cBase = [UIColor colorWithRed:0.18 green:0.50 blue:0.95 alpha:1.0]; // 基色（蓝）
+                UIColor *cMid  = [UIColor colorWithRed:0.38 green:0.70 blue:1.0  alpha:1.0]; // 过渡（中蓝）
+                UIColor *cHi   = [UIColor colorWithRed:0.60 green:0.84 blue:1.0  alpha:1.0]; // 高光（浅蓝，同色系柔和）
+                // 单层周期 = 0.5 层宽；用 9 个细分 stop（基,中,高,中,基 ×2）把高光峰做成圆润钟形，
+                // 边界天然柔化、无三角尖峰的硬转折。
+                g.colors = @[ (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor,
+                              (__bridge id)cHi.CGColor,   (__bridge id)cMid.CGColor,
+                              (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor,
+                              (__bridge id)cHi.CGColor,   (__bridge id)cMid.CGColor,
                               (__bridge id)cBase.CGColor ];
-                g.locations = @[ @0.0, @0.25, @0.5, @0.75, @1.0 ];
+                g.locations = @[ @0.0, @0.125, @0.25, @0.375, @0.5, @0.625, @0.75, @0.875, @1.0 ];
                 g.startPoint = CGPointMake(0, 0);
                 g.endPoint   = CGPointMake(1, 0);
                 [self.layer insertSublayer:g atIndex:0];
                 self.layer.masksToBounds = YES;   // 裁剪到圆角胶囊内（本特效无外阴影，可安全裁剪）
                 _gradientLayer = g;
-                // 连续向左平移一个周期，linear 无限循环 = 自然流光
+                // 连续向左平移一个周期，linear 无限循环 = 自然流光（稍慢 4.2s，更宁静柔和）
                 CABasicAnimation *flow = [CABasicAnimation animationWithKeyPath:@"transform.translation.x"];
                 flow.fromValue = @0;
                 flow.toValue   = @(-w);
-                flow.duration = 3.2;
+                flow.duration = 4.2;
                 flow.repeatCount = HUGE_VALF;
                 flow.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
                 [g addAnimation:flow forKey:@"obFlow"];
