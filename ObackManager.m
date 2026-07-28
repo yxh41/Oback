@@ -983,6 +983,7 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
 shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
     if (g == other || other == nil) return NO;
     if (other.delegate == self) return NO;   // 自身另一个 pan(左/右/modal): 不与之同时识别, 更不记录为对手(否则 beginTransition 会误取消自身 → 右缘被取消 abort)
+    if ([other isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return NO; // 同边屏幕边缘手势(微信自带左边缘返回)交 shouldBeRequiredToFailBy 压制, 不在此同时识别(否则双 Began → 双返回)
     if (![g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return NO;
     UIScreenEdgePanGestureRecognizer *mg = (UIScreenEdgePanGestureRecognizer *)g;
     if (!(mg.edges & UIRectEdgeLeft)) return NO;           // 仅左缘需要(右缘/标准 nav 无此冲突)
@@ -994,6 +995,33 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
     OBLog(@"simultaneously: 左缘接管型nav(%@)允许与<%@:0x%p>同时识别",
           NSStringFromClass([mnav class]), NSStringFromClass([other class]), other);
     return YES;
+}
+
+// 压制同边屏幕边缘手势(微信自带左边缘返回)失败于我们的左缘 pan：根治聊天界面左缘双返回。
+// 微信聊天页自带左边缘返回能正常返回；此前 shouldRecognizeSimultaneouslyWith 把同边屏幕边缘手势
+// 也当作『内部 pan』允许同时识别 → 我们的左缘 pan 与微信自带左边缘手势都 Began → 各 pop 一次 → 双返回
+// (聊天界面-分组列表-主界面一次弹两层，用户微信分组插件使栈多一层更易暴露)。此处让微信自带左边缘手势
+// 必须等我们的左缘 pan 失败才认：用户从边缘滑→我们的 pan 接管→微信自带失败→仅 Oback 单返回；
+// 用户不滑边缘→我们的 pan 失败→微信自带正常返回(单返回)。朋友圈场景微信自带本就不返回，失败于我们
+// (我们接管)无副作用。仅作用于左缘 + 接管型 nav(微信类)，其他边/标准 nav 保持默认，不影响右缘独占与
+// 系统/插件单返回。
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g
+shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
+    if (g == other || other == nil) return NO;
+    if (other.delegate == self) return NO;   // 自身另一个 pan：不互相要求失败(防死锁/互消)
+    if (![g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return NO;
+    UIScreenEdgePanGestureRecognizer *mg = (UIScreenEdgePanGestureRecognizer *)g;
+    if (!(mg.edges & UIRectEdgeLeft)) return NO;            // 仅左缘接管型需要
+    if (![other isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return NO; // 仅压制同边屏幕边缘手势(微信自带左边缘返回)
+    UIScreenEdgePanGestureRecognizer *og = (UIScreenEdgePanGestureRecognizer *)other;
+    if ((mg.edges & og.edges) == 0) return NO;             // 不同边不干涉
+    UIResponder *mnr = mg.view.nextResponder;
+    if (![mnr isKindOfClass:[UINavigationController class]]) return NO;
+    UINavigationController *mnav = (UINavigationController *)mnr;
+    if ([self _navPopShouldDriveSystemNav:mnav]) return NO; // 标准 nav 不动(让步逻辑已够)
+    OBLog(@"shouldBeRequiredToFailBy: 左缘接管型nav(%@)压制同边屏幕边缘手势<%@:0x%p>(单返回)",
+          NSStringFromClass([mnav class]), NSStringFromClass([other class]), other);
+    return YES;   // 对手必须等我们的左缘 pan 失败才认 → 我们优先, 单返回
 }
 
 - (void)updateTransition:(UIPanGestureRecognizer *)pan {
