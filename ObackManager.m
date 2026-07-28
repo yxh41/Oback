@@ -128,10 +128,11 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
                 CAGradientLayer *g = [CAGradientLayer layer];
                 g.frame = CGRectMake(0, 0, w * 2, h);
                 g.cornerRadius = 16;
-                // 同色系：基色深蓝 → 中蓝 → 浅蓝高光，均在蓝家族、低对比 → 无生硬蓝白界线。
-                UIColor *cBase = [UIColor colorWithRed:0.18 green:0.50 blue:0.95 alpha:1.0]; // 基色（蓝）
-                UIColor *cMid  = [UIColor colorWithRed:0.39 green:0.71 blue:1.0  alpha:1.0]; // 过渡（中蓝）
-                UIColor *cHi   = [UIColor colorWithRed:0.62 green:0.85 blue:1.0  alpha:1.0]; // 高光（浅蓝，同色系柔和）
+                // 同色系、极低对比：基色偏亮蓝 → 中蓝 → 仅略亮的高光，整体是"同一蓝在明度上微妙起伏"，
+                // 高光绝非白、与基色差距砍半 → 不再有亮块扫过暗底的生硬感，过渡如呼吸般自然。
+                UIColor *cBase = [UIColor colorWithRed:0.30 green:0.58 blue:0.98 alpha:1.0]; // 基色（偏亮蓝，提亮以缩小与高光差距）
+                UIColor *cMid  = [UIColor colorWithRed:0.42 green:0.68 blue:1.0  alpha:1.0]; // 过渡（中蓝）
+                UIColor *cHi   = [UIColor colorWithRed:0.53 green:0.78 blue:1.0  alpha:1.0]; // 高光（仅略亮的蓝，绝非白）
                 // 33 个 stop：基,中,高,中,基 重复成 8 个窄柔峰，峰间用 base 留缝 → 细碎闪烁流动。
                 g.colors = @[ (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor,
                               (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor,
@@ -156,11 +157,11 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
                 [self.layer insertSublayer:g atIndex:0];
                 self.layer.masksToBounds = YES;   // 裁剪到圆角胶囊内（本特效无外阴影，可安全裁剪）
                 _gradientLayer = g;
-                // 连续向左平移一个周期，linear 无限循环 = 细碎流光（4.0s，灵动不躁）
+                // 连续向左平移一个周期，linear 无限循环 = 细碎流光（4.6s，更慢更柔、宁静不躁）
                 CABasicAnimation *flow = [CABasicAnimation animationWithKeyPath:@"transform.translation.x"];
                 flow.fromValue = @0;
                 flow.toValue   = @(-w);
-                flow.duration = 4.0;
+                flow.duration = 4.6;
                 flow.repeatCount = HUGE_VALF;
                 flow.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
                 [g addAnimation:flow forKey:@"obFlow"];
