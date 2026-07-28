@@ -2,20 +2,22 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>entry</key>
-    <dict>
-        <key>bundle</key>
-        <string>ObackSettings</string>
-        <key>cell</key>
-        <string>PSLinkCell</string>
-        <key>detail</key>
-        <string>ObackSettingsController</string>
-        <key>isController</key>
-        <true/>
-        <key>label</key>
-        <string>Oback</string>
-        <key>footerText</key>
-        <string>OPPO 风格边缘手势返回（roothide / iOS 16.4.1）</string>
-    </dict>
+	<key>entry</key>
+	<dict>
+		<key>bundle</key>
+		<string>ObackSettings</string>
+		<key>cell</key>
+		<string>PSLinkCell</string>
+		<key>detail</key>
+		<string>ObackSettingsController</string>
+		<key>footerText</key>
+		<string>OPPO 风格边缘手势返回（roothide / iOS 16.4.1）</string>
+		<key>icon</key>
+		<string>icon</string>
+		<key>isController</key>
+		<true/>
+		<key>label</key>
+		<string>Oback</string>
+	</dict>
 </dict>
 </plist>
