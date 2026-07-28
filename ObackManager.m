@@ -237,6 +237,7 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
                                  // 驱动 handleNavigationTransition: 用（assign，由 nav 内部持有，转场期间有效）
     BOOL   _navPopProbeFailed;   // 运行时探测: 方案A 系统交互转场未启动(自定义nav不配合)→ YES, 已切非交互 pop
     BOOL   _navPopProbed;        // 运行时探测门控: 独立于 _transitionTriggered，确保左缘 nav 首次横拖必探测一次
+    BOOL   _leftEdgeTakeoverActive; // 左缘当前作用于「接管型 nav」(微信类)：供 shouldRequireFailureOf 不让步，Oback 独占接管
 }
 
 + (instancetype)shared {
@@ -647,6 +648,7 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
 // 只在"落在边缘 + 可返回 + 不在黑名单"时，手势才接管，否则放行给 App 自身
 - (BOOL)gestureRecognizerShouldBegin:(UIScreenEdgePanGestureRecognizer *)pan {
     if (self.interacting) { OBLog(@"shouldBegin=NO (已在交互中)"); return NO; }
+    _leftEdgeTakeoverActive = NO;   // 每次手势判定先重置；左缘接管型分支(下方)按需置位，杜绝跨手势残留
     BOOL allowed = [ObackPreferences isAllowed];
     if (!allowed) { OBLog(@"shouldBegin=NO (isAllowed=NO, bid=%@)", NSBundle.mainBundle.bundleIdentifier); return NO; }
 
@@ -725,8 +727,10 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
             if (![self _navPopShouldDriveSystemNav:nav]) {
                 self.currentParallaxToView = NO;
                 self.rightSimplePop = YES;   // 复用右缘松手提交机制，左缘微信与右缘表现统一
+                _leftEdgeTakeoverActive = YES; // 标记左缘接管型 nav：shouldRequireFailureOf 不让步，Oback 独占（根治被微信自带左缘手势取消）
             } else {
                 self.currentParallaxToView = YES;   // 标准 nav：系统原生交互转场(跟手)
+                _leftEdgeTakeoverActive = NO;
             }
         }
     } else {
@@ -948,12 +952,15 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     // 我们的右缘 pan（单向：对手无法否决，无死锁）。左缘仍保留让步（保微信等左缘双返回修复）。
     if (mg.edges & UIRectEdgeRight) return NO;   // 右缘：永不向对手让步（右缘返回独占）
     // 左缘：默认向同边对手左边缘手势让步，避免 Oback + 系统/App 左边缘手势双返回。
-    // 例外：本左缘 pan 所属 nav 为「我们接管型」(_navPopShouldDriveSystemNav=NO，典型微信自定义 nav)——
-    // 其自带/原生左边缘返回在朋友圈等页识别了却不真正返回（自定义容器层级不标准），若让步会让 Oback
-    // 左缘被取消而对手也不返回→双输。此时不让步，由 Oback 左缘 rightSimplePop 独占接管（与右缘一致）。
-    UINavigationController *gNav = objc_getAssociatedObject(mg, kObackNavKey);
-    if (gNav && ![self _navPopShouldDriveSystemNav:gNav]) {
-        OBLog(@"shouldRequireFailure: 左缘接管型nav(%@)不让步，Oback独占", NSStringFromClass([gNav class]));
+    // 例外：本左缘 pan 当前作用于「接管型 nav」(_leftEdgeTakeoverActive，由 shouldBegin 左缘分支在判定
+    // _navPopShouldDriveSystemNav=NO 时置位，典型微信自定义 nav)——其自带/原生左边缘返回在朋友圈等页
+    // 识别了却不真正返回（自定义容器层级不标准），若让步会让 Oback 左缘被取消而对手也不返回→双输。
+    // 此时不让步，由 Oback 左缘 rightSimplePop 独占接管（与右缘一致）。
+    // 注意：之前曾用 objc_getAssociatedObject(mg, kObackNavKey) 在此判定，但微信 nav pan 经 swizzle 自动
+    // 挂载路径未必可靠绑定该 key，导致 gNav 取空、分支永不命中、左缘仍被取消（见 oback_debug(58).log）。
+    // 现改为读 shouldBegin 已可靠标记的 ivar，彻底绕开绑定时机不确定性。
+    if (_leftEdgeTakeoverActive) {
+        OBLog(@"shouldRequireFailure: 左缘接管型nav不让步，Oback独占接管");
         return NO;
     }
     return YES;                                   // 同边（左）边缘手势：我们的 pan 让步于对手（单层返回，杜绝双触发）
