@@ -703,7 +703,15 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
             self.currentParallaxToView = NO;
             self.rightSimplePop = YES;   // 右缘：非交互 pop（松手提交才 popViewControllerAnimated:，零空白/不破坏导航栏/不进自定义转场）
         } else {
-            self.currentParallaxToView = YES;   // nav pop（左缘：系统原生交互转场）
+            // 左缘：标准 nav 走方案A(系统原生交互转场, 跟手)；微信等自定义 nav(方案A 在微信不渲染
+            // 转场 → 旧非交互兜底依赖脆弱运行时探测且首微拖即弹) 统一改走 rightSimplePop 同款
+            // 非交互 pop(松手提交, 与右缘行为完全一致, 受灵敏度滑块控制, 无脆弱探测依赖)。
+            if (![self _navPopShouldDriveSystemNav:nav]) {
+                self.currentParallaxToView = NO;
+                self.rightSimplePop = YES;   // 复用右缘松手提交机制，左缘微信与右缘表现统一
+            } else {
+                self.currentParallaxToView = YES;   // 标准 nav：系统原生交互转场(跟手)
+            }
         }
     } else {
         if (top.presentingViewController != nil) {
