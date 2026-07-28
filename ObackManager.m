@@ -228,7 +228,7 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
                                  // 驱动 handleNavigationTransition: 用（assign，由 nav 内部持有，转场期间有效）
     BOOL   _navPopProbeFailed;   // 运行时探测: 方案A 系统交互转场未启动(自定义nav不配合)→ YES, 已切非交互 pop
     BOOL   _navPopProbed;        // 运行时探测门控: 独立于 _transitionTriggered，确保左缘 nav 首次横拖必探测一次
-    UIGestureRecognizer *_simulOpponent; // 同时识别冲突: 左缘接管型nav场景下记下的对手pan(assign,借用系统持有), beginTransition 里取消以独占返回
+    UIGestureRecognizer *_simulOpponent; // 同时识别冲突: 左缘接管型nav场景下记下的对手pan(retain 自己持有, 防 pop 文章后对手随 VC/WKWebView 释放成悬空指针 → beginTransition 解引用 EXC_BAD_ACCESS)。仅 beginTransition 取消一次, endTransition/abortTransition 收尾 release+nil。
 }
 
 + (instancetype)shared {
@@ -827,7 +827,7 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     // 同时识别场景下取消对手(微信朋友圈内部 pan),确保 Oback 左缘 rightSimplePop 独占返回、杜绝双返回
     if (_simulOpponent) {
         [_simulOpponent setState:UIGestureRecognizerStateCancelled];
-        _simulOpponent = nil;
+        [_simulOpponent release]; _simulOpponent = nil;
     }
     _transitionTriggered = NO;
 
@@ -991,7 +991,7 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
     if (![mnr isKindOfClass:[UINavigationController class]]) return NO;
     UINavigationController *mnav = (UINavigationController *)mnr;
     if ([self _navPopShouldDriveSystemNav:mnav]) return NO; // 标准 nav 不动(让步逻辑已够)
-    _simulOpponent = other;                                // 记下对手, beginTransition 里取消它达成独占
+    [_simulOpponent release]; _simulOpponent = [other retain]; // retain 持有对手: 即使文章页 pop 后 WKWebView 释放, 手势对象仍存活(view 被置 nil), beginTransition 取消时不会解引用悬空指针(ef16030 仅 endTransition 清零不够——系统会在收尾后再次回调本方法重设指针)
     OBLog(@"simultaneously: 左缘接管型nav(%@)允许与<%@:0x%p>同时识别",
           NSStringFromClass([mnav class]), NSStringFromClass([other class]), other);
     return YES;
@@ -1120,12 +1120,12 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 
 - (void)endTransition:(UIPanGestureRecognizer *)pan {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(dismissIndicatorSafety) object:nil];
-    // [2026-07-28 崩溃修复] 收尾即清 _simulOpponent：该指针为 assign(未 retain)，
-    // 仅在 beginTransition 里取消对手用一次。若本次手势识别阶段曾记下对手(微信内部 pan/WKWebView pan)，
-    // 而本次中途被取消(未进 beginTransition)或走完 endTransition，对手 VC(如文章 WKWebView) pop 后
-    // 其手势随之释放 → 指针悬空；下一轮 beginTransition 再向悬空指针发 setState: 即 EXC_BAD_ACCESS。
-    // 故每个手势生命周期结束(含 !interacting 早退)都先清零，杜绝"第一次正常、第二次崩溃"的悬空崩溃。
-    _simulOpponent = nil;
+    // [2026-07-28 崩溃修复] 收尾 release+nil _simulOpponent。该指针已改为 retain 自持(994 行赋值处)，
+    // 故 pop 文章后对手手势对象不会被释放(仅 view 置 nil)，beginTransition 取消时安全；但每轮仍须在
+    // 生命周期结束处 release(交还所有权)以防泄漏。注:ef16030 原仅在 endTransition/abortTransition 清零
+    // 不够——系统会在 endTransition 之后再次回调 shouldRecognizeSimultaneouslyWith 把指针重设回即将释放的
+    // WKWebView 手势；retain 语义使"重设后的指针"也始终有效，从根上杜绝"第一次正常、第二次崩溃"的悬空崩溃。
+    [_simulOpponent release]; _simulOpponent = nil;
     if (!self.interacting) return;
     UIWindow *win = [self _windowForPan:pan];
     CGFloat w = win.bounds.size.width;
@@ -1356,9 +1356,9 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 // 手势意外失败(Failed/超时等)时的紧急清理：取消转场+消除胶囊，防止残留
 - (void)abortTransition:(UIPanGestureRecognizer *)pan {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(dismissIndicatorSafety) object:nil];
-    // [2026-07-28 崩溃修复] 同 endTransition：手势失败/被取消时也清 _simulOpponent，
-    // 避免对手手势释放后悬空指针被下一轮 beginTransition 误用导致崩溃。
-    _simulOpponent = nil;
+    // [2026-07-28 崩溃修复] 同 endTransition：手势失败/被取消时 release+nil _simulOpponent
+    // (retain 自持语义下交还所有权，杜绝泄漏；同时保证下一轮不会解引用悬空指针)。
+    [_simulOpponent release]; _simulOpponent = nil;
     // 手势意外失败（无明确释放速度）：清速度为 0，让取消动画走温和回弹（不继承动量）
     self.releaseVelocity = 0;
     self.releasePercent  = 0;
