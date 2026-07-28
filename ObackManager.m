@@ -946,7 +946,16 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     // [2026-07-26 QQ 右缘修复] 右缘：Oback 必须独占返回（用户要"右缘返回"），不再向对手同边屏幕边缘
     // 手势让步。让步改由下方 _linkNavPopGesturesInWindow 对"对手手势"显式 requireGestureRecognizerToFail:
     // 我们的右缘 pan（单向：对手无法否决，无死锁）。左缘仍保留让步（保微信等左缘双返回修复）。
-    if (mg.edges & UIRectEdgeRight) return NO;
+    if (mg.edges & UIRectEdgeRight) return NO;   // 右缘：永不向对手让步（右缘返回独占）
+    // 左缘：默认向同边对手左边缘手势让步，避免 Oback + 系统/App 左边缘手势双返回。
+    // 例外：本左缘 pan 所属 nav 为「我们接管型」(_navPopShouldDriveSystemNav=NO，典型微信自定义 nav)——
+    // 其自带/原生左边缘返回在朋友圈等页识别了却不真正返回（自定义容器层级不标准），若让步会让 Oback
+    // 左缘被取消而对手也不返回→双输。此时不让步，由 Oback 左缘 rightSimplePop 独占接管（与右缘一致）。
+    UINavigationController *gNav = objc_getAssociatedObject(mg, kObackNavKey);
+    if (gNav && ![self _navPopShouldDriveSystemNav:gNav]) {
+        OBLog(@"shouldRequireFailure: 左缘接管型nav(%@)不让步，Oback独占", NSStringFromClass([gNav class]));
+        return NO;
+    }
     return YES;                                   // 同边（左）边缘手势：我们的 pan 让步于对手（单层返回，杜绝双触发）
 }
 
