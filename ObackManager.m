@@ -33,6 +33,7 @@ void OBLog(NSString *fmt, ...) {
     }
     // 同时进 syslog（可用 syslog 工具实时看）
     NSLog(@"%@", line);
+    [msg release];
 }
 
 #pragma mark - 仅识别横向的 pan（避免纵向滑动误触发返回）
@@ -51,32 +52,127 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 
 #pragma mark - 边缘方向指示胶囊（OPPO 风格：跟随手指、带方向箭头）
 
+typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
+    ObackCapsuleEffectClassic   = 0,   // 经典：白药丸 + 柔和阴影 + 深色箭头
+    ObackCapsuleEffectGlow      = 1,   // 发光：彩色外发光
+    ObackCapsuleEffectNeon      = 2,   // 霓虹：霓虹描边 + 强发光
+    ObackCapsuleEffectGradient  = 3,   // 流光：动态渐变填充
+    ObackCapsuleEffectFrosted   = 4,   // 毛玻璃：半透明磨砂
+    ObackCapsuleEffectBreathing = 5,   // 呼吸：跟随中轻微脉冲
+};
+
 @interface ObackEdgeIndicator : UIView
 - (instancetype)initWithEdge:(ObackEdge)edge;
+- (void)stopEffectAnimations;   // 收起时停掉渐变等循环动画，避免与淡出动画冲突/残留
+- (BOOL)isBreathing;            // 供 CADisplayLink 插值判断是否叠加呼吸脉冲
 @end
 
 @implementation ObackEdgeIndicator {
     ObackEdge _edge;
     CAShapeLayer *_chevron;
+    CAGradientLayer *_gradientLayer; // 流光特效：渐变填充层（弱引用，由 layer 树持有）
+    BOOL _breathing;                // 呼吸特效：在平滑插值里叠加正弦脉冲
 }
+
 - (instancetype)initWithEdge:(ObackEdge)edge {
     if (self = [super initWithFrame:CGRectMake(0, 0, 56, 32)]) {
         _edge = edge;
-        // 默认：白色半透明胶囊 + 柔和阴影
-        self.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.9];
+        // 默认（经典）外观先铺底，后续按特效覆盖
         self.layer.cornerRadius = 16;
+        self.userInteractionEnabled = NO;
+        self.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.9];
         self.layer.shadowColor = [UIColor blackColor].CGColor;
         self.layer.shadowOpacity = 0.2;
         self.layer.shadowRadius = 6;
         self.layer.shadowOffset = CGSizeZero;
-        self.userInteractionEnabled = NO;
 
-        // 方向 chevron（深色，保证在白底/暗底都可见）
+        // 读取设置项（跨 App 全局文件），决定胶囊特效；读取失败（极少）回落经典
+        NSInteger fx = ObackCapsuleEffectClassic;
+        @try { fx = [ObackPreferences capsuleEffect]; } @catch (NSException *e) { fx = ObackCapsuleEffectClassic; }
+
+        UIColor *glow = [UIColor colorWithRed:0.0 green:0.76 blue:1.0 alpha:1.0]; // 青蓝发光色（发光/霓虹共用）
+
+        switch (fx) {
+            case ObackCapsuleEffectGlow: {           // 发光：彩色外发光
+                self.layer.shadowColor = glow.CGColor;
+                self.layer.shadowOpacity = 0.6;
+                self.layer.shadowRadius = 14;
+                break;
+            }
+            case ObackCapsuleEffectNeon: {           // 霓虹：亮核 + 柔晕 + 微呼吸，模拟真实灯管
+                self.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.08];
+                // 灯管亮核：近白的高亮青，模拟霓虹管中心（而非一条生硬纯色描边）
+                self.layer.borderWidth = 1.5;
+                self.layer.borderColor = [UIColor colorWithRed:0.75 green:0.95 blue:1.0 alpha:1.0].CGColor;
+                // 外层柔晕：饱和青蓝，半径更大、半透明，靠脉冲缓动产生柔和流动
+                self.layer.shadowColor = glow.CGColor;
+                self.layer.shadowOpacity = 0.85;
+                self.layer.shadowRadius = 22;
+                // 微呼吸：发光强度在 0.55~0.95 间 ease 缓动，自然不刺眼（避免恒定强光的生硬感）
+                CABasicAnimation *pulse = [CABasicAnimation animationWithKeyPath:@"shadowOpacity"];
+                pulse.fromValue = @0.55;
+                pulse.toValue   = @0.95;
+                pulse.duration = 2.6;
+                pulse.repeatCount = HUGE_VALF;
+                pulse.autoreverses = YES;
+                pulse.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+                [self.layer addAnimation:pulse forKey:@"obNeonPulse"];
+                break;
+            }
+            case ObackCapsuleEffectGradient: {       // 流光：无缝连续流动，根除来回硬扫动
+                self.backgroundColor = [UIColor clearColor];
+                CGFloat w = self.bounds.size.width;
+                CGFloat h = self.bounds.size.height;
+                // 渐变层做成 2 倍宽、含两个完全相同的周期；平移刚好一个周期(w)后首尾完全一致
+                // → 无限循环是「连续单向流动」，无任何回弹/跳变（旧版 start/end 双动画 autoreverse 才会硬倒回）。
+                CAGradientLayer *g = [CAGradientLayer layer];
+                g.frame = CGRectMake(0, 0, w * 2, h);
+                g.cornerRadius = 16;
+                UIColor *cBase = [UIColor colorWithRed:0.30 green:0.66 blue:1.0 alpha:1.0]; // 流光主色（天蓝）
+                UIColor *cHi   = [UIColor colorWithRed:0.92 green:0.97 blue:1.0 alpha:1.0]; // 高光（近白）
+                // 两个周期：[主,高,主,高,主]，周期 = 0.5 层宽 = w；平移 w 即无缝
+                g.colors = @[ (__bridge id)cBase.CGColor, (__bridge id)cHi.CGColor,
+                              (__bridge id)cBase.CGColor, (__bridge id)cHi.CGColor,
+                              (__bridge id)cBase.CGColor ];
+                g.locations = @[ @0.0, @0.25, @0.5, @0.75, @1.0 ];
+                g.startPoint = CGPointMake(0, 0);
+                g.endPoint   = CGPointMake(1, 0);
+                [self.layer insertSublayer:g atIndex:0];
+                self.layer.masksToBounds = YES;   // 裁剪到圆角胶囊内（本特效无外阴影，可安全裁剪）
+                _gradientLayer = g;
+                // 连续向左平移一个周期，linear 无限循环 = 自然流光
+                CABasicAnimation *flow = [CABasicAnimation animationWithKeyPath:@"transform.translation.x"];
+                flow.fromValue = @0;
+                flow.toValue   = @(-w);
+                flow.duration = 3.2;
+                flow.repeatCount = HUGE_VALF;
+                flow.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+                [g addAnimation:flow forKey:@"obFlow"];
+                break;
+            }
+            case ObackCapsuleEffectFrosted: {        // 毛玻璃：半透明磨砂
+                self.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.5];
+                self.layer.borderWidth = 1.0;
+                self.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.6].CGColor;
+                self.layer.shadowColor = [UIColor blackColor].CGColor;
+                self.layer.shadowOpacity = 0.15;
+                self.layer.shadowRadius = 8;
+                break;
+            }
+            case ObackCapsuleEffectBreathing: {      // 呼吸：在插值里叠加脉冲（见 _obIndicatorTick:）
+                _breathing = YES;
+                break;
+            }
+            default: break;                          // 经典 / 未知 → 基础外观
+        }
+
+        // 方向 chevron（深色，保证在浅色药丸上可见；霓虹下改用发光色）
         _chevron = [CAShapeLayer layer];
         _chevron.lineWidth = 3.0;
         _chevron.lineCap = kCALineCapRound;
         _chevron.lineJoin = kCALineJoinRound;
-        _chevron.strokeColor = [UIColor colorWithWhite:0.25 alpha:1.0].CGColor;
+        _chevron.strokeColor = (fx == ObackCapsuleEffectNeon) ? glow.CGColor
+                                 : [UIColor colorWithWhite:0.25 alpha:1.0].CGColor;
         _chevron.fillColor = nil;
         CGFloat cx = 28, cy = 16;
         UIBezierPath *path = [UIBezierPath bezierPath];
@@ -94,6 +190,20 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     }
     return self;
 }
+
+- (void)stopEffectAnimations {
+    // 停掉流光循环动画（冻结在当前帧），保留渐变层本身，
+    // 避免收起淡出时胶囊「丢失身体」只剩箭头。层随视图 dealloc 自动释放。
+    if (_gradientLayer) {
+        [_gradientLayer removeAllAnimations];
+        _gradientLayer = nil;
+    }
+    // 同步停掉霓虹呼吸脉冲，避免淡出时残留发光动画
+    [self.layer removeAnimationForKey:@"obNeonPulse"];
+}
+
+- (BOOL)isBreathing { return _breathing; }
+
 @end
 
 @implementation ObackManager {
@@ -109,6 +219,8 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     ObackAnimator *_watchAnimator; // MRC 强引用：兜底收尾定时器期间持有动画器，避免 UIKit 释放成野指针
     id     _navPopTarget;        // 方案A: 系统原生 nav pop 的私有 target(_UINavigationInteractiveTransition)，
                                  // 驱动 handleNavigationTransition: 用（assign，由 nav 内部持有，转场期间有效）
+    BOOL   _navPopProbeFailed;   // 运行时探测: 方案A 系统交互转场未启动(自定义nav不配合)→ YES, 已切非交互 pop
+    BOOL   _navPopProbed;        // 运行时探测门控: 独立于 _transitionTriggered，确保左缘 nav 首次横拖必探测一次
 }
 
 + (instancetype)shared {
@@ -123,6 +235,23 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 - (void)start {
     if (_started) return;
     _started = YES;
+    // 诊断横幅：直接 NSLog 到 syslog（全局、不受 roothide 容器隔离、也不受「调试日志」开关门控），
+    // 即便调试日志关闭，也能在 Mac 上 `log stream | grep Oback-diag` 抓到本 App 真实 bid 与名单状态，
+    // 用于确认①装的是哪个包②黑名单数组是否真正加载/命中（此前文件日志因容器隔离抓不到拼多多）。
+    {
+        NSDictionary *d = [ObackPreferences _mergedPrefs];
+        NSLog(@"[Oback-diag] bid=%@ whitelistMode=%@ blacklistApps=%@ isAllowed=%d debugLog=%@",
+              NSBundle.mainBundle.bundleIdentifier,
+              d[@"whitelistMode"],
+              d[@"blacklistApps"],
+              [ObackPreferences isAllowed],
+              d[@"debugLog"]);
+    }
+    // 黑白名单铁律：黑名单 App 完全不注入（不挂手势/不关系统手势/不链 nav），从根避免黑名单 App 因注入闪退。
+    if (![ObackPreferences isAllowed]) {
+        OBLog(@"start: isAllowed=NO (bid=%@)，Oback 完全不注入（黑白名单排除生效）", NSBundle.mainBundle.bundleIdentifier);
+        return;
+    }
     // 扩展进程(分享/动作/键盘等 appex)内无边缘返回需求，且常为 _UIHostedWindow / keyWindow=null，
     // 直接跳过挂载，避免无意义的手势注入与日志噪声（如 com.tencent.xin.sharetimeline）。
     if ([[[NSBundle mainBundle] infoDictionary] objectForKey:@"NSExtension"]) {
@@ -160,6 +289,11 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 
 - (void)attachToWindow:(UIWindow *)win {
     if (!win) return;
+    // 黑白名单铁律：黑名单 App 完全不注入（所有入口 attachToWindow 统一拦截，覆盖 start / windowBecameKey / swizzle）
+    if (![ObackPreferences isAllowed]) {
+        OBLog(@"attachToWindow: SKIP（isAllowed=NO, bid=%@）", NSBundle.mainBundle.bundleIdentifier);
+        return;
+    }
     // 诊断性黑名单：部分纯 Flutter / 单屏 app（如 im.xym.marknow）报告「打不开」。
     // 分析显示本 tweak 对其基本是无操作（无 nav 可关、无手势可链），但为彻底排除
     // window 级 pan 注入影响其启动，直接跳过挂载。装上此版本后若 marknow 能打开 → 证实是
@@ -174,8 +308,8 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // 普通 window 级 pan 在可滚动列表（朋友圈 feed / 聊天列表）上会被 scrollView 的 pan 抢赢识别，
     // 导致 shouldBegin=YES（胶囊出现）却永远进不了 Began（无返回）——日志实证。屏幕边缘 pan 自带
     // 「边缘优先于滚动」的系统级优先级，正是原生 interactivePop 在列表页也能用的原理，从根上根治。
-    ObackPanGestureRecognizer *panL = [[ObackPanGestureRecognizer alloc] initWithTarget:self
-                                                                                 action:@selector(handlePan:)];
+    ObackPanGestureRecognizer *panL = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
+                                                                                 action:@selector(handlePan:)] autorelease];
     panL.delegate = self;
     panL.maximumNumberOfTouches = 1;
     // 仍设 NO：pan 只观察、绝不吞掉 App 触摸（修复朋友圈点不进详情 / Flutter 类 app 像打不开）。
@@ -183,8 +317,8 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     panL.delaysTouchesBegan   = NO;
     panL.edges = UIRectEdgeLeft;
 
-    ObackPanGestureRecognizer *panR = [[ObackPanGestureRecognizer alloc] initWithTarget:self
-                                                                                 action:@selector(handlePan:)];
+    ObackPanGestureRecognizer *panR = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
+                                                                                 action:@selector(handlePan:)] autorelease];
     panR.delegate = self;
     panR.maximumNumberOfTouches = 1;
     panR.cancelsTouchesInView = NO;
@@ -248,6 +382,18 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         [self _enumerateScrollPansInView:sub depth:depth + 1 block:block];
 }
 
+// 收集窗口视图树里所有 UIPanGestureRecognizer（含 plain / 屏幕边缘 / 滚动），用于让"对手手势"
+// 失败于我们的右缘 pan（Oback 独占右缘返回）。排除我们自己的 pan（delegate==self）。
+- (void)_enumeratePansInView:(UIView *)view depth:(NSUInteger)depth
+                        block:(void(^)(UIPanGestureRecognizer *g))block {
+    if (!view || !block || depth > 40) return;
+    for (UIGestureRecognizer *g in view.gestureRecognizers) {
+        if ([g isKindOfClass:[UIPanGestureRecognizer class]]) block((UIPanGestureRecognizer *)g);
+    }
+    for (UIView *sub in view.subviews)
+        [self _enumeratePansInView:sub depth:depth + 1 block:block];
+}
+
 // 从 pan 解析出真正的 UIWindow：nav pop 的边缘 pan 挂在 nav.view 上（pan.view 是 UIView 非 window），
 // 其 window 需从 pan.view.window 取；window modal pan 的 pan.view 本身是 UIWindow。
 - (UIWindow *)_windowForPan:(UIPanGestureRecognizer *)pan {
@@ -269,14 +415,20 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         return;
     }
     NSArray *existing = objc_getAssociatedObject(nav, kNavPansKey);
-    if ([existing isKindOfClass:[NSArray class]] && existing.count == 2) return;  // 已挂过，幂等
+    if ([existing isKindOfClass:[NSArray class]] && existing.count >= 1) return;  // 已挂过，幂等
     UIView *navView = nav.view;            // 触发加载；为 nil 时下面 addGestureRecognizer 无操作，下次链接重试
     if (!navView) { OBLog(@"attachNavPan: nav.view 尚为 nil，跳过（下次链接重试）"); return; }
     NSMutableArray *pans = [NSMutableArray array];
+    // nav.view 同时挂「左缘 + 右缘」两个边缘 pan：右缘返回与左缘走完全一致的挂载模型
+    // （右缘本质是非交互 pop：rightSimplePop 松手提交，零空白/不破坏导航栏）。
+    // 此前(5ac6935)误删 nav.view 右缘 pan、改由 window 级 panR 独占，但 window 级
+    // UIScreenEdgePanGestureRecognizer 在部分 App（QQ 聊天等）根本不 begin → 右缘失效/被对手抢走。
+    // 恢复与左缘一致的 nav.view 右缘 pan：window panR 在「有 nav 可返回」时 defer 给它（shouldBegin NO），
+    // 右缘由 nav.view 右缘 pan 稳定接管——正是「之前能用的那套」。左缘窗口级 pan 同理 defer 给 nav 左缘 pan。
     UIRectEdge edges[2] = { UIRectEdgeLeft, UIRectEdgeRight };
     for (NSUInteger i = 0; i < 2; i++) {
-        ObackPanGestureRecognizer *pan = [[ObackPanGestureRecognizer alloc] initWithTarget:self
-                                                                                     action:@selector(handlePan:)];
+        ObackPanGestureRecognizer *pan = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
+                                                                                     action:@selector(handlePan:)] autorelease];
         pan.delegate = self;
         pan.maximumNumberOfTouches = 1;
         pan.cancelsTouchesInView = NO;
@@ -288,7 +440,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         [pans addObject:pan];
     }
     objc_setAssociatedObject(nav, kNavPansKey, pans, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    OBLog(@"attachNavPan: nav=%@ pans=%lu on nav.view", NSStringFromClass([nav class]), (unsigned long)pans.count);
+    OBLog(@"attachNavPan: nav=%@ pans=%lu on nav.view (左缘+右缘)", NSStringFromClass([nav class]), (unsigned long)pans.count);
 }
 
 // 让窗口内所有「边缘返回手势」失败于我们的 window pan。
@@ -298,6 +450,10 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 // 从根上消除「一次滑动弹两层」（含插件场景）。
 - (void)_linkNavPopGesturesInWindow:(UIWindow *)win {
     if (!win) return;
+    if (![ObackPreferences isAllowed]) {
+        OBLog(@"linkNav: SKIP（isAllowed=NO, bid=%@）", NSBundle.mainBundle.bundleIdentifier);
+        return;
+    }
     // 性能：同一 window 500ms 内不重复全树遍历（windowBecameKey / 已挂载重链可能密集触发）
     static NSTimeInterval __lastLinkTS = 0;
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
@@ -335,16 +491,12 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
             return;
         }
         nav.interactivePopGestureRecognizer.enabled = NO;
-        failOnOurPans(nav.interactivePopGestureRecognizer);
         linked++;
     }];
-    // 第二道防线：枚举窗口里所有 UIScreenEdgePanGestureRecognizer（含插件自定义的边缘返回手势），
-    // 让它们全部失败于我们的 pan——plugin 私有的边缘手势也能压住，杜绝「一次滑动弹两层」。
-    [self _enumerateEdgeGesturesInView:win depth:0 block:^(UIScreenEdgePanGestureRecognizer *g){
-        if (g.delegate == self) return;   // 跳过我们自己的边缘 pan（避免 requireGestureRecognizerToFail 自引用）
-        failOnOurPans(g);
-        linked++;
-    }];
+    // 注：窗口内「其它边缘返回手势 / 系统 interactivePop」不再用 requireGestureRecognizerToFail: 显式枚举
+    // （易与对手 delegate 互锁、且 WeChat 重开 enabled 后失效）；改由 ObackManager 的
+    // gestureRecognizer:shouldRequireFailureOfGestureRecognizer: 单向让步处理（OUR delegate 决策，
+    // 对手不可否决，无死锁）—— 见下方新增方法。
     // 第三道防线：枚举窗口里所有 UIScrollView 的 pan（含纵向表视图 / 横向分页容器）。
     // 让它们失败于我们的 pan——从边缘起滑时 ourPan 优先接管返回（无论横/纵 scroll），
     // 从中间滑动时 ourPan 不 begin 故放行给滚动，互不干扰。
@@ -352,6 +504,15 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         failOnOurPans(g);
         linked++;
     }];
+    // [2026-07-26 QQ 右缘修复] 让窗口内所有「对手 pan」（QQ 等 App 自定义的右缘手势，通常是 plain
+    // UIPanGestureRecognizer，少数是屏幕边缘 pan）失败于我们的**右缘 pan**：Oback 独占右缘返回，
+    // 对手在右缘让步（单向 requireGestureRecognizerToFail:，对手无法否决，无死锁）；
+    // 边缘外（中间）我们的右缘 pan 不 begin → 对手 pan 正常触发（QQ 原手势保留）。
+    // 仅对右缘 pan 做此单向链接——左缘保持 shouldRequireFailureOf 的让步逻辑，不影响微信修复。
+    // 注：对手 pan 在中间起滑时，因我们的右缘 pan 不进入识别（起点不在右缘），require 依赖立即解除、
+    // 不引入感知延迟；仅在右缘才短暂等待 Oback 判定，符合"边缘=Oback/中间=QQ"。
+    // 右缘对手 pan 链接抽取到 _obLinkRightEdgeOpponentPansInWindow:（同款逻辑，现已供懒补链复用）
+    [self _obLinkRightEdgeOpponentPansInWindow:win];
     CFTimeInterval dt = (CACurrentMediaTime() - t0) * 1000.0;
     OBLog(@"linkNav: 链接 %lu 个返回手势 (耗时 %.2f ms) @window=%@",
           (unsigned long)linked, dt, NSStringFromClass([win class]));
@@ -372,6 +533,53 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
               tabInfo);
     }
     [self _diagLogEdgeGesturesInWindow:win];   // 双返回诊断（开关关闭时无输出，且自带节流）
+}
+
+// [2026-07-27 QQ 右缘根治] 右缘「对手手势 requireToFail 我们的右缘 pan」链接抽取为独立方法，
+// 供 _linkNavPopGesturesInWindow（链接时机触发）与 gestureRecognizerShouldBegin（右缘懒补链）两处复用，
+// 专治 QQ 聊天等「进会话后才懒加载挂上」的晚到右缘手势——链接函数跑时它尚未出现、从未被压住。
+- (void)_obLinkRightEdgeOpponentPansInWindow:(UIWindow *)win {
+    NSMutableArray *rightPans = [NSMutableArray array];
+    NSArray *pans = objc_getAssociatedObject(win, kPanKey);
+    if ([pans isKindOfClass:[NSArray class]]) {
+        for (ObackPanGestureRecognizer *op in pans) {
+            if (op.edges & UIRectEdgeRight) [rightPans addObject:op];
+        }
+    }
+    [self _enumerateEdgeGesturesInView:win depth:0 block:^(UIScreenEdgePanGestureRecognizer *g){
+        if (g.delegate == self && (g.edges & UIRectEdgeRight)) [rightPans addObject:g];
+    }];
+    if (rightPans.count == 0) return;
+    // 让窗口内所有「对手 pan」（QQ 等 App 自定义的右缘手势，通常是 plain UIPanGestureRecognizer，
+    // 少数是屏幕边缘 pan）失败于我们的右缘 pan：Oback 独占右缘返回，对手在右缘让步（单向，无死锁）；
+    // 边缘外（中间）我们的右缘 pan 不 begin → 对手 pan 正常触发（QQ 原手势保留）。
+    [self _enumeratePansInView:win depth:0 block:^(UIPanGestureRecognizer *g){
+        if (g.delegate == self) return;            // 跳过我们自己的 pan（避免自引用）
+        for (ObackPanGestureRecognizer *rp in rightPans) {
+            @try { [g requireGestureRecognizerToFail:rp]; } @catch (NSException *e) {}
+        }
+    }];
+    if ([ObackPreferences doubleReturnDiagEnabled]) {
+        NSMutableArray *opp = [NSMutableArray array];
+        [self _enumeratePansInView:win depth:0 block:^(UIPanGestureRecognizer *g){
+            if (g.delegate == self) return;
+            [opp addObject:[NSString stringWithFormat:@"%@@%@",
+                            NSStringFromClass([g class]), NSStringFromClass([g.view class])]];
+        }];
+        OBLog(@"diag[右缘链接(懒)] 右缘 pan=%lu 个；对手 pan 共 %lu → %@",
+              (unsigned long)rightPans.count, (unsigned long)opp.count, opp);
+    }
+}
+
+// 右缘懒补链：仅当近期未做过右缘链接（2s 节流）时才扫描对手 pan。
+// 链接是「持久依赖」：一旦 requireToFail 建立便一直生效，故此处只为「发现晚到的新手势」，
+// 不必每次滑动都全树遍历。右缘 begin 频率极低，全局 2s 节流足够且不会跨 App 互相饿死。
+- (void)_obLinkRightEdgeOpponentPansIfStale:(UIWindow *)win {
+    static NSTimeInterval __lastRightLinkTS = 0;
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (now - __lastRightLinkTS < 2.0) return;
+    __lastRightLinkTS = now;
+    [self _obLinkRightEdgeOpponentPansInWindow:win];
 }
 
 // 双返回诊断：列出本 window 视图树里所有「边缘返回手势」的精确类名 + 所属视图类。
@@ -399,18 +607,14 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 
 #pragma mark - 排除名单（不干预的页面）
 
-// 不干预的视图控制器：其所在 nav 不挂我们的边缘 pan、不关原生 interactivePop，交原生处理。
-// 当前仅微信朋友圈（WCTimeLineViewController 及其相关）：整屏滚动信息流与我们的边缘 pan
-// 存在手势竞争——我们的 pan 在 shouldBegin=YES 后仍进不了 Began（被朋友圈 scrollView/原生
-// 手势抢走），且 swizzle 关掉原生 interactivePop 后会把朋友圈原本可用的原生边缘返回也弄没。
-// 用户明确要求「不干预朋友圈」，故整页跳过，保留微信原生边缘返回。
+// 不干预的视图控制器（排除名单）。
+// 机制保留作为「未来特定 App 需要跳过时的扩展点」：命中后其所在 nav 不挂我们的边缘 pan、
+// 不关原生 interactivePop、shouldBegin 直接 NO，交原生处理。
+// 当前名单为空——微信朋友圈（WCTimeLine）的排除已于 2026-07-26 移除：右缘改用自定义转场 +
+// 起滑即时禁用系统 interactivePop + 直接调 handleNavigationTransition: 驱动原生 pop 后，
+// 当初加排除的两个理由（手势抢、原生返回被关没）均已缓解，故朋友圈也由 Oback 接管边缘返回。
 - (BOOL)_isExcludedViewController:(UIViewController *)vc {
     if (!vc) return NO;
-    NSString *name = NSStringFromClass([vc class]);
-    if ([name isEqualToString:@"WCTimeLineViewController"] ||
-        [name rangeOfString:@"WCTimeLine"].location != NSNotFound) {
-        return YES;
-    }
     return NO;
 }
 
@@ -490,12 +694,27 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
                   (unsigned long)nav.viewControllers.count);
             return NO;
         }
-        self.currentParallaxToView = YES;   // nav pop（系统原生交互转场，不 reparent toView）
+        // 即时禁用系统原生 interactivePop：微信等 App 在 viewDidAppear 后会把
+        // interactivePopGestureRecognizer.enabled 重新置 YES，linkNav 的禁用被绕过 →
+        // 原生边缘返回与我们的 pan 同时驱动同一 _UINavigationInteractiveTransition → 双返回。
+        // 起滑瞬间(shouldBegin 确认有效 pop)再压死一次，确保本次只有我们的 pan 驱动转场。
+        nav.interactivePopGestureRecognizer.enabled = NO;
+        if (edge == ObackEdgeRight) {
+            self.currentParallaxToView = NO;
+            self.rightSimplePop = YES;   // 右缘：非交互 pop（松手提交才 popViewControllerAnimated:，零空白/不破坏导航栏/不进自定义转场）
+        } else {
+            self.currentParallaxToView = YES;   // nav pop（左缘：系统原生交互转场）
+        }
     } else {
         if (top.presentingViewController != nil) {
             self.currentParallaxToView = NO;  // modal dismiss（方案B 自定义，只移 sheet）
         } else if (nav && nav.viewControllers.count > 1) {
-            OBLog(@"shouldBegin(modal)=NO (有 nav pop 可接管，交给 nav pan)");
+            // 有 nav 可返回：左缘/右缘都 defer 给 nav.view 上对应的边缘 pan 接管。
+            // 右缘 pan 已恢复挂到 nav.view（与左缘完全一致），由 nav.view 右缘 pan 稳定接管——
+            // window 级 UIScreenEdgePanGestureRecognizer 在部分 App（QQ 聊天等）不 begin，
+            // 这是 5ac6935 把右缘挪到 window 级后右缘失效/被对手抢走的根因；恢复 nav.view 右缘 pan
+            // 即回到「之前能用的那套」。window pan 在此直接 NO，左缘同理（已验证稳定）。
+            OBLog(@"shouldBegin(modal)=NO (有 nav pop 可接管，交给 nav.view 边缘 pan)");
             return NO;
         } else {
             OBLog(@"shouldBegin(modal)=NO (无 modal 也无 nav pop)");
@@ -510,7 +729,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
           (unsigned long)nav.viewControllers.count, top.presentingViewController != nil,
           self.currentParallaxToView);
     if (p.hapticEnabled) {
-        UIImpactFeedbackGenerator *g = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+        UIImpactFeedbackGenerator *g = [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] autorelease];
         [g impactOccurred];
     }
     // 轻量精准补链（替代原先每次手势全树遍历 _linkNavPopGesturesInWindow:，根除起点卡顿）：
@@ -521,6 +740,13 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     UIScrollView *sv = [self scrollViewAtPoint:loc inView:win];
     if (sv && sv.panGestureRecognizer) {
         @try { [sv.panGestureRecognizer requireGestureRecognizerToFail:pan]; } @catch (NSException *e) {}
+    }
+    // [2026-07-27 QQ 右缘根治] 右缘懒补链：复刻 scrollView 即时补链同款思路，专治「晚到右缘手势」。
+    // QQ 聊天的右缘手势常是进会话后才懒加载挂上，链接函数(_linkNavPopGesturesInWindow)跑时它尚未出现、
+    // 从未被 requireToFail → 我们的右缘 begin 后 QQ 手势也 begin 抢赢。此处右缘 begin 时就地补一次
+    // 对手 pan 链接（2s 节流，仅抓晚到的新手势），确保右缘 Oback 独占、中间仍归 QQ。左缘不受影响。
+    if (edge == ObackEdgeRight) {
+        [self _obLinkRightEdgeOpponentPansIfStale:win];
     }
     // 关键修复：胶囊在 shouldBegin=YES 时即显示，而非等 Began。左边缘会被系统原生
     // interactivePopGestureRecognizer（UIScreenEdgePanGestureRecognizer）抢走，导致我们的手势
@@ -552,12 +778,16 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // 新手势开始：清空上一次松手速度/进度，避免遗留值串入本次动画
     self.releaseVelocity = 0;
     self.releasePercent  = 0;
-    // 诊断：确认本次手势是否真正进入 beginTransition（朋友圈此前"胶囊出现但无返回"疑似未到此）。
+    // 诊断：确认本次手势是否真正进入 beginTransition，并打印触发 pan 的身份（window pan / nav pan）。
+    // 若一次滑动同时出现两条 beginTransition 且 panView 分别为 UIWindow 与 nav.view，则双返回根因是
+    // window pan 与 nav pan 同时开火（二者 delegate 均为 self，shouldRequireFailureOf 会互相跳过而不协调）。
     {
         UIWindow *dbgWin = [self _windowForPan:pan];
-        OBLog(@"beginTransition: entered (parallaxToView=%d top=%@)",
+        OBLog(@"beginTransition: entered (parallaxToView=%d top=%@ panView=%@ kind=%@)",
               self.currentParallaxToView,
-              NSStringFromClass([[self topMost:dbgWin.rootViewController] class]));
+              NSStringFromClass([[self topMost:dbgWin.rootViewController] class]),
+              NSStringFromClass([[pan view] class]),
+              objc_getAssociatedObject(pan, kPanKindKey) ?: @"window");
     }
 
     UIWindow *win = [self _windowForPan:pan];
@@ -568,15 +798,29 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(dismissIndicatorSafety) object:nil];
 
     ObackParams *p = [ObackPreferences params];
-    self.interactive = [[ObackInteractiveTransition alloc] initWithEdge:self.currentEdge params:p];
+    self.interactive = [[[ObackInteractiveTransition alloc] initWithEdge:self.currentEdge params:p] autorelease];
     self.interacting = YES;
     _transitionTriggered = NO;
 
     // 方案 A：nav pop 改为驱动系统原生交互 pop（根除自定义转场 reparent toView 导致的空白/损坏）。
     // 在手势 Began(位移=0)即启动系统原生交互转场，由后续 updateTransition 的横向位移 scrub。
     // modal dismiss（currentParallaxToView=NO）走方案B 自定义转场，不在此启动。
-    if (self.currentParallaxToView) {
-        [self driveSystemNavPopBeginWithPan:pan window:win];
+    // 右缘固定走自定义镜像转场（ObackAnimator + self.interactive 手动 scrub），不走方案A 系统原生
+    // handleNavigationTransition:（左缘语义，右缘负向位移被反 scrub → 触发不稳）。右缘改由
+    // triggerTransitionInWindow 调 popViewControllerAnimated: 触发自定义交互转场。
+    // 实验 nav 视差：navParallaxEnabled 时左缘不抢跑系统原生 handleNavigationTransition:
+    // （该入口会强制走系统 _UINavigationInteractiveTransition，忽略自定义 interactionController →
+    // self.interactive 空转、视差无效）。改由首次横拖 triggerTransitionInWindow 触发自定义
+    // popViewControllerAnimated:（ObackNavDelegate 返回 ObackAnimator + self.interactive 接管 scrub，同右缘节奏）。
+    if (self.currentParallaxToView && self.currentEdge != ObackEdgeRight) {
+        if (![ObackPreferences navParallaxEnabled]) {
+            [self driveSystemNavPopBeginWithPan:pan window:win];   // 方案A 系统原生交互 pop
+        } else {
+            // 跳过系统原生抢跑：重置探测标记，避免上次手势残留（driveSystemNavPopBeginWithPan 内会重置，此分支跳过它）
+            _navPopProbeFailed = NO;
+            _navPopProbed = NO;
+            OBLog(@"beginTransition: nav 视差实验模式，延迟自定义 pop 到首次横拖");
+        }
     }
 
     CGPoint loc = [pan locationInView:win];
@@ -618,12 +862,21 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
               nav.delegate ? NSStringFromClass([nav.delegate class]) : @"(nil)",
               (int)[[nav.delegate class] isSubclassOfClass:NSClassFromString(@"ObackNavDelegate")]);
         self.currentParallaxToView = YES;   // nav pop 视差（移动上一页）
-        if (self.interacting) {
+        if (self.currentEdge == ObackEdgeRight) {
+            // 右缘固定走自定义镜像转场：真正触发 pop，由 nav delegate(ObackNavDelegate) 返回
+            // ObackAnimator(parallaxToView=YES) + interactionController 返回 self.interactive 接管，
+            // 后续 updateTransition 用 self.interactive updateWithPercent 做 scrub（不再喂
+            // handleNavigationTransition:）。方向由 OBApplyParallax 的 edge 分支处理，正确无误。
+            OBLog(@"trigger: nav pop 右缘自定义镜像转场，popViewControllerAnimated");
+            [nav popViewControllerAnimated:YES];
+        } else if (self.interacting && ![ObackPreferences navParallaxEnabled]) {
             // 方案 A：交互 pop 已在 beginTransition 通过 handleNavigationTransition: 启动，
             // 此处不再调用 popViewControllerAnimated:（否则会触发第二次转场/黑屏）。
             OBLog(@"trigger: nav pop 已启动(系统原生交互)，忽略重复 popViewControllerAnimated");
         } else {
-            // 非交互兜底（快滑零位移：endTransition 先把 interacting 置 NO 再走此路径）
+            // 自定义 nav 视差(实验) 或 非交互兜底：真正触发 pop，由 nav delegate(ObackNavDelegate)
+            // 返回 ObackAnimator(parallaxToView=YES) + interactionController 返回 self.interactive 接管 scrub。
+            OBLog(@"trigger: nav pop 自定义视差/兜底，popViewControllerAnimated");
             [nav popViewControllerAnimated:YES];
         }
     } else if (top.presentingViewController) {
@@ -636,7 +889,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         if ([existing isKindOfClass:[ObackTransitioningDelegate class]]) {
             td = (ObackTransitioningDelegate *)existing;
         } else {
-            td = [[ObackTransitioningDelegate alloc] init];
+            td = [[[ObackTransitioningDelegate alloc] init] autorelease];
             td.original = existing;
             top.transitioningDelegate = td;
         }
@@ -646,30 +899,121 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     }
 }
 
+// 单向让步（根治微信双返回 + QQ 等右缘冲突）：当我们的边缘 pan(g) 与另一个边缘返回手势(other, 同边)竞争时，
+// 让 OUR pan 要求 other 先失败——OUR delegate 决策，对手无法否决，且不会与对手的 requireToFail 互锁死锁。
+// 结果：对手识别→我们取消（单层原生返回）；对手不识别→我们接管（单层 Oback 返回）。绝不会双触发。
+// 注意：scrollView 的 pan 协调仍由 shouldBegin 内的 requireGestureRecognizerToFail: 显式处理（other 非边缘，此处不拦）。
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g
+ shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)other {
+    if (g == other || other == nil) return NO;
+    if (![g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return NO;  // 仅我们的边缘 pan 参与决策
+    if (other.delegate == self) {
+        // 同为我们的 pan：仅让 nav pan 单向对 window pan 让步（无死锁），杜绝同边双开火 → 双返回。
+        // window pan 始终不向 nav pan 让步，故不会互锁；其余自身组合（window↔window / nav↔nav 同边）仍跳过。
+        BOOL gIsWindow = [[g view] isKindOfClass:[UIWindow class]];
+        BOOL oIsWindow = [[other view] isKindOfClass:[UIWindow class]];
+        if (!gIsWindow && oIsWindow) return YES;   // nav pan 让步于 window pan
+        return NO;
+    }
+    if (![other isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return NO;
+    UIScreenEdgePanGestureRecognizer *mg = (UIScreenEdgePanGestureRecognizer *)g;
+    UIScreenEdgePanGestureRecognizer *og = (UIScreenEdgePanGestureRecognizer *)other;
+    if ((mg.edges & og.edges) == 0) return NO;   // 不同边（左/右）互不干涉
+    // [2026-07-26 QQ 右缘修复] 右缘：Oback 必须独占返回（用户要"右缘返回"），不再向对手同边屏幕边缘
+    // 手势让步。让步改由下方 _linkNavPopGesturesInWindow 对"对手手势"显式 requireGestureRecognizerToFail:
+    // 我们的右缘 pan（单向：对手无法否决，无死锁）。左缘仍保留让步（保微信等左缘双返回修复）。
+    if (mg.edges & UIRectEdgeRight) return NO;
+    return YES;                                   // 同边（左）边缘手势：我们的 pan 让步于对手（单层返回，杜绝双触发）
+}
+
 - (void)updateTransition:(UIPanGestureRecognizer *)pan {
     if (!self.interacting) return;
     UIWindow *win = [self _windowForPan:pan];
     CGFloat w = win.bounds.size.width;
     if (w <= 0) return;
 
+    // 右缘非交互 pop：仅更新胶囊 + 记录位移进度，绝不 scrub / 绝不触发交互转场
+    // （避免方案A 左原点语义导致的右缘负向反 scrub 与几何错配空白）。
+    // 关键修复：此前未在此更新 _currentPercent，松手时进度恒为 0、仅靠速度投影，
+    // 慢速内滑永远不 commit → 右缘只出胶囊不返回。现按位移同步进度，正常内滑即可提交。
+    if (self.rightSimplePop) {
+        CGPoint t = [pan translationInView:win];
+        CGFloat dir = (self.currentEdge == ObackEdgeLeft) ? 1.0 : -1.0;
+        CGFloat p = dir * t.x / w;
+        p = MAX(0.0, MIN(1.0, p));
+        _currentPercent = p;
+        [self updateIndicatorWithPan:pan window:win];
+        return;
+    }
+
     CGPoint t = [pan translationInView:win];
     CGFloat dir = (self.currentEdge == ObackEdgeLeft) ? 1.0 : -1.0;
     CGFloat p = dir * t.x / w;
     p = MAX(0.0, MIN(1.0, p));
 
-    // 首次横向拖动（p>0）才真正触发（modal 路径在此触发 dismiss；nav 路径已在 begin 启动，这里不再触发）
+    // 首次横向拖动（p>0）才真正触发
     if (!_transitionTriggered && p > 0.001) {
-        [self triggerTransitionInWindow:win withPan:pan];
-        _transitionTriggered = YES;
+        if (self.currentParallaxToView && self.currentEdge != ObackEdgeRight && _navPopProbeFailed) {
+            // 微信等自定义nav(非交互路径)：首次横拖才 popViewControllerAnimated:（同右缘节奏）。
+            // 不在 Began 即 pop，避免撕裂视图层级导致手势收不到终态、胶囊残留。
+            UINavigationController *navP = nil;
+            NSString *kindP = objc_getAssociatedObject(pan, kPanKindKey);
+            if ([kindP isEqualToString:@"nav"]) navP = objc_getAssociatedObject(pan, kObackNavKey);
+            if (!navP) {
+                UIViewController *topP = [self topMost:win.rootViewController];
+                navP = topP.navigationController;
+                if (!navP && [topP isKindOfClass:[UINavigationController class]]) navP = (UINavigationController *)topP;
+            }
+            if (navP) { @try { [navP popViewControllerAnimated:YES]; } @catch (NSException *e) {} }
+            _transitionTriggered = YES;
+        } else {
+            // modal/右缘路径在此触发；nav 方案A路径已在 begin 启动，这里不再触发
+            [self triggerTransitionInWindow:win withPan:pan];
+            _transitionTriggered = YES;
+        }
+    }
+
+    // [运行时探测切换] 左缘 nav pop：首次横向拖动实测系统交互转场是否真进入 interactive 态。
+    // 关键修复：原探测错误地嵌在 `if(!_transitionTriggered)` 内——而左缘 nav 路径在 begin 已置
+    // _transitionTriggered=YES（driveSystemNavPopBeginWithPan 第1190行），导致探测永不执行、
+    // _navPopProbeFailed 恒为 NO、微信等自定义 nav 永远走方案A 而失效。现改用 _navPopProbed 单独门控，
+    // 确保首次横向拖动必跑一次。标准 nav → interactive=YES 继续方案A 跟手；微信等自定义 nav →
+    // 永不 interactive，当场切非交互 popViewControllerAnimated:（永不失效，代价不跟手）。
+    // 探测仅用于方案A 识别微信等自定义 nav（系统原生交互转场能否启动）。nav 视差实验走自定义转场，
+    // 其 transitionCoordinator 可能 interactive=NO → 误判 _navPopProbeFailed → 非交互重复 pop + 冲突，故跳过。
+    if (self.currentParallaxToView && self.currentEdge != ObackEdgeRight && !_navPopProbed && ![ObackPreferences navParallaxEnabled]) {
+        _navPopProbed = YES;
+        if (!_navPopProbeFailed) {
+            UINavigationController *navP = nil;
+            NSString *kindP = objc_getAssociatedObject(pan, kPanKindKey);
+            if ([kindP isEqualToString:@"nav"]) navP = objc_getAssociatedObject(pan, kObackNavKey);
+            if (!navP) {
+                UIViewController *topP = [self topMost:win.rootViewController];
+                navP = topP.navigationController;
+                if (!navP && [topP isKindOfClass:[UINavigationController class]]) navP = (UINavigationController *)topP;
+            }
+            if (navP) {
+                id tc = [navP.topViewController transitionCoordinator];
+                BOOL interactive = (tc && [tc respondsToSelector:@selector(isInteractive)] && [tc isInteractive]);
+                if (!interactive) {
+                    OBLog(@"navPop 探测: 系统交互转场未启动(自定义nav?), 切非交互 pop (nav=%@)",
+                          NSStringFromClass([navP class]));
+                    _navPopProbeFailed = YES;
+                    _navPopTarget = nil;   // 后续 _callSystemNavPop: 直接 return，避免重复驱动系统转场
+                    @try { [navP popViewControllerAnimated:YES]; } @catch (NSException *e) {}
+                }
+            }
+        }
     }
 
     _currentPercent = p;
-    if (self.currentParallaxToView && [ObackPreferences navParallaxEnabled]) {
+    if (self.currentParallaxToView && ([ObackPreferences navParallaxEnabled] || self.currentEdge == ObackEdgeRight)) {
         // 实验：自定义 nav 视差 scrub（同 modal 方案B 机制，驱动 animator 的 fractionComplete）
         if (self.interactive) [self.interactive updateWithPercent:p];
     } else if (self.currentParallaxToView) {
-        // 方案 A：nav pop 用系统原生交互转场，直接把当前 pan 喂给 handleNavigationTransition: 做 scrub
-        [self _callSystemNavPop:pan];
+        // 方案 A：nav pop 用系统原生交互转场，直接把当前 pan 喂给 handleNavigationTransition: 做 scrub。
+        // 探测失败(_navPopProbeFailed)已切非交互 pop，此处不再喂系统转场(避免冲突)，仅保留胶囊反馈。
+        if (!_navPopProbeFailed) [self _callSystemNavPop:pan];
     } else {
         if (self.interactive) [self.interactive updateWithPercent:p];
     }
@@ -681,6 +1025,46 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     if (!self.interacting) return;
     UIWindow *win = [self _windowForPan:pan];
     CGFloat w = win.bounds.size.width;
+    // ===== 右缘非交互 pop（零空白修复）=====
+    // 右缘不喂系统左原点 handleNavigationTransition:（会算错底页坐标→空白），也不进自定义视差转场；
+    // 松手提交才 popViewControllerAnimated: 非交互返回——方向天然正确、导航栏不破坏、零空白。
+    if (self.rightSimplePop) {
+        CGPoint v = [pan velocityInView:win];
+        CGFloat dir = (self.currentEdge == ObackEdgeLeft) ? 1.0 : -1.0;
+        CGFloat vel = dir * v.x;
+        CGFloat projected = _currentPercent;
+        if (w > 0) projected += (vel * 0.12) / w;
+        projected = MAX(0.0, MIN(1.0, projected));
+        CGFloat effective = MAX(_currentPercent, projected);
+        ObackParams *p = [ObackPreferences params];
+        BOOL commit = (effective > p.commitRatio) || (vel > p.commitVelocity);
+        NSString *kind = objc_getAssociatedObject(pan, kPanKindKey);
+        UINavigationController *nav = nil;
+        if ([kind isEqualToString:@"nav"]) {
+            nav = objc_getAssociatedObject(pan, kObackNavKey);
+        }
+        if (!nav) {
+            UIViewController *top = [self topMost:win.rootViewController];
+            nav = top.navigationController;
+            if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
+        }
+        if (commit && nav && nav.viewControllers.count > 1) {
+            @try { [nav popViewControllerAnimated:YES]; }
+            @catch (NSException *e) { OBLog(@"endTransition 右缘 pop 异常: %@", e); }
+        }
+        // 关键修复：右缘分支此前漏调 dismissIndicatorCommitted，胶囊永远残留屏幕。
+        // 提交→放大淡出；取消→弹回边缘，与左右边缘行为一致。
+        if (_indicator) [self dismissIndicatorCommitted:commit params:p window:win];
+        self.interacting = NO;
+        self.interactive = nil;
+        self.currentAnimator = nil;
+        _navPopTarget = nil;
+        _currentPercent = 0;
+        _transitionTriggered = NO;
+        self.rightSimplePop = NO;
+        OBLog(@"endTransition: 右缘非交互 pop (commit=%d nav=%@)", commit, nav ? NSStringFromClass([nav class]) : @"nil");
+        return;
+    }
     CGPoint v = [pan velocityInView:win];
     CGFloat dir = (self.currentEdge == ObackEdgeLeft) ? 1.0 : -1.0;
     CGFloat vel = dir * v.x;   // 前向(朝返回方向)为正
@@ -715,8 +1099,8 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     // 灵敏度滑块只对 modal dismiss(方案B 自定义转场)生效——这是为换取"零冻结/原生手感"的取舍，
     // 不回退到自定义 nav 转场（那曾是导致黑屏/冻结的根因）。
     if (self.currentParallaxToView) {
-        if ([ObackPreferences navParallaxEnabled]) {
-            // 实验：自定义 nav 视差收尾（同 modal 方案B 机制，复用已验证的 forceFinishIfNeeded）
+        if ([ObackPreferences navParallaxEnabled] || self.currentEdge == ObackEdgeRight) {
+            // 实验：自定义 nav 视差收尾（同 modal 方案B 机制，含右缘固定自定义镜像转场；复用已验证的 forceFinishIfNeeded）
             if (_transitionTriggered) {
                 if (commit) [self.interactive finish];
                 else {
@@ -742,6 +1126,17 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
             _currentPercent = 0;
             _transitionTriggered = NO;
             OBLog(@"endTransition: nav pop 自定义视差收尾 (commit=%d)", commit);
+            return;
+        }
+        if (_navPopProbeFailed) {
+            // 探测失败已切非交互 pop：此处仅复位状态，不再喂系统转场（避免与已进行的非交互 pop 冲突）
+            OBLog(@"endTransition: nav pop 探测失败→非交互返回复位 (commit=%d)", commit);
+            self.interacting = NO;
+            _navPopTarget = nil;
+            self.interactive = nil;
+            self.currentAnimator = nil;
+            _currentPercent = 0;
+            _transitionTriggered = NO;
             return;
         }
         [self _callSystemNavPop:pan];
@@ -865,14 +1260,15 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     ObackParams *p = [ObackPreferences params];
     if (_indicator) [self dismissIndicatorCommitted:NO params:p window:win];
     if (self.currentParallaxToView) {
-        if ([ObackPreferences navParallaxEnabled]) {
-            // 实验：自定义 nav 视差取消（同 modal 方案B：驱动 animator 反向回弹 + watchdog 兜底收尾）
+        if ([ObackPreferences navParallaxEnabled] || self.currentEdge == ObackEdgeRight) {
+            // 实验：自定义 nav 视差取消（同 modal 方案B：含右缘固定自定义镜像转场；驱动 animator 反向回弹 + watchdog 兜底收尾）
             if (_transitionTriggered && self.interactive) [self.interactive cancel];
             [self _scheduleCompletionWatchdog];
         } else {
             // 方案 A：nav pop 用系统原生交互转场，把当前 pan(Failed/Cancelled)喂给 handleNavigationTransition:
             // 让系统取消原生 pop；无自定义动画器，无需 watchdog/interactive cancel。
-            if (_transitionTriggered) [self _callSystemNavPop:pan];
+            // 探测失败(_navPopProbeFailed)已切非交互 pop，不再喂系统转场(避免冲突)，直接走下方复位。
+            if (_transitionTriggered && !_navPopProbeFailed) [self _callSystemNavPop:pan];
         }
         // 兜底：若系统 target 取不到导致原生 pop 从未启动（driveSystemNavPopBegin 降级为非交互 pop），
         // 此处 _navPopTarget 为 nil，_callSystemNavPop 为空操作，无需额外处理。
@@ -889,6 +1285,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     _navPopTarget = nil;
     _currentPercent = 0;
     _transitionTriggered = NO;
+    self.rightSimplePop = NO;     // 复位：避免残留导致下次手势误判右缘非交互
 }
 
 #pragma mark - 方案 A：驱动系统原生 nav pop
@@ -925,11 +1322,26 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     if (!nav) { OBLog(@"navPop: 无 nav，放弃"); return; }
     // 兜底确保 ObackNavDelegate 就位（delegate:nil 时自动包装；已是 ObackNavDelegate 则幂等）
     [nav setDelegate:nav.delegate];
+
+    // [判定是否驱动方案A] 已知不配合系统交互转场的自定义nav(微信等)或取不到系统target，
+    // 绝不调用 handleNavigationTransition:（否则会自污染 isInteractive 信号，且微信有 machinery 却不渲染
+    // 导致转场不可见）。直接走非交互 popViewControllerAnimated:，方向正确、永不失效（代价不跟手）。
+    if (![self _navPopShouldDriveSystemNav:nav]) {
+        OBLog(@"navPop: 判定为非标准nav(自定义/已知不配合), 首次横拖时非交互 pop (nav=%@, bid=%@)",
+              NSStringFromClass([nav class]), [[NSBundle mainBundle] bundleIdentifier]);
+        _navPopTarget = nil;
+        _navPopProbeFailed = YES;     // 标记非交互路径：update 首次横拖才 pop(同右缘节奏)，
+                                      // 避免 Began 即 pop 撕裂视图层级使手势收不到终态→胶囊残留。
+                                      // 此处不 pop / 不置 interacting=NO / 不置 _transitionTriggered，
+                                      // 让手势走完整生命周期，由 endTransition 可靠收胶囊(见 rightSimplePop 同机制)。
+        return;
+    }
+
     _navPopTarget = [self navPopSystemTargetForNav:nav];
     if (!_navPopTarget) {
-        // 极端兜底：取不到系统 target，降级为非交互 popViewControllerAnimated（interacting 置 NO
-        // 让 delegate 返回 nil → 系统默认转场），至少能返回，不卡死。
+        // 极端兜底：取不到系统 target，降级为非交互 popViewControllerAnimated
         OBLog(@"navPop: 取不到系统 target，降级为非交互 popViewControllerAnimated");
+        _navPopProbeFailed = YES;
         [nav popViewControllerAnimated:YES];
         self.interacting = NO;
         _transitionTriggered = YES;
@@ -937,10 +1349,30 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     }
     // 系统原生 interactivePopGestureRecognizer 保持 disabled（避免它自己触发 double），
     // 直接把我们的 pan 作为 sender 喂给它的私有 action。
+    _navPopProbeFailed = NO;   // 每次左缘 begin 重置探测标记
+    _navPopProbed = NO;        // 探测门控同步重置（独立于 _transitionTriggered，避免上次手势残留）
     [self _callSystemNavPop:pan];
     _transitionTriggered = YES;
     [self _scheduleNavPopWatchdog:nav];   // 安全看门狗：防个别 App(如 Filza) 系统交互转场卡死冻结
     OBLog(@"navPop: 系统原生交互 pop 已启动 (target=%@)", NSStringFromClass([_navPopTarget class]));
+}
+
+// 判定左缘 nav pop 是否走方案A(驱动系统 handleNavigationTransition: 跟手)。
+// 返回 NO 的情形：
+//  1) 当前 App 命中"已知不配合系统交互转场的自定义nav"——典型为微信(com.tencent.xin)：
+//     其 nav 拥有完整的系统 interactivePop machinery(target 存在)但故意不渲染交互转场，
+//     纯结构探测(isInteractive)会被其自污染，必须用 bundle id / 类名精确命中；
+//  2) 取不到系统 interactivePop 私有 target(无 machinery 的 App)。
+// 其余标准 nav 返回 YES。
+- (BOOL)_navPopShouldDriveSystemNav:(UINavigationController *)nav {
+    NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
+    if (bid && [bid caseInsensitiveCompare:@"com.tencent.xin"] == NSOrderedSame) return NO; // 微信：有machinery但不渲染
+    // 类名兜底（防 bundle id 读取异常 / 微信变体）
+    NSString *navCls = NSStringFromClass([nav class]);
+    if (navCls && [navCls hasPrefix:@"MMUI"]) return NO; // 微信系自定义 nav
+    // 标准 nav：必须有可用的系统交互转场 target
+    id t = [self navPopSystemTargetForNav:nav];
+    return (t != nil);
 }
 
 // 把 window pan 作为 sender 喂给系统私有 action handleNavigationTransition:。
@@ -970,7 +1402,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
         _indicator = nil;
         [self _stopIndicatorLink];   // 停掉上一轮的平滑插值（showIndicator 之后会重建）
     }
-    ObackEdgeIndicator *ind = [[ObackEdgeIndicator alloc] initWithEdge:edge];
+    ObackEdgeIndicator *ind = [[[ObackEdgeIndicator alloc] initWithEdge:edge] autorelease];
     ind.center = [self indicatorHomeCenterForEdge:edge basePoint:loc window:win];
     ind.alpha = 0.0;
     ind.transform = CGAffineTransformMakeScale(0.85, 0.85);
@@ -1021,6 +1453,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     UIView *ind = _indicator;
     _indicator = nil;
     [self _stopIndicatorLink];   // 手势结束：停平滑插值，胶囊交给 UIView 动画淡出/弹回
+    [(ObackEdgeIndicator *)ind stopEffectAnimations];   // 停渐变等循环动画，避免与下方淡出动画冲突
     if (!ind) return;
     if (committed) {
         // 提交返回：放大淡出
@@ -1054,10 +1487,18 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
     c.x += (_indicatorTarget.x - c.x) * k;
     c.y += (_indicatorTarget.y - c.y) * k;
     _indicator.center = c;
+    CGFloat targetScale = _indicatorTargetScale;
+    CGFloat targetAlpha = 0.9;
+    if ([(ObackEdgeIndicator *)_indicator isBreathing]) {
+        double t = CACurrentMediaTime();
+        double s = sin(t * 4.0);                  // ≈1.57s 周期
+        targetScale *= (1.0 + 0.05 * s);         // 缩放 ±5% 脉冲
+        targetAlpha = 0.9 + 0.08 * s;            // 透明度 ±0.08 脉冲
+    }
     CGFloat sc = _indicator.transform.a;          // 当前 x 缩放（transform 仅等比缩放）
-    sc += (_indicatorTargetScale - sc) * k;
+    sc += (targetScale - sc) * k;
     _indicator.transform = CGAffineTransformMakeScale(sc, sc);
-    _indicator.alpha = 0.9;
+    _indicator.alpha = targetAlpha;
 }
 
 - (void)_stopIndicatorLink {

@@ -64,7 +64,7 @@ static void OBApplyParallax(CGFloat percent,
 
 @implementation ObackParams
 + (instancetype)defaults {
-    ObackParams *p = [[ObackParams alloc] init];
+    ObackParams *p = [[[ObackParams alloc] init] autorelease];
     p.triggerWidth     = 40.0;   // 边缘触发宽度：24 太窄（用户常从 25~32pt 起滑，判为"不在边缘"），放宽到 40
     p.leftEnabled      = YES;
     p.rightEnabled     = YES;
@@ -95,7 +95,7 @@ static void OBApplyParallax(CGFloat percent,
 - (instancetype)initWithEdge:(ObackEdge)edge params:(ObackParams *)params {
     if (self = [super init]) {
         _edge = edge;
-        _params = params ?: [ObackParams defaults];
+        self.params = params ?: [ObackParams defaults];
         _parallaxToView = YES;   // 默认 nav pop 视差（安全且已验证）；弹窗 dismiss 由调用方置 NO
     }
     return self;
@@ -156,43 +156,20 @@ static void OBApplyParallax(CGFloat percent,
 
     UIView *dim = nil;
     if (self.parallaxToView) {
-        // 【关键修复】nav pop：底页(toView) 用「离屏渲染的图像」呈现，绝不重挂载真实 toView 进 container。
-        // 真实 toView 内部多为 UIScrollView，一旦 reparent 进 containerView，其 safeAreaInsets/
-        // contentInset 会随 superview 变化被重算 → 底部 TabBar/功能入口错位、被滚出视口
-        // （华为健康/微信「底部空白」根因，与 toView 是否 transform 无关）。
-        // 系统原生 pop 的底页本就完全静止，故用 drawViewHierarchyInRect:afterScreenUpdates:YES 渲染出
-        // 一张当前内容的静态图像铺底——图像是离屏像素，reparent 它永不伤真实 scrollView；
-        // 转场结束 completeTransition 后，真实 toView（从未移动）原样显露，零 layout 扰动、零空白。
+        // nav pop：底页(toView) 用「真实视图」铺底（非离屏快照）。
+        // 旧方案用 drawViewHierarchyInRect: 给底页拍离屏快照铺底，但 nav pop 转场开始时
+        // toView(底页)尚未在 window 完成渲染，快照取到空白/失败 → 右缘返回"空白"。
+        // 改用 UIKit 已放入 container 的真实 toView 作底（若尚未入 container 则补挂，
+        // frame=container.bounds）。OBApplyParallax 对 toView 保持 Identity(完全静止、零 transform)，
+        // 因此即使 reparent 也不会像旧版(给 toView 加 scale 视差)那样破坏其内部 scrollView 的
+        // contentInset/safeArea → 既无空白、也无底部错位。真实底页原样显示，零扰动。
         // 只把当前页(fromView)挂入 container 做滑出；不创建 dim（底页无需压暗、避免遮挡）。
         if (fromView.superview != container) [container addSubview:fromView];
-        // 用「离屏渲染底页图像」作容器最底层，绝不重挂载真实 toView（避免底部空白根因）。
-        // 旧方案 snapshotViewAfterScreenUpdates:NO 在交互转场此刻 toView 尚未进窗口/未渲染，
-        // 永远返回 nil → 每次都退回挂真实 toView → 重挂载破坏 scrollView 布局 → 底部空白
-        // （oback_debug(38).log 实测每次都打「快照失败」印证）。
-        // 改用 drawViewHierarchyInRect:afterScreenUpdates:YES：强制离屏渲染 toView 当前内容
-        // （无论是否进窗口都能拿到正确像素），转成 UIImageView 铺底。图像是静态像素，
-        // reparent 它永不伤真实 scrollView；completeTransition 后真实 toView（从未被移动）
-        // 原样显露，零 layout 扰动、零空白。
-        UIImage *snapImg = nil;
-        CGRect snapRect = toView.bounds;
-        if (snapRect.size.width < 1.0 || snapRect.size.height < 1.0) snapRect = container.bounds;
-        UIGraphicsBeginImageContextWithOptions(snapRect.size, NO, 0);
-        [toView drawViewHierarchyInRect:snapRect afterScreenUpdates:YES];
-        snapImg = UIGraphicsGetImageFromCurrentImageContext();
-        UIGraphicsEndImageContext();
-        if (snapImg) {
-            UIImageView *iv = [[[UIImageView alloc] initWithImage:snapImg] autorelease];
-            iv.frame = container.bounds;
-            iv.userInteractionEnabled = NO;
-            iv.contentMode = UIViewContentModeScaleToFill;
-            [container insertSubview:iv belowSubview:fromView];
-            OBLog(@"interruptible: nav pop 使用底页图像快照(避免底部空白)");
-        } else {
-            // 兜底：极端情况下图像取不到。不再 reparent 真实 toView（那正是之前华为健康/微信
-            // 底部空白根因——真实 toView 的 scrollView 随 superview 变化被重算 contentInset）。
-            // 改为仅当前页(fromView)滑出、无上一页底图（视觉略差但安全，绝不空白）。
-            OBLog(@"interruptible: nav pop 图像快照失败，安全兜底(不挂真实 toView，避免底部空白)");
+        if (toView && toView.superview != container) {
+            toView.frame = container.bounds;
+            [container insertSubview:toView atIndex:0];
         }
+        OBLog(@"interruptible: nav pop 使用真实 toView 铺底(无快照空白)");
     } else {
         // 弹窗 dismiss 方案B：底层 presenting(toView) 不碰 transform；目的页正常挂载，
         // dim 置于二者之间（presenting 不加深遮罩，避免已可见背景闪暗）。
@@ -203,6 +180,28 @@ static void OBApplyParallax(CGFloat percent,
         [container insertSubview:dim aboveSubview:toView];
     }
     [container bringSubviewToFront:fromView];
+
+    // ── 导航栏协同引擎（实验 nav 视差专用）──────────────────────────────
+    // 自定义 nav pop 转场中，live UINavigationBar 由 nav controller 私有持有、不随 container 的
+    // fromView/toView 移动 → 转场期间导航栏不跟手、转场后易损坏/消失。故：快照真实 bar，挂到
+    // fromView 上随其平移（OBApplyParallax 平移 fromView 时 snapshot 作为子视图一起动），转场结束
+    // （含 cancel / watchdog 兜底 / dealloc）由 _restoreNavBar 还原真实 bar。仅 nav pop(parallaxToView=YES) 触发。
+    if (self.parallaxToView && !_navBarSnapshot) {
+        UINavigationController *navC = from.navigationController ?: to.navigationController;
+        UINavigationBar *realBar = navC.navigationBar;
+        if (navC && realBar && !navC.navigationBarHidden) {
+            _navBarWasHidden = realBar.hidden;
+            _navBarSnapshot = [[realBar snapshotViewAfterScreenUpdates:NO] retain];   // MRC：snapshot 默认 autorelease，retain 持有
+            _navBarSnapshot.userInteractionEnabled = NO;
+            _navBarSnapshot.frame = [realBar convertRect:realBar.bounds toView:fromView];
+            [fromView addSubview:_navBarSnapshot];   // 作为 fromView 子视图，随其 transform 平移
+            realBar.hidden = YES;                    // 隐藏真实 bar，避免转场期间重复/错位
+            _navBarNav = navC;                        // assign，不 retain（避免循环引用）
+            OBLog(@"navBar 快照: 隐藏真实 bar，挂载 snapshot 到 fromView (nav=%@)",
+                  NSStringFromClass([navC class]));
+        }
+    }
+
     if (dim) [dim release];   // MRC：已加入 container 被其 retain，释放我们的所有权（nil 时跳过）
 
     [self applyShadowTo:fromView];
@@ -226,6 +225,7 @@ static void OBApplyParallax(CGFloat percent,
         if (blockSelf.completed) { blockSelf = nil; return; }   // 已被 manager 兜底收尾 → 防重复 completeTransition
         blockSelf.completed = YES;
         if (blockSelf.context) [blockSelf.context completeTransition:!cancelled];
+        [blockSelf _restoreNavBar];   // 还原真实导航栏（实验 nav 视差）
         OBLog(@"animator done (cancelled=%d)", cancelled);
         blockSelf = nil;   // 打破循环引用（MRC 无 __weak）
     }];
@@ -267,6 +267,21 @@ static void OBApplyParallax(CGFloat percent,
 // completion 里做 cleanup；completeTransition 由 completion + dispatch_after(0.3s) 双重
 // 保险确保一定被调用，避免某些 App 中 completion 延迟 1~2 秒导致界面冻结。
 // _completed 守卫防重复（finish/cancel 先调一次，watchdog 0.5s 后调则直接返回）。
+// 还原真实导航栏（与 _navBarSnapshot 配对）：转场完成/取消/watchdog 兜底、dealloc 均调用，
+// 确保真实 bar 必还原（hidden 写回原值），杜绝导航栏永久消失。_navBarSnapshot 非空才执行（幂等）。
+- (void)_restoreNavBar {
+    if (!_navBarSnapshot) return;
+    [_navBarSnapshot removeFromSuperview];
+    [_navBarSnapshot release];
+    _navBarSnapshot = nil;
+    if (_navBarNav) {
+        @try { _navBarNav.navigationBar.hidden = _navBarWasHidden; }
+        @catch (NSException *e) { OBLog(@"restoreNavBar hidden 写回异常: %@", e.reason); }
+        _navBarNav = nil;
+    }
+    OBLog(@"navBar 还原: 真实 bar 显示恢复 (hidden=%d)", _navBarWasHidden);
+}
+
 - (void)forceFinishIfNeeded {
     if (_completed) return;
     _completed = YES;
@@ -330,6 +345,7 @@ static void OBApplyParallax(CGFloat percent,
         } @catch (NSException *exception) {
             OBLog(@"forceComplete completeTransition CRASH: %@", exception.reason);
         }
+        [self _restoreNavBar];   // 还原真实导航栏（实验 nav 视差）
         // 显式清理所有非 from/to 子视图（dim 遮罩等）
         NSArray *subs = [[container.subviews copy] autorelease];
         for (UIView *sub in subs) {
@@ -351,6 +367,7 @@ static void OBApplyParallax(CGFloat percent,
         } @catch (NSException *exception) {
             OBLog(@"forceComplete completeTransition CRASH (dispatch_after): %@", exception.reason);
         }
+        [self _restoreNavBar];   // 还原真实导航栏（实验 nav 视差）
         NSArray *subs = [[container.subviews copy] autorelease];
         for (UIView *sub in subs) {
             if (sub != fromView && sub != toView) [sub removeFromSuperview];
@@ -363,7 +380,9 @@ static void OBApplyParallax(CGFloat percent,
 }
 
 - (void)dealloc {
+    if (_params) [_params release];
     [_propertyAnimator release];
+    if (_navBarSnapshot) [_navBarSnapshot release];   // 兜底（正常路径已在 _restoreNavBar 释放）
     [super dealloc];
 }
 
@@ -380,7 +399,7 @@ static void OBApplyParallax(CGFloat percent,
 
 // 方向性渐变遮罩：替代纯黑 UIView。沿边缘方向由深到浅，给"被压在下方"的页面更自然的纵深感。
 - (UIView *)_makeDimViewWithFrame:(CGRect)frame edge:(ObackEdge)edge {
-    UIView *v = [[UIView alloc] initWithFrame:frame];
+    UIView *v = [[[UIView alloc] initWithFrame:frame] autorelease];
     v.userInteractionEnabled = NO;
     CAGradientLayer *g = [CAGradientLayer layer];
     g.frame = frame;
@@ -407,7 +426,7 @@ static void OBApplyParallax(CGFloat percent,
 - (instancetype)initWithEdge:(ObackEdge)edge params:(ObackParams *)params {
     if (self = [super init]) {
         _edge = edge;
-        _params = params ?: [ObackParams defaults];
+        self.params = params ?: [ObackParams defaults];
         _parallaxToView = YES;   // 默认 nav pop 视差；弹窗 dismiss 由调用方置 NO
     }
     return self;
@@ -451,6 +470,11 @@ static void OBApplyParallax(CGFloat percent,
     anim.interactiveCancelled = YES;
     OBLog(@"oback-intc cancel (self=%p animator=%p)", self, anim);
     [anim forceFinishIfNeeded];
+}
+
+- (void)dealloc {
+    if (_params) [_params release];
+    [super dealloc];
 }
 
 @end

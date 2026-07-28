@@ -206,6 +206,22 @@
             <key>cell</key>
             <string>PSGroupCell</string>
             <key>label</key>
+            <string>胶囊特效</string>
+            <key>footerText</key>
+            <string>设置边缘指示胶囊的视觉风格，修改后下一次边缘手势即生效。</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSLinkCell</string>
+            <key>label</key>
+            <string>胶囊风格</string>
+            <key>detail</key>
+            <string>ObackCapsuleEffectController</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSGroupCell</string>
+            <key>label</key>
             <string>返回灵敏度</string>
             <key>footerText</key>
             <string>调节边缘返回的触发灵敏度。两个阈值都越低 → 越容易返回（更跟手，但快速横滑列表时可能误触）；越高 → 越需明显拖动或甩动才返回。建议保持默认，按真机手感微调。</string>
