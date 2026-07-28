@@ -243,10 +243,11 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
 - (void)start {
     if (_started) return;
     _started = YES;
-    // 诊断横幅：直接 NSLog 到 syslog（全局、不受 roothide 容器隔离、也不受「调试日志」开关门控），
-    // 即便调试日志关闭，也能在 Mac 上 `log stream | grep Oback-diag` 抓到本 App 真实 bid 与名单状态，
-    // 用于确认①装的是哪个包②黑名单数组是否真正加载/命中（此前文件日志因容器隔离抓不到拼多多）。
-    {
+    // 诊断横幅：独立隐藏开关 diagBanner 控制（默认关，key=diagBanner，无设置面板项）。
+    // 开启后直接 NSLog 到 syslog（全局、不受 roothide 容器隔离），可在 Mac 上 `log stream | grep Oback-diag`
+    // 抓到本 App 真实 bid 与名单状态，用于确认①装的是哪个包②黑名单数组是否真正加载/命中（此前文件日志因容器隔离抓不到拼多多）。
+    // 默认关：日用机零日志噪声；需要时临时 defaults 写入 diagBanner=1 即可开启，仍保留绕过容器隔离的诊断能力。
+    if ([ObackPreferences diagBannerEnabled]) {
         NSDictionary *d = [ObackPreferences _mergedPrefs];
         NSLog(@"[Oback-diag] bid=%@ whitelistMode=%@ blacklistApps=%@ isAllowed=%d debugLog=%@",
               NSBundle.mainBundle.bundleIdentifier,
