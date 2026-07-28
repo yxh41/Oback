@@ -119,37 +119,48 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
                 [self.layer addAnimation:pulse forKey:@"obNeonPulse"];
                 break;
             }
-            case ObackCapsuleEffectGradient: {       // 流光：同色系柔和流光，根除硬界线与生硬感
+            case ObackCapsuleEffectGradient: {       // 流光：细碎流光（多个窄柔峰连续流动），去大亮带、更灵动
                 self.backgroundColor = [UIColor clearColor];
                 CGFloat w = self.bounds.size.width;
                 CGFloat h = self.bounds.size.height;
                 // 渐变层 2 倍宽、含两个完全相同周期；平移刚好一个周期(w)后首尾一致 → 单向无缝流动。
+                // 每个周期内排布 4 个窄而柔的高光峰（全层 8 个），构成"细碎流光"而非单条扫光带。
                 CAGradientLayer *g = [CAGradientLayer layer];
                 g.frame = CGRectMake(0, 0, w * 2, h);
                 g.cornerRadius = 16;
-                // 同色系柔和渐变：基色深蓝 → 高光浅蓝（均在蓝家族，非近白）→ 对比度低，
-                // 蓝白硬界线消失；高光只是"光掠过"的柔光，而非一条生硬亮带。
+                // 同色系：基色深蓝 → 中蓝 → 浅蓝高光，均在蓝家族、低对比 → 无生硬蓝白界线。
                 UIColor *cBase = [UIColor colorWithRed:0.18 green:0.50 blue:0.95 alpha:1.0]; // 基色（蓝）
-                UIColor *cMid  = [UIColor colorWithRed:0.38 green:0.70 blue:1.0  alpha:1.0]; // 过渡（中蓝）
-                UIColor *cHi   = [UIColor colorWithRed:0.60 green:0.84 blue:1.0  alpha:1.0]; // 高光（浅蓝，同色系柔和）
-                // 单层周期 = 0.5 层宽；用 9 个细分 stop（基,中,高,中,基 ×2）把高光峰做成圆润钟形，
-                // 边界天然柔化、无三角尖峰的硬转折。
-                g.colors = @[ (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor,
-                              (__bridge id)cHi.CGColor,   (__bridge id)cMid.CGColor,
-                              (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor,
-                              (__bridge id)cHi.CGColor,   (__bridge id)cMid.CGColor,
+                UIColor *cMid  = [UIColor colorWithRed:0.39 green:0.71 blue:1.0  alpha:1.0]; // 过渡（中蓝）
+                UIColor *cHi   = [UIColor colorWithRed:0.62 green:0.85 blue:1.0  alpha:1.0]; // 高光（浅蓝，同色系柔和）
+                // 33 个 stop：基,中,高,中,基 重复成 8 个窄柔峰，峰间用 base 留缝 → 细碎闪烁流动。
+                g.colors = @[ (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor,
+                              (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor,
+                              (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor,
+                              (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor,
+                              (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor,
+                              (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor,
+                              (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor,
+                              (__bridge id)cBase.CGColor, (__bridge id)cMid.CGColor, (__bridge id)cHi.CGColor, (__bridge id)cMid.CGColor,
                               (__bridge id)cBase.CGColor ];
-                g.locations = @[ @0.0, @0.125, @0.25, @0.375, @0.5, @0.625, @0.75, @0.875, @1.0 ];
+                g.locations = @[ @0.0,     @0.03125, @0.0625,  @0.09375,
+                              @0.125,   @0.15625, @0.1875,  @0.21875,
+                              @0.25,    @0.28125, @0.3125,  @0.34375,
+                              @0.375,   @0.40625, @0.4375,  @0.46875,
+                              @0.5,     @0.53125, @0.5625,  @0.59375,
+                              @0.625,   @0.65625, @0.6875,  @0.71875,
+                              @0.75,    @0.78125, @0.8125,  @0.84375,
+                              @0.875,   @0.90625, @0.9375,  @0.96875,
+                              @1.0 ];
                 g.startPoint = CGPointMake(0, 0);
                 g.endPoint   = CGPointMake(1, 0);
                 [self.layer insertSublayer:g atIndex:0];
                 self.layer.masksToBounds = YES;   // 裁剪到圆角胶囊内（本特效无外阴影，可安全裁剪）
                 _gradientLayer = g;
-                // 连续向左平移一个周期，linear 无限循环 = 自然流光（稍慢 4.2s，更宁静柔和）
+                // 连续向左平移一个周期，linear 无限循环 = 细碎流光（4.0s，灵动不躁）
                 CABasicAnimation *flow = [CABasicAnimation animationWithKeyPath:@"transform.translation.x"];
                 flow.fromValue = @0;
                 flow.toValue   = @(-w);
-                flow.duration = 4.2;
+                flow.duration = 4.0;
                 flow.repeatCount = HUGE_VALF;
                 flow.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
                 [g addAnimation:flow forKey:@"obFlow"];
