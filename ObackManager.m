@@ -982,6 +982,7 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)g
 shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
     if (g == other || other == nil) return NO;
+    if (other.delegate == self) return NO;   // 自身另一个 pan(左/右/modal): 不与之同时识别, 更不记录为对手(否则 beginTransition 会误取消自身 → 右缘被取消 abort)
     if (![g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return NO;
     UIScreenEdgePanGestureRecognizer *mg = (UIScreenEdgePanGestureRecognizer *)g;
     if (!(mg.edges & UIRectEdgeLeft)) return NO;           // 仅左缘需要(右缘/标准 nav 无此冲突)
