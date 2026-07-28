@@ -99,37 +99,55 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
                 self.layer.shadowRadius = 14;
                 break;
             }
-            case ObackCapsuleEffectNeon: {           // 霓虹：描边 + 强发光
-                self.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.12];
-                self.layer.borderWidth = 2.0;
-                self.layer.borderColor = glow.CGColor;
+            case ObackCapsuleEffectNeon: {           // 霓虹：亮核 + 柔晕 + 微呼吸，模拟真实灯管
+                self.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.08];
+                // 灯管亮核：近白的高亮青，模拟霓虹管中心（而非一条生硬纯色描边）
+                self.layer.borderWidth = 1.5;
+                self.layer.borderColor = [UIColor colorWithRed:0.75 green:0.95 blue:1.0 alpha:1.0].CGColor;
+                // 外层柔晕：饱和青蓝，半径更大、半透明，靠脉冲缓动产生柔和流动
                 self.layer.shadowColor = glow.CGColor;
-                self.layer.shadowOpacity = 0.9;
-                self.layer.shadowRadius = 18;
+                self.layer.shadowOpacity = 0.85;
+                self.layer.shadowRadius = 22;
+                // 微呼吸：发光强度在 0.55~0.95 间 ease 缓动，自然不刺眼（避免恒定强光的生硬感）
+                CABasicAnimation *pulse = [CABasicAnimation animationWithKeyPath:@"shadowOpacity"];
+                pulse.fromValue = @0.55;
+                pulse.toValue   = @0.95;
+                pulse.duration = 2.6;
+                pulse.repeatCount = HUGE_VALF;
+                pulse.autoreverses = YES;
+                pulse.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+                [self.layer addAnimation:pulse forKey:@"obNeonPulse"];
                 break;
             }
-            case ObackCapsuleEffectGradient: {       // 流光：动态渐变填充
+            case ObackCapsuleEffectGradient: {       // 流光：无缝连续流动，根除来回硬扫动
                 self.backgroundColor = [UIColor clearColor];
+                CGFloat w = self.bounds.size.width;
+                CGFloat h = self.bounds.size.height;
+                // 渐变层做成 2 倍宽、含两个完全相同的周期；平移刚好一个周期(w)后首尾完全一致
+                // → 无限循环是「连续单向流动」，无任何回弹/跳变（旧版 start/end 双动画 autoreverse 才会硬倒回）。
                 CAGradientLayer *g = [CAGradientLayer layer];
-                g.frame = self.bounds;
+                g.frame = CGRectMake(0, 0, w * 2, h);
                 g.cornerRadius = 16;
-                g.colors = @[ (__bridge id)[UIColor whiteColor].CGColor,
-                              (__bridge id)[UIColor colorWithRed:0.55 green:0.82 blue:1.0 alpha:1.0].CGColor,
-                              (__bridge id)[UIColor whiteColor].CGColor ];
+                UIColor *cBase = [UIColor colorWithRed:0.30 green:0.66 blue:1.0 alpha:1.0]; // 流光主色（天蓝）
+                UIColor *cHi   = [UIColor colorWithRed:0.92 green:0.97 blue:1.0 alpha:1.0]; // 高光（近白）
+                // 两个周期：[主,高,主,高,主]，周期 = 0.5 层宽 = w；平移 w 即无缝
+                g.colors = @[ (__bridge id)cBase.CGColor, (__bridge id)cHi.CGColor,
+                              (__bridge id)cBase.CGColor, (__bridge id)cHi.CGColor,
+                              (__bridge id)cBase.CGColor ];
+                g.locations = @[ @0.0, @0.25, @0.5, @0.75, @1.0 ];
                 g.startPoint = CGPointMake(0, 0);
-                g.endPoint = CGPointMake(1, 0);
+                g.endPoint   = CGPointMake(1, 0);
                 [self.layer insertSublayer:g atIndex:0];
+                self.layer.masksToBounds = YES;   // 裁剪到圆角胶囊内（本特效无外阴影，可安全裁剪）
                 _gradientLayer = g;
-                CABasicAnimation *a1 = [CABasicAnimation animationWithKeyPath:@"startPoint"];
-                a1.fromValue = [NSValue valueWithCGPoint:CGPointMake(0, 0)];
-                a1.toValue   = [NSValue valueWithCGPoint:CGPointMake(1, 0)];
-                a1.duration = 1.6; a1.repeatCount = HUGE_VALF; a1.autoreverses = YES;
-                [g addAnimation:a1 forKey:@"obFlowStart"];
-                CABasicAnimation *a2 = [CABasicAnimation animationWithKeyPath:@"endPoint"];
-                a2.fromValue = [NSValue valueWithCGPoint:CGPointMake(1, 0)];
-                a2.toValue   = [NSValue valueWithCGPoint:CGPointMake(0, 0)];
-                a2.duration = 1.6; a2.repeatCount = HUGE_VALF; a2.autoreverses = YES;
-                [g addAnimation:a2 forKey:@"obFlowEnd"];
+                // 连续向左平移一个周期，linear 无限循环 = 自然流光
+                CABasicAnimation *flow = [CABasicAnimation animationWithKeyPath:@"transform.translation.x"];
+                flow.fromValue = @0;
+                flow.toValue   = @(-w);
+                flow.duration = 3.2;
+                flow.repeatCount = HUGE_VALF;
+                flow.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+                [g addAnimation:flow forKey:@"obFlow"];
                 break;
             }
             case ObackCapsuleEffectFrosted: {        // 毛玻璃：半透明磨砂
@@ -174,12 +192,14 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
 }
 
 - (void)stopEffectAnimations {
-    // 仅停掉流光循环动画（冻结在当前帧），保留渐变层本身，
+    // 停掉流光循环动画（冻结在当前帧），保留渐变层本身，
     // 避免收起淡出时胶囊「丢失身体」只剩箭头。层随视图 dealloc 自动释放。
     if (_gradientLayer) {
         [_gradientLayer removeAllAnimations];
         _gradientLayer = nil;
     }
+    // 同步停掉霓虹呼吸脉冲，避免淡出时残留发光动画
+    [self.layer removeAnimationForKey:@"obNeonPulse"];
 }
 
 - (BOOL)isBreathing { return _breathing; }
