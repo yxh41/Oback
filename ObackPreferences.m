@@ -186,6 +186,16 @@ static NSTimeInterval __obDebugLogCacheTS = 0;
     return v ? [v boolValue] : NO;   // 未设置 → 默认关
 }
 
+// 诊断横幅独立隐藏开关：key=diagBanner，默认关（无设置面板项，需手动 defaults 写入或调试时临时开）。
+// 开 → 每次注入在 start 打印 [Oback-diag] 横幅（真实 bid / 名单状态 / isAllowed），用于排查黑名单命中、装包来源；
+// 关（默认）→ 完全不打印，日用机零日志噪声。此前该横幅为常开且绕过「调试日志」开关，
+// 现改为受本独立开关控制：默认关 = 不给用户添噪声；需要时临时开 = 仍可绕过 roothide 容器隔离抓到真实 bid。
++ (BOOL)diagBannerEnabled {
+    NSDictionary *d = [self _mergedPrefs];
+    id v = [d objectForKey:@"diagBanner"];
+    return v ? [v boolValue] : NO;   // 未设置 → 默认关
+}
+
 // 胶囊特效：设置面板「胶囊风格」(key=capsuleEffect)。
 // 取值含义（见 ObackManager.m 的 ObackCapsuleEffect 枚举）：0=经典（默认）/1=发光/2=霓虹/3=流光/4=毛玻璃/5=呼吸。
 // 越界值回落经典(0)。此处用字面量边界(0..5)以避免跨文件依赖该枚举定义。
