@@ -729,6 +729,12 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
             } else {
                 self.currentParallaxToView = YES;   // 标准 nav：系统原生交互转场(跟手)
             }
+            // [2026-07-29 误触修复] 接管型 nav（微信等，走 rightSimplePop 非交互返回）滑动手势 began 后，
+            // 不能让底层可点击元素（聊天中的小程序卡片等）在松手时误触发。delaysTouchesBegan=YES 延迟底层
+            // touch 下发：手势确认 began 后底层不再收 touch → 不误触；若用户仅边缘轻点未触发返回（手势 failed），
+            // 延迟的 touch 仍下发，朋友圈/列表点击照常（不破坏 cancelsTouchesInView=NO 已验证的“点得进”行为）。
+            // 方案 A 标准 nav 保持 NO（系统原生交互转场自行处理 touch 取消，无需我们干预）。
+            pan.delaysTouchesBegan = self.rightSimplePop;
         }
     } else {
         if (top.presentingViewController != nil) {
