@@ -729,12 +729,14 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
             } else {
                 self.currentParallaxToView = YES;   // 标准 nav：系统原生交互转场(跟手)
             }
-            // [2026-07-29 误触修复] 接管型 nav（微信等，走 rightSimplePop 非交互返回）滑动手势 began 后，
-            // 不能让底层可点击元素（聊天中的小程序卡片等）在松手时误触发。delaysTouchesBegan=YES 延迟底层
-            // touch 下发：手势确认 began 后底层不再收 touch → 不误触；若用户仅边缘轻点未触发返回（手势 failed），
-            // 延迟的 touch 仍下发，朋友圈/列表点击照常（不破坏 cancelsTouchesInView=NO 已验证的“点得进”行为）。
-            // 方案 A 标准 nav 保持 NO（系统原生交互转场自行处理 touch 取消，无需我们干预）。
-            pan.delaysTouchesBegan = self.rightSimplePop;
+            // [2026-07-29 误触修复 v2] 接管型 nav（微信等，走 rightSimplePop 非交互返回）左/右缘滑动时，
+            // 底层可点击元素（聊天小程序卡片等）的激活（按钮 touchUpInside / cell 选中 / 其自带 tap 手势）
+            // 不能被放行——手指滑过卡片、松手即误开。delaysTouchesBegan=YES 无效：它只延迟“触摸下发到 view”，
+            // 影响不到卡片自己的手势识别器（且我们允许它与左缘 pan 同时识别）。正解在 beginTransition：
+            // pan 真正 began(=真实滑动)时临时把 cancelsTouchesInView 置 YES，UIKit 向底层 view 及手势识别器
+            // 发 touchesCancelled → 卡片激活被取消；松手即于 endTransition/abortTransition 复位 NO。
+            // 纯边缘点击不令 pan began(无位移) → cancelsTouchesInView 维持 NO → 朋友圈/列表点击照常(保留
+            // cancelsTouchesInView=NO 已验证的“点得进”行为)。方案 A 标准 nav 不受影响(rightSimplePop=NO)。
         }
     } else {
         if (top.presentingViewController != nil) {
@@ -831,6 +833,11 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     ObackParams *p = [ObackPreferences params];
     self.interactive = [[[ObackInteractiveTransition alloc] initWithEdge:self.currentEdge params:p] autorelease];
     self.interacting = YES;
+    // [2026-07-29 误触修复 v2] 接管型 nav 真实滑动（rightSimplePop）期间吞掉底层触摸：UIKit 向底层 view
+    // 及其手势识别器发 touchesCancelled，手指滑过的小程序卡片等不会被误触激活（松手不再 touchUpInside/选中）。
+    // 方案 A（rightSimplePop=NO）保持 NO——系统原生交互转场自行处理 touch 取消，无需我们干预。
+    // 直接按 rightSimplePop 定值（而非仅置 YES），确保每轮 begin 都确定性重设，不依赖上一轮 end/abort 的复位。
+    pan.cancelsTouchesInView = self.rightSimplePop;
     // 同时识别场景下取消对手(微信朋友圈内部 pan),确保 Oback 左缘 rightSimplePop 独占返回、杜绝双返回
     if (_simulOpponent) {
         [_simulOpponent setState:UIGestureRecognizerStateCancelled];
@@ -1127,6 +1134,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 
 - (void)endTransition:(UIPanGestureRecognizer *)pan {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(dismissIndicatorSafety) object:nil];
+    pan.cancelsTouchesInView = NO;   // [2026-07-29 误触修复 v2] 复位：下一轮手势起始 cancelsTouchesInView 回到默认 NO（纯点击不误吞）
     // [2026-07-28 崩溃修复] 收尾 release+nil _simulOpponent。该指针已改为 retain 自持(994 行赋值处)，
     // 故 pop 文章后对手手势对象不会被释放(仅 view 置 nil)，beginTransition 取消时安全；但每轮仍须在
     // 生命周期结束处 release(交还所有权)以防泄漏。注:ef16030 原仅在 endTransition/abortTransition 清零
@@ -1363,6 +1371,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 // 手势意外失败(Failed/超时等)时的紧急清理：取消转场+消除胶囊，防止残留
 - (void)abortTransition:(UIPanGestureRecognizer *)pan {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(dismissIndicatorSafety) object:nil];
+    pan.cancelsTouchesInView = NO;   // [2026-07-29 误触修复 v2] 复位：下一轮手势起始 cancelsTouchesInView 回到默认 NO（纯点击不误吞）
     // [2026-07-28 崩溃修复] 同 endTransition：手势失败/被取消时 release+nil _simulOpponent
     // (retain 自持语义下交还所有权，杜绝泄漏；同时保证下一轮不会解引用悬空指针)。
     [_simulOpponent release]; _simulOpponent = nil;
