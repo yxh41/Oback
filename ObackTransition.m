@@ -173,11 +173,22 @@ static void OBApplyParallax(CGFloat percent,
     } else {
         // 弹窗 dismiss 方案B：底层 presenting(toView) 不碰 transform；目的页正常挂载，
         // dim 置于二者之间（presenting 不加深遮罩，避免已可见背景闪暗）。
-        if (toView.superview != container) [container insertSubview:toView atIndex:0];
+        // 【黑屏修复】绝对不要无条件把 toView 塞进临时 container：
+        //   - UIKit App：UIKit 已在转场开始时把 toView 预置进 container → superview==container，本就是空操作；
+        //   - SwiftUI App(如 com.wangcaicalculator.wc，弹窗为 PresentationHostingController)：底层
+        //     UIHostingController 视图挂在 window 下层、不在 container → 原代码 insert 会把它从真实
+        //     层级抽进临时 container，dismiss 完成 UIKit 拆 container 时把它一并销毁 → 返回后整屏黑
+        //     (进程活着、能上滑回桌面、不卡死)。故：仅当 toView 完全无宿主(superview==nil，被系统移出
+        //     窗口、不装进 container 就全程不可见)才装入；否则保持原层级不动，底层自然可见。
+        if (toView.superview == nil) [container insertSubview:toView atIndex:0];
         dim = [self _makeDimViewWithFrame:container.bounds edge:self.edge];
         dim.alpha = 0;
         dim.userInteractionEnabled = NO;   // 遮罩绝不拦截触摸
-        [container insertSubview:dim aboveSubview:toView];
+        // toView 可能不在 container 内(SwiftUI 挂在 window 下层)：此时 aboveSubview 无意义，
+        // 退化为放到 container 最底层；随后 bringSubviewToFront(fromView) 保证 sheet 在 dim 之上，
+        // 底层经透明 container 透出。避免传 nil 给 aboveSubview(部分 iOS 版本不安全)。
+        if (toView.superview == container) [container insertSubview:dim aboveSubview:toView];
+        else [container insertSubview:dim atIndex:0];
     }
     [container bringSubviewToFront:fromView];
 
