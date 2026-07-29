@@ -186,7 +186,7 @@ static NSTimeInterval __obDebugLogCacheTS = 0;
     return v ? [v boolValue] : NO;   // 未设置 → 默认关
 }
 
-// 诊断横幅独立隐藏开关：key=diagBanner，默认关（无设置面板项，需手动 defaults 写入或调试时临时开）。
+// 诊断横幅独立隐藏开关：key=diagBanner，默认关（设置面板「诊断横幅」开关控制，无需手动写 plist）。
 // 开 → 每次注入在 start 打印 [Oback-diag] 横幅（真实 bid / 名单状态 / isAllowed），用于排查黑名单命中、装包来源；
 // 关（默认）→ 完全不打印，日用机零日志噪声。此前该横幅为常开且绕过「调试日志」开关，
 // 现改为受本独立开关控制：默认关 = 不给用户添噪声；需要时临时开 = 仍可绕过 roothide 容器隔离抓到真实 bid。
