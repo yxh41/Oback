@@ -181,6 +181,42 @@
 		<dict>
 			<key>cell</key>
 			<string>PSGroupCell</string>
+			<key>footer</key>
+			<string>弹窗（下拉 sheet）返回时的卡片圆角。仅方案B 弹窗返回生效；默认原生边缘返回不启用此圆角。开启后下拉 sheet 时圆角由 0 渐变到设定值，更贴近 iOS 原生 sheet 手感。</string>
+			<key>label</key>
+			<string>弹窗圆角</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.zlhkf.oback</string>
+			<key>key</key>
+			<string>cardCornerEnabled</string>
+			<key>label</key>
+			<string>启用弹窗圆角</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>default</key>
+			<real>12.0</real>
+			<key>defaults</key>
+			<string>com.zlhkf.oback</string>
+			<key>key</key>
+			<string>cardCornerValue</string>
+			<key>label</key>
+			<string>圆角半径 (pt)</string>
+			<key>max</key>
+			<real>40.0</real>
+			<key>min</key>
+			<real>0.0</real>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
 			<key>footerText</key>
 			<string>设置边缘指示胶囊的视觉风格，修改后下一次边缘手势即生效。</string>
 			<key>label</key>
