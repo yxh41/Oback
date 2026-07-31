@@ -18,7 +18,8 @@ static void OBApplyParallax(CGFloat percent,
                             UIView *dimView,
                             ObackEdge edge,
                             ObackParams *p,
-                            BOOL parallaxToView) {
+                            BOOL parallaxToView,
+                            BOOL scaleToView) {
     CGFloat w = fromView.window ? fromView.window.bounds.size.width
                                 : [UIScreen mainScreen].bounds.size.width;
     if (w <= 0) w = [UIScreen mainScreen].bounds.size.width;
@@ -34,16 +35,20 @@ static void OBApplyParallax(CGFloat percent,
         CGAffineTransformMakeScale(fromScale, fromScale));
 
     if (parallaxToView) {
-        // 上一页（toView）保持完全静止（系统原生边缘返回行为），不做任何 transform。
-        // 关键修复：实测给上一页加 scale/translate 视差（0.92→1.0）会让其内部
-        // UIScrollView 的 superview transform 破坏 contentOffset/layout 计算，
-        // 转场结束后底部按钮区域被滚出/错位（华为健康底部功能入口空白）。
-        // 当前页(fromView)仍按方向滑出+轻微缩小（视觉"飞出"感保留），它很快被移除，
-        // 其内部 scrollView 的瞬时 transform 不影响最终显示的上一页。
-        toView.transform = CGAffineTransformIdentity;
-        // 上一页初始被压暗，随拖动变亮（dim 仍跟随拖动，提供纵深感）
+        // 上一页视差：仅作用于「截图层」(scaleToView=YES 时 toView 即截图)，真实底页保持 Identity 不缩放
+        // → 其内部 scrollView 永不被 transform 扰动（根治华为健康底部错位）。scaleToView=NO（截图失败等
+        // 兜底）则保持静止，退化为无缩放的安全铺底，不引入风险。
+        if (scaleToView) {
+            // 上一页从 previousScaleMin(0.92) 放大到 1.0、并随拖动做反向轻移，模拟 OPPO「上一页探出+放大」纵深感。
+            CGFloat scale = p.previousScaleMin + (1.0 - p.previousScaleMin) * percent;
+            CGFloat shift = -dir * (1.0 - percent) * p.parallaxOffset * w;   // dir=当前页方向，上一页反向探出
+            toView.transform = CGAffineTransformConcat(
+                CGAffineTransformMakeTranslation(shift, 0),
+                CGAffineTransformMakeScale(scale, scale));
+        } else {
+            toView.transform = CGAffineTransformIdentity;
+        }
         if (dimView) dimView.alpha = (1.0 - percent) * p.dimAlpha;
-        // nav pop 路径无卡片圆角，确保无残留
         fromView.layer.cornerRadius = 0;
         fromView.layer.masksToBounds = NO;
     } else {
@@ -155,21 +160,35 @@ static void OBApplyParallax(CGFloat percent,
     UIView *toView   = to.view;
 
     UIView *dim = nil;
+    UIView *toParallaxView = toView;   // 上一页视差实际作用视图（默认真实 toView；截图成功则改截图层）
+    BOOL doScale = NO;                 // 是否对上一页施加缩放视差（截图成功才 YES，失败退化为安全静止）
     if (self.parallaxToView) {
-        // nav pop：底页(toView) 用「真实视图」铺底（非离屏快照）。
-        // 旧方案用 drawViewHierarchyInRect: 给底页拍离屏快照铺底，但 nav pop 转场开始时
-        // toView(底页)尚未在 window 完成渲染，快照取到空白/失败 → 右缘返回"空白"。
-        // 改用 UIKit 已放入 container 的真实 toView 作底（若尚未入 container 则补挂，
-        // frame=container.bounds）。OBApplyParallax 对 toView 保持 Identity(完全静止、零 transform)，
-        // 因此即使 reparent 也不会像旧版(给 toView 加 scale 视差)那样破坏其内部 scrollView 的
-        // contentInset/safeArea → 既无空白、也无底部错位。真实底页原样显示，零扰动。
-        // 只把当前页(fromView)挂入 container 做滑出；不创建 dim（底页无需压暗、避免遮挡）。
+        // nav pop：底页(toView) 真实视图入 container 作底（Identity，零 transform，scrollView 安全，
+        // 兼修 reparent 黑屏）；其上叠加一张 toView 的静态截图 snap 作为「缩放视差层」——
+        // 只对 snap 施加 0.92→1.0 缩放+位移，真实 toView 始终 Identity 不缩放 → 内部 scrollView 永不被
+        // 扰动（根治华为健康底部错位），同时恢复 OPPO 风格上一页缩放视差。
+        // 截图时机：toView 入 container 并 layoutIfNeeded 后再拍，确保取到已布局内容（旧版
+        // drawViewHierarchyInRect 在 toView 未入窗时拍到空白→右缘空白）。
         if (fromView.superview != container) [container addSubview:fromView];
         if (toView && toView.superview != container) {
             toView.frame = container.bounds;
+            [toView layoutIfNeeded];
             [container insertSubview:toView atIndex:0];
         }
-        OBLog(@"interruptible: nav pop 使用真实 toView 铺底(无快照空白)");
+        if (toView && !_toViewSnapshot) {
+            UIView *snap = [toView snapshotViewAfterScreenUpdates:NO];
+            if (snap) {
+                snap.frame = toView.frame;
+                _toViewSnapshot = [snap retain];   // MRC：snapshot 默认 autorelease，retain 持有
+                [container insertSubview:_toViewSnapshot aboveSubview:toView];
+                toView.hidden = YES;               // 隐藏真实底页，避免缩放 snap 周围透出未缩放底页
+                toParallaxView = _toViewSnapshot;
+                doScale = YES;
+                OBLog(@"nav pop 截图层创建成功 (snap=%p) → 启用缩放视差", _toViewSnapshot);
+            } else {
+                OBLog(@"nav pop 截图层创建失败 → 退化为真实 toView 静止铺底(无缩放)");
+            }
+        }
     } else {
         // 弹窗 dismiss 方案B：底层 presenting(toView) 不碰 transform；目的页正常挂载，
         // dim 置于二者之间（presenting 不加深遮罩，避免已可见背景闪暗）。
@@ -216,7 +235,7 @@ static void OBApplyParallax(CGFloat percent,
     if (dim) [dim release];   // MRC：已加入 container 被其 retain，释放我们的所有权（nil 时跳过）
 
     [self applyShadowTo:fromView];
-    OBApplyParallax(0, fromView, toView, dim, self.edge, self.params, self.parallaxToView);
+    OBApplyParallax(0, fromView, toParallaxView, dim, self.edge, self.params, self.parallaxToView, doScale);
 
     // 初速 0（真实速度在 finish 时经 applyReleaseVelocity 更新），damping 0.82 给出自然回弹手感
     UISpringTimingParameters *sp = [[UISpringTimingParameters alloc] initWithDampingRatio:0.82];
@@ -227,7 +246,9 @@ static void OBApplyParallax(CGFloat percent,
     // MRC：禁用 __weak，用 __block 且 completion 内置 nil 打破 self->animator->block->self 循环引用
     __block ObackAnimator *blockSelf = self;
     [anim addAnimations:^{
-        OBApplyParallax(1, fromView, toView, dim, blockSelf.edge, blockSelf.params, blockSelf.parallaxToView);
+        UIView *tpView = blockSelf.toViewSnapshot ?: toView;
+        BOOL tpScale = (blockSelf.parallaxToView && blockSelf.toViewSnapshot != nil);
+        OBApplyParallax(1, fromView, tpView, dim, blockSelf.edge, blockSelf.params, blockSelf.parallaxToView, tpScale);
     }];
     [anim addCompletion:^(UIViewAnimatingPosition finalPosition) {
         [dim removeFromSuperview];
@@ -237,6 +258,7 @@ static void OBApplyParallax(CGFloat percent,
         blockSelf.completed = YES;
         if (blockSelf.context) [blockSelf.context completeTransition:!cancelled];
         [blockSelf _restoreNavBar];   // 还原真实导航栏（实验 nav 视差）
+        [blockSelf _cleanupToViewSnapshot:toView];   // 还原真实底页可见 + 移除截图层
         OBLog(@"animator done (cancelled=%d)", cancelled);
         blockSelf = nil;   // 打破循环引用（MRC 无 __weak）
     }];
@@ -293,6 +315,17 @@ static void OBApplyParallax(CGFloat percent,
     OBLog(@"navBar 还原: 真实 bar 显示恢复 (hidden=%d)", _navBarWasHidden);
 }
 
+// 实验 nav 视差清理（与 _toViewSnapshot 配对）：还原真实底页可见、移除并释放截图层。
+// 转场完成/取消/watchdog 兜底、dealloc 前的各出口均调用，确保真实底页必现、截图层不泄漏。
+- (void)_cleanupToViewSnapshot:(UIView *)realToView {
+    if (_toViewSnapshot) {
+        [_toViewSnapshot removeFromSuperview];
+        [_toViewSnapshot release];
+        _toViewSnapshot = nil;
+    }
+    if (realToView) realToView.hidden = NO;
+}
+
 - (void)forceFinishIfNeeded {
     if (_completed) return;
     _completed = YES;
@@ -335,8 +368,10 @@ static void OBApplyParallax(CGFloat percent,
                          options:UIViewAnimationOptionCurveEaseOut
                       animations:^{
         // OBApplyParallax(1)=提交终态, OBApplyParallax(0)=取消回初始态
-        OBApplyParallax(commit ? 1.0 : 0.0, fromView, toView, nil,
-                        self.edge, self.params, self.parallaxToView);
+        UIView *tpView = self.toViewSnapshot ?: toView;
+        BOOL tpScale = (self.parallaxToView && self.toViewSnapshot != nil);
+        OBApplyParallax(commit ? 1.0 : 0.0, fromView, tpView, nil,
+                        self.edge, self.params, self.parallaxToView, tpScale);
         // 遮罩/自定义子视图淡出（dim、阴影等）
         for (UIView *sub in container.subviews) {
             if (sub != fromView && sub != toView) sub.alpha = 0.0;
@@ -357,6 +392,7 @@ static void OBApplyParallax(CGFloat percent,
             OBLog(@"forceComplete completeTransition CRASH: %@", exception.reason);
         }
         [self _restoreNavBar];   // 还原真实导航栏（实验 nav 视差）
+        [self _cleanupToViewSnapshot:toView];   // 还原真实底页可见 + 移除/释放截图层
         // 显式清理所有非 from/to 子视图（dim 遮罩等）
         NSArray *subs = [[container.subviews copy] autorelease];
         for (UIView *sub in subs) {
@@ -379,6 +415,7 @@ static void OBApplyParallax(CGFloat percent,
             OBLog(@"forceComplete completeTransition CRASH (dispatch_after): %@", exception.reason);
         }
         [self _restoreNavBar];   // 还原真实导航栏（实验 nav 视差）
+        [self _cleanupToViewSnapshot:toView];   // 还原真实底页可见 + 移除/释放截图层
         NSArray *subs = [[container.subviews copy] autorelease];
         for (UIView *sub in subs) {
             if (sub != fromView && sub != toView) [sub removeFromSuperview];
@@ -394,6 +431,7 @@ static void OBApplyParallax(CGFloat percent,
     if (_params) [_params release];
     [_propertyAnimator release];
     if (_navBarSnapshot) [_navBarSnapshot release];   // 兜底（正常路径已在 _restoreNavBar 释放）
+    if (_toViewSnapshot) [_toViewSnapshot release];   // 兜底（正常路径已在 _cleanupToViewSnapshot 释放）
     [super dealloc];
 }
 
