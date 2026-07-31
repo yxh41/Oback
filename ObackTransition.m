@@ -176,8 +176,11 @@ static void OBApplyParallax(CGFloat percent,
             [container insertSubview:toView atIndex:0];
         }
         if (toView && !_toViewSnapshot) {
-            UIView *snap = [toView snapshotViewAfterScreenUpdates:NO];
-            if (snap) {
+            UIView *snap = [toView snapshotViewAfterScreenUpdates:YES];
+            // 健全性兜底：快照尺寸无效(空白截取)时不隐藏真实底页，退化为静止铺底，根治华为健康等复杂布局底栏空白
+            CGSize _ss = snap ? snap.bounds.size : CGSizeZero;
+            BOOL snapValid = (_ss.width >= 1.0 && _ss.height >= 1.0);
+            if (snapValid) {
                 snap.frame = toView.frame;
                 _toViewSnapshot = [snap retain];   // MRC：snapshot 默认 autorelease，retain 持有
                 [container insertSubview:_toViewSnapshot aboveSubview:toView];
