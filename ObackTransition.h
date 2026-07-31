@@ -31,7 +31,6 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 @property (nonatomic, assign) BOOL    hapticEnabled;     // 触感反馈
 @property (nonatomic, assign) CGFloat parallaxOffset;    // 上一页视差位移比例 (0~0.6)
 @property (nonatomic, assign) CGFloat previousScaleMin;  // 上一页最小缩放 (0.8~1)
-@property (nonatomic, assign) CGFloat dimAlpha;          // 遮罩浓度 (0~0.8)
 @property (nonatomic, assign) BOOL    shadowEnabled;     // 当前页阴影
 @property (nonatomic, assign) CGFloat shadowOpacity;     // 阴影浓度
 @property (nonatomic, assign) NSTimeInterval duration;   // 释放后补间时长 (s)
@@ -55,7 +54,7 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 @property (nonatomic, assign) id<UIViewControllerContextTransitioning> context;
 // 防重复：completeTransition 只准调一次（动画器 completion 与 manager 兜底定时器互斥）
 @property (nonatomic, assign) BOOL completed;
-// 松手速度/进度，由 ObackManager 在 endTransition 写入，finish 时经 applyReleaseVelocity 用于动量继承
+// 松手速度/进度，由 ObackManager 在 endTransition 写入（完成动画初始态参考）
 @property (nonatomic, assign) CGFloat releaseVelocity;
 @property (nonatomic, assign) CGFloat releasePercent;
 // finish=NO / cancel=YES：供 completion 决定 completeTransition 方向（避免反向动画 finalPosition 误判导致取消却提交了 pop）
@@ -67,8 +66,6 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 @property (nonatomic, assign) UINavigationController *navBarNav; // 真实 bar 所属 nav（assign，不 retain 避免循环）
 @property (nonatomic, assign) BOOL navBarWasHidden;              // 转场前真实 bar 的 hidden 状态
 - (instancetype)initWithEdge:(ObackEdge)edge params:(ObackParams *)params;
-// 在 finish/cancel 前调用：用真实松手速度更新弹簧初速度（速度感知弹簧的关键；取消时速度已清零→温和回弹）
-- (void)applyReleaseVelocity;
 // 兜底收尾：若动画器因状态错位（continueAnimation 空操作等）未能自行触发 completion，
 // 由 manager 定时器调用，按 interactiveCancelled 一次性 completeTransition，杜绝"转场孤儿化→界面冻结"。
 - (void)forceFinishIfNeeded;
