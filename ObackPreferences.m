@@ -60,7 +60,6 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     if ((v = [d objectForKey:@"triggerWidth"]))     p.triggerWidth     = [v doubleValue];
     if ((v = [d objectForKey:@"parallaxOffset"]))   p.parallaxOffset   = [v doubleValue];
     if ((v = [d objectForKey:@"previousScaleMin"])) p.previousScaleMin = [v doubleValue];
-    if ((v = [d objectForKey:@"dimAlpha"]))         p.dimAlpha         = [v doubleValue];
     if ((v = [d objectForKey:@"shadowEnabled"]))    p.shadowEnabled    = [v boolValue];
     if ((v = [d objectForKey:@"shadowOpacity"]))    p.shadowOpacity    = [v doubleValue];
     if ((v = [d objectForKey:@"duration"]))         p.duration         = [v doubleValue];
@@ -130,18 +129,6 @@ static NSTimeInterval __obMergedPrefsTS = 0;
         if (!raw.length) return YES;
         return ![self _bundleId:bid inList:raw];
     }
-}
-
-+ (BOOL)isBlacklisted {
-    NSDictionary *d = [self _mergedPrefs];
-    NSString *bid = NSBundle.mainBundle.bundleIdentifier;
-    if (!bid) return NO;
-    NSArray *black = [d objectForKey:@"blacklistApps"];
-    if (black) return [self _bid:bid matchesList:black];
-    // 兼容旧版字符串
-    NSString *raw = [d objectForKey:@"blacklistRaw"];
-    if (!raw.length) return NO;
-    return [self _bundleId:bid inList:raw];
 }
 
 // 调试日志总开关：设置面板「调试日志」(key=debugLog)。
