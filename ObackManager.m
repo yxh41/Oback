@@ -65,6 +65,7 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
 - (instancetype)initWithEdge:(ObackEdge)edge;
 - (void)stopEffectAnimations;   // 收起时停掉渐变等循环动画，避免与淡出动画冲突/残留
 - (BOOL)isBreathing;            // 供 CADisplayLink 插值判断是否叠加呼吸脉冲
+- (void)setFlowSpeed:(CGFloat)speed;   // 流光跟手：流速联动手指速度（1=正常，>1 更 energetic，<1 更 calm）
 @end
 
 @implementation ObackEdgeIndicator {
@@ -211,6 +212,10 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
 
 - (BOOL)isBreathing { return _breathing; }
 
+- (void)setFlowSpeed:(CGFloat)speed {
+    if (_gradientLayer) _gradientLayer.speed = speed;   // 仅渐变特效有 _gradientLayer；其余特效此调用为空操作
+}
+
 @end
 
 @implementation ObackManager {
@@ -223,6 +228,8 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     CADisplayLink *_indicatorLink; // 胶囊平滑：每帧插值到目标位置（手势中跑，结束即停）
     CGPoint _indicatorTarget;    // 胶囊目标中心（updateIndicator 写入，tick 插值）
     CGFloat _indicatorTargetScale; // 胶囊目标缩放
+    CGFloat _flowSpeed;          // 流光跟手：当前平滑流速（1=正常 5.5s 循环，>1 更快更 energetic）
+    CGFloat _flowTargetSpeed;    // 流光跟手：目标流速（由手指横向速度映射，手指暂停时缓回 1.0）
     ObackAnimator *_watchAnimator; // MRC 强引用：兜底收尾定时器期间持有动画器，避免 UIKit 释放成野指针
     id     _navPopTarget;        // 方案A: 系统原生 nav pop 的私有 target(_UINavigationInteractiveTransition)，
                                  // 驱动 handleNavigationTransition: 用（assign，由 nav 内部持有，转场期间有效）
@@ -639,6 +646,10 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
 
 // 只在"落在边缘 + 可返回 + 不在黑名单"时，手势才接管，否则放行给 App 自身
 - (BOOL)gestureRecognizerShouldBegin:(UIScreenEdgePanGestureRecognizer *)pan {
+    // [2026-08-01 残影加固] 每轮手势从干净态起：先复位 cancelsTouchesInView=NO（默认安全值），
+    // 杜绝上一轮 endTransition/abortTransition 万一漏跑、残留 YES 污染下一轮（曾致进入聊天界面闪小程序卡片残影）。
+    // 真实滑动时 beginTransition 会按 rightSimplePop 重新定值（接管型=YES / 标准nav=NO），不影响已验证行为。
+    pan.cancelsTouchesInView = NO;
     if (self.interacting) { OBLog(@"shouldBegin=NO (已在交互中)"); return NO; }
     BOOL allowed = [ObackPreferences isAllowed];
     if (!allowed) { OBLog(@"shouldBegin=NO (isAllowed=NO, bid=%@)", NSBundle.mainBundle.bundleIdentifier); return NO; }
@@ -1532,6 +1543,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     [win addSubview:ind];
     [win bringSubviewToFront:ind];
     _indicator = ind;
+    _flowSpeed = 1.0; _flowTargetSpeed = 1.0;   // 流光跟手：每轮手势从正常流速(1.0)起
     // 启动胶囊平滑插值（CADisplayLink 每帧驱动；手势结束在 dismissIndicator* 停掉，仅手势中跑，功耗可忽略）
     if (!_indicatorLink) {
         _indicatorLink = [[CADisplayLink displayLinkWithTarget:self
@@ -1569,12 +1581,16 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     _indicatorTarget = CGPointMake(home.x + travel, home.y);
     _indicatorTargetScale = 0.85 + 0.15 * MIN(1.0, _currentPercent / 0.3);
     _indicator.alpha = 0.9;
+    // [2026-08-01 流光跟手] 手指横向速度 → 流光目标速度：快滑更 energetic、慢拖更 calm
+    CGFloat vx = [pan velocityInView:win].x;
+    _flowTargetSpeed = MAX(0.8, MIN(3.0, 0.8 + fabs(vx) / 1500.0 * 2.2));
     // 不再每帧 [win bringSubviewToFront:]（O(n) 主窗口子视图重排）；仅在 showIndicator 时置顶一次
 }
 
 - (void)dismissIndicatorCommitted:(BOOL)committed params:(ObackParams *)p window:(UIWindow *)win {
     UIView *ind = _indicator;
     _indicator = nil;
+    _flowSpeed = 1.0; _flowTargetSpeed = 1.0;   // 流光跟手：复位，下一轮手势干净起步
     [self _stopIndicatorLink];   // 手势结束：停平滑插值，胶囊交给 UIView 动画淡出/弹回
     [(ObackEdgeIndicator *)ind stopEffectAnimations];   // 停渐变等循环动画，避免与下方淡出动画冲突
     if (!ind) return;
@@ -1618,6 +1634,10 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         targetScale *= (1.0 + 0.05 * s);         // 缩放 ±5% 脉冲
         targetAlpha = 0.9 + 0.08 * s;            // 透明度 ±0.08 脉冲
     }
+    // [2026-08-01 流光跟手] 向目标流速平滑靠近；无新速度输入（手指暂停）时缓回 calm(1.0)。仅渐变特效生效。
+    _flowTargetSpeed += (1.0 - _flowTargetSpeed) * 0.05;
+    _flowSpeed += (_flowTargetSpeed - _flowSpeed) * 0.15;
+    [(ObackEdgeIndicator *)_indicator setFlowSpeed:_flowSpeed];
     CGFloat sc = _indicator.transform.a;          // 当前 x 缩放（transform 仅等比缩放）
     sc += (targetScale - sc) * k;
     _indicator.transform = CGAffineTransformMakeScale(sc, sc);
