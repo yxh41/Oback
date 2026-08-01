@@ -155,38 +155,6 @@ static NSTimeInterval __obDebugLogCacheTS = 0;
     return enabled;
 }
 
-// 导航视差「安全名单」：名单内 App 默认启用自定义 nav 视差（无感获得 premium 视差），名单外 App 仍走
-// 系统原生 pop（方案A，最稳）。未知 App 不翻车。名单保持保守（结构简单的标准 nav App），新增需逐 App 真机验证。
-+ (BOOL)_inParallaxSafelist {
-    static NSArray *safe = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        // 种子名单：Apple 系统 App（标准 UINavigationController，结构稳定，视差风险低）。
-        // 如需第三方 App，请逐个加入并真机验证稳定性后保留。
-        safe = [@[ @"com.apple.Preferences", @"com.apple.MobileSMS", @"com.apple.Mail",
-                   @"com.apple.mobilecal", @"com.apple.reminders", @"com.apple.Notes",
-                   @"com.apple.Music", @"com.apple.Maps" ] retain];   // MRC：静态变量需 retain（autorelease 会在 drain 后野指针）
-    });
-    NSString *bid = NSBundle.mainBundle.bundleIdentifier;
-    if (!bid) return NO;
-    if ([safe containsObject:bid]) return YES;   // 种子系统 App 永远在名单（无需勾选）
-    // 用户在设置「选视差程序」里手动勾选的 App（跨 App 全局文件真相源，ObackAppListController 写入 parallaxApps）。
-    id v = [[self _mergedPrefs] objectForKey:@"parallaxApps"];
-    if ([v isKindOfClass:[NSArray class]]) {
-        return [(NSArray *)v containsObject:bid];
-    }
-    return NO;
-}
-
-// 导航视差实验开关：设置面板「导航视差（实验）」(key=navParallax)，默认关。
-// 开 → 所有 App nav pop 走自定义 ObackAnimator 视差转场；关（默认）→ 仅「安全名单」内 App 走自定义视差，
-// 其余走系统原生 pop（方案A，最稳）。实验功能，需多 App 真机验证。
-+ (BOOL)navParallaxEnabled {
-    if ([self _inParallaxSafelist]) return YES;   // 安全名单内 App 默认启用（无感获得 premium 视差）
-    NSDictionary *d = [self _mergedPrefs];
-    id v = [d objectForKey:@"navParallax"];
-    return v ? [v boolValue] : NO;   // 未设置 → 默认关
-}
 
 // 双返回诊断开关：设置面板「双返回诊断」(key=doubleReturnDiag)，默认关。
 // 开启后，每次边缘起滑补链时把本 window 所有边缘返回手势的精确类名打进日志，

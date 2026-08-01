@@ -2,10 +2,9 @@
 #import "ObackManager.h"   // 读取松手速度/进度做动量继承（ObackManager.h 已 import ObackTransition.h，无循环依赖）
 
 // 核心：根据百分比把"当前页"和"上一页"摆到位，模拟 OPPO 风格边缘返回
-// parallaxToView=YES  → nav pop：当前页平移退出，其左/右缘阴影随进度渐隐（1→0）露出上一页；
-//                       上一页(toView)始终 Identity 不动、天然可见（替代原截图层缩放视差，更稳）。
-// parallaxToView=NO   → 弹窗 dismiss 方案B：只动被 dismiss 的 fromView(sheet 滑出+轻微缩小)，
+// parallaxToView（现恒为 NO）→ 弹窗 dismiss 方案B：只动被 dismiss 的 fromView(sheet 滑出+轻微缩小)，
 //                       绝不碰底层 presenting(toView)（黑屏根因），也不加深遮罩（避免已可见背景闪暗）。
+// 注：自定义 nav 视差（实验）功能已移除——nav pop 一律走系统原生转场（方案A），不再经本文件自定义动画。
 static void OBApplyParallax(CGFloat percent,
                             UIView *fromView,
                             UIView *toView,
@@ -19,7 +18,8 @@ static void OBApplyParallax(CGFloat percent,
 
     percent = MAX(0.0, MIN(1.0, percent));
     CGFloat dir = (edge == ObackEdgeLeft) ? 1.0 : -1.0;
-    (void)scaleToView;   // 阴影方案下不再对上一页缩放，参数保留以兼容调用点（消除 -Wunused-parameter）
+    (void)scaleToView;
+    (void)parallaxToView;   // 仅弹窗 dismiss(方案B) 使用，parallaxToView 恒为 NO（消除 -Wunused-parameter）
 
     // 当前页/被 dismiss 的 sheet：始终按方向平移；方案B 下额外给一点点缩小增强"飞出"感
     CGFloat fromScale = 1.0;
@@ -28,28 +28,17 @@ static void OBApplyParallax(CGFloat percent,
         CGAffineTransformMakeTranslation(dir * percent * w, 0),
         CGAffineTransformMakeScale(fromScale, fromScale));
 
-    if (parallaxToView) {
-        // 阴影渐隐方案（替代原截图层缩放）：上一页(toView) 始终 Identity 不动、天然可见，
-        // 不截图、不缩放 → 彻底去掉快照捕获时序 / 缩放几何 / scrollView 错位 / 底页空白整类坑。
-        // 当前页(fromView) 仅按方向平移；其左/右缘阴影浓度随进度线性衰减（1→0），
-        // 拖到底(percent=1)即完全无阴影、露出上一页。CA 在 start→end 间插值，交互 scrub 与松手收尾都自然跟随。
-        toView.transform = CGAffineTransformIdentity;   // 上一页零 transform，scrollView 永不扰动
-        fromView.layer.cornerRadius = 0;
-        fromView.layer.masksToBounds = NO;              // 必须 NO，阴影才能溢出渲染
-        CGFloat base = (p.shadowEnabled) ? p.shadowOpacity : 0.0;
-        fromView.layer.shadowOpacity = base * (1.0 - percent);   // 越拉越淡，percent=1 时消失
+    // 方案B：底层 presenting 绝不碰（黑屏根因）；不加深遮罩（避免已可见背景闪暗）。
+    // 注：nav 视差（parallaxToView=YES 平移上一页+阴影渐隐）已移除，本函数现仅弹窗 dismiss(方案B) 使用。
+    toView.transform = CGAffineTransformIdentity;
+    // 弹窗 dismiss：可选卡片圆角（拉出时渐进圆角，模拟 iOS sheet 下拉手感）
+    if (p.cardCornerEnabled) {
+        CGFloat r = p.cardCornerValue * percent;   // p=0→0, p=1→最大值，拖动中由 CA 线性插值
+        fromView.layer.cornerRadius = r;
+        fromView.layer.masksToBounds = (r > 0.5);
     } else {
-        // 方案B：底层 presenting 绝不碰（黑屏根因）；不加深遮罩，避免已可见背景闪暗
-        toView.transform = CGAffineTransformIdentity;
-        // 弹窗 dismiss：可选卡片圆角（拉出时渐进圆角，模拟 iOS sheet 下拉手感）
-        if (p.cardCornerEnabled) {
-            CGFloat r = p.cardCornerValue * percent;   // p=0→0, p=1→最大值，拖动中由 CA 线性插值
-            fromView.layer.cornerRadius = r;
-            fromView.layer.masksToBounds = (r > 0.5);
-        } else {
-            fromView.layer.cornerRadius = 0;
-            fromView.layer.masksToBounds = NO;
-        }
+        fromView.layer.cornerRadius = 0;
+        fromView.layer.masksToBounds = NO;
     }
 }
 
@@ -86,7 +75,7 @@ static void OBApplyParallax(CGFloat percent,
     if (self = [super init]) {
         _edge = edge;
         self.params = params ?: [ObackParams defaults];
-        _parallaxToView = YES;   // 默认 nav pop 视差（安全且已验证）；弹窗 dismiss 由调用方置 NO
+        _parallaxToView = NO;    // nav 视差已移除：本动画器现仅弹窗 dismiss 方案B 使用，parallaxToView 恒为 NO
     }
     return self;
 }
@@ -375,7 +364,7 @@ static void OBApplyParallax(CGFloat percent,
     if (self = [super init]) {
         _edge = edge;
         self.params = params ?: [ObackParams defaults];
-        _parallaxToView = YES;   // 默认 nav pop 视差；弹窗 dismiss 由调用方置 NO
+        _parallaxToView = NO;    // nav 视差已移除：弹窗 dismiss 方案B 使用，parallaxToView 恒为 NO
     }
     return self;
 }
@@ -400,23 +389,7 @@ static void OBApplyParallax(CGFloat percent,
     }
     pa.fractionComplete = percent;
 
-    // 确定性逐级驱动阴影渐隐：手动 scrub 阶段 UIViewPropertyAnimator 不会对 CALayer.shadowOpacity
-    // 做可靠的逐帧插值（真机实测拖动时阴影浓度恒定不衰减，即"没有渐隐的变化"）。
-    // 这里按 percent 直接算并即时落值，确保「越拉阴影越淡、拉到底(percent=1)完全消失」的跟手反馈。
-    // 注意：animator block 已不再触碰阴影，故此处显式赋值不会被暂停态 CA 动画的 presentation 值盖掉。
-    if (self.animator.parallaxToView) {
-        id<UIViewControllerContextTransitioning> ctx = self.animator.context;
-        UIViewController *fromVC = [ctx viewControllerForKey:UITransitionContextFromViewControllerKey];
-        UIView *fromView = fromVC.view;
-        if (fromView) {
-            ObackParams *p = self.animator.params;
-            CGFloat base = (p.shadowEnabled) ? p.shadowOpacity : 0.0;
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];   // 拖动期间即时跟随，不补帧动画（否则延迟/拖影）
-            fromView.layer.shadowOpacity = base * (1.0 - percent);
-            [CATransaction commit];
-        }
-    }
+    
 }
 
 - (void)finish {

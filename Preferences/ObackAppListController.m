@@ -156,7 +156,6 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 
 - (NSString *)_storeKey {
     if ([self.mode isEqualToString:@"white"])    return @"whitelistApps";
-    if ([self.mode isEqualToString:@"parallax"]) return @"parallaxApps";
     return @"blacklistApps";
 }
 
@@ -529,13 +528,3 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 }
 @end
 
-// 视差安全名单选择器：复用同一套已验证的手写 App 列表（PSTitleValueCell + 手动图标，无 PSApplicationCell / 无私有 API）。
-// 勾选写入 parallaxApps（全局文件真相源），ObackPreferences._inParallaxSafelist 读取并与系统种子名单合并。
-@implementation ObackParallaxListController
-- (id)init {
-    if (self = [super init]) {
-        self.mode = @"parallax";
-    }
-    return self;
-}
-@end

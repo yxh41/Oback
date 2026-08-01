@@ -62,7 +62,7 @@
 			<key>defaults</key>
 			<string>com.zlhkf.oback</string>
 			<key>footnote</key>
-			<string>返回过程中给当前页面叠加投影，增强层叠立体感。（注：默认原生边缘返回走系统转场，不消费以下动画参数；仅开启『导航视差（实验）』或弹窗返回时生效，属预期行为而非 bug。）</string>
+			<string>返回过程中给当前页面叠加投影，增强层叠立体感。（注：默认原生边缘返回走系统转场，不消费以下动画参数；仅弹窗返回时生效，属预期行为而非 bug。）</string>
 			<key>key</key>
 			<string>shadowEnabled</string>
 			<key>label</key>
@@ -94,7 +94,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>调节返回时当前页阴影的水平偏移（0–20pt）。数值越大，页面「抬起」的纵深感越强。（默认原生边缘返回走系统转场不消费此参数；仅开启『导航视差（实验）』或弹窗返回时生效。）</string>
+			<string>调节返回时当前页阴影的水平偏移（0–20pt）。数值越大，页面「抬起」的纵深感越强。（默认原生边缘返回走系统转场不消费此参数；仅弹窗返回时生效。）</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -116,7 +116,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>调节阴影的模糊半径（0–40pt）。数值越大阴影越柔和弥散。（默认原生边缘返回走系统转场不消费此参数；仅开启『导航视差（实验）』或弹窗返回时生效。）</string>
+			<string>调节阴影的模糊半径（0–40pt）。数值越大阴影越柔和弥散。（默认原生边缘返回走系统转场不消费此参数；仅弹窗返回时生效。）</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -138,7 +138,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>调节松手后完成或取消返回动画的时长（0.15–0.6 秒）。越短越跟手，越长越顺滑。（注：默认原生边缘返回走系统转场，不消费以下动画参数；仅开启『导航视差（实验）』或弹窗返回时生效，属预期行为而非 bug。）</string>
+			<string>调节松手后完成或取消返回动画的时长（0.15–0.6 秒）。越短越跟手，越长越顺滑。（注：默认原生边缘返回走系统转场，不消费以下动画参数；仅弹窗返回时生效，属预期行为而非 bug。）</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -160,7 +160,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>松手后的回弹动画。开启（默认）后释放速度会继承为弹性收尾，更跟手、更接近 OPPO/系统手感；若觉得回弹过头或想更线性，可关闭。（注：默认原生边缘返回走系统转场，不消费以下动画参数；仅开启『导航视差（实验）』或弹窗返回时生效，属预期行为而非 bug。）</string>
+			<string>松手后的回弹动画。开启（默认）后释放速度会继承为弹性收尾，更跟手、更接近 OPPO/系统手感；若觉得回弹过头或想更线性，可关闭。（注：默认原生边缘返回走系统转场，不消费以下动画参数；仅弹窗返回时生效，属预期行为而非 bug。）</string>
 			<key>label</key>
 			<string>动画</string>
 		</dict>
@@ -234,7 +234,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>调节边缘返回的触发灵敏度。两个阈值都越低 → 越容易返回（更跟手，但快速横滑列表时可能误触）；越高 → 越需明显拖动或甩动才返回。建议保持默认，按真机手感微调。（注：默认原生边缘返回走系统转场，不消费以下动画参数；仅开启『导航视差（实验）』或弹窗返回时生效，属预期行为而非 bug。）</string>
+			<string>调节边缘返回的触发灵敏度。两个阈值都越低 → 越容易返回（更跟手，但快速横滑列表时可能误触）；越高 → 越需明显拖动或甩动才返回。建议保持默认，按真机手感微调。（注：默认原生边缘返回走系统转场，不消费以下动画参数；仅弹窗返回时生效，属预期行为而非 bug。）</string>
 			<key>label</key>
 			<string>返回灵敏度</string>
 		</dict>
@@ -312,38 +312,6 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>以下为实验性开关，默认关闭。开启后需多 App 真机验证稳定性，如出现冻结 / 空白请关闭。</string>
-			<key>label</key>
-			<string>实验功能</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>default</key>
-			<false/>
-			<key>defaults</key>
-			<string>com.zlhkf.oback</string>
-			<key>footnote</key>
-			<string>关（默认）：导航返回用系统原生转场（最稳）。开：导航返回改用自定义 Oback 视差（当前页平移+投影，灵敏度滑块对导航返回也生效）；实验功能，需真机验证。</string>
-			<key>key</key>
-			<string>navParallax</string>
-			<key>label</key>
-			<string>导航视差（实验）</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSLinkCell</string>
-			<key>detail</key>
-			<string>ObackParallaxListController</string>
-			<key>footnote</key>
-			<string>仅对勾选的 App 启用自定义导航视差（系统 App 如设置/信息/邮件默认已启用，无需勾选）。逐个 App 真机验证无冻结/空白后再保留，未知 App 勿盲目勾选。</string>
-			<key>label</key>
-			<string>选视差程序</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>footerText</key>
 			<string>开启后把每次手势判定写入 /var/mobile/oback_debug.log（可用 Filza 抓取发我分析）。日用机建议关闭，避免日志频繁写盘。另：「立即打印诊断」按钮可向各 App 广播一次诊断（无需重启、无需 Mac）：各 App 把结果写入 /var/mobile/oback_diag.log 并在手机上直接弹文本框展示，用于核对当前 App 真实 bid / 名单命中 / 视差状态；也可随时用 Filza 看该文件。</string>
 			<key>label</key>
 			<string>调试</string>
@@ -391,10 +359,10 @@
 			<string>诊断横幅</string>
 		</dict>
 		<dict>
-			<key>cell</key>
-			<string>PSButtonCell</string>
 			<key>action</key>
 			<string>dumpDiagnostics</string>
+			<key>cell</key>
+			<string>PSButtonCell</string>
 			<key>label</key>
 			<string>立即打印诊断</string>
 		</dict>

@@ -17,6 +17,3 @@
 @interface ObackBlackListController : ObackAppListController
 @end
 
-// 视差安全名单选择器：mode=parallax，存储 key=parallaxApps（与黑白名单同一套手写 App 列表，零自定义 cell）。
-@interface ObackParallaxListController : ObackAppListController
-@end

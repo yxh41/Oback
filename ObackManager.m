@@ -271,12 +271,11 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     id bl = d[@"blacklistApps"];
     NSUInteger blCount = [bl isKindOfClass:[NSArray class]] ? [bl count] : 0;
     id wlm = d[@"whitelistMode"];
-    NSString *line = [NSString stringWithFormat:@"[%@] %@ bid=%@ isAllowed=%d whitelistMode=%@ blacklistCount=%lu capsuleEffect=%ld navParallax=%d state=%@",
+    NSString *line = [NSString stringWithFormat:@"[%@] %@ bid=%@ isAllowed=%d whitelistMode=%@ blacklistCount=%lu capsuleEffect=%ld state=%@",
                       manual ? @"手动dump" : @"注入",
                       [NSDate date], bid, [ObackPreferences isAllowed], wlm,
                       (unsigned long)blCount, (long)[ObackPreferences capsuleEffect],
-                      [ObackPreferences navParallaxEnabled],
-                      self.interacting ? @"交互中" : (_started ? @"已注入" : @"未注入")];
+                                            self.interacting ? @"交互中" : (_started ? @"已注入" : @"未注入")];
     NSLog(@"[Oback-diag] %@", line);   // 给有 Mac 的人：log stream | grep Oback-diag
     // 同时写手机本地文件：无 Mac 用户可用 Filza 直接看 /var/mobile/oback_diag.log，
     // 「立即打印诊断」按钮也会读此文件在手机上展示（跨进程：各 App 各自写自己的 bid）。
@@ -900,22 +899,10 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     // 方案 A：nav pop 改为驱动系统原生交互 pop（根除自定义转场 reparent toView 导致的空白/损坏）。
     // 在手势 Began(位移=0)即启动系统原生交互转场，由后续 updateTransition 的横向位移 scrub。
     // modal dismiss（currentParallaxToView=NO）走方案B 自定义转场，不在此启动。
-    // 右缘固定走自定义镜像转场（ObackAnimator + self.interactive 手动 scrub），不走方案A 系统原生
-    // handleNavigationTransition:（左缘语义，右缘负向位移被反 scrub → 触发不稳）。右缘改由
-    // triggerTransitionInWindow 调 popViewControllerAnimated: 触发自定义交互转场。
-    // 实验 nav 视差：navParallaxEnabled 时左缘不抢跑系统原生 handleNavigationTransition:
-    // （该入口会强制走系统 _UINavigationInteractiveTransition，忽略自定义 interactionController →
-    // self.interactive 空转、视差无效）。改由首次横拖 triggerTransitionInWindow 触发自定义
-    // popViewControllerAnimated:（ObackNavDelegate 返回 ObackAnimator + self.interactive 接管 scrub，同右缘节奏）。
+    // 右缘固定走 rightSimplePop 非交互返回（松手提交才 popViewControllerAnimated:），不在此启动交互转场。
+    // 自定义 nav 视差（实验）功能已移除——左缘 nav pop 一律走方案A 系统原生（最稳、零冻结）。
     if (self.currentParallaxToView && self.currentEdge != ObackEdgeRight) {
-        if (![ObackPreferences navParallaxEnabled]) {
-            [self driveSystemNavPopBeginWithPan:pan window:win];   // 方案A 系统原生交互 pop
-        } else {
-            // 跳过系统原生抢跑：重置探测标记，避免上次手势残留（driveSystemNavPopBeginWithPan 内会重置，此分支跳过它）
-            _navPopProbeFailed = NO;
-            _navPopProbed = NO;
-            OBLog(@"beginTransition: nav 视差实验模式，延迟自定义 pop 到首次横拖");
-        }
+        [self driveSystemNavPopBeginWithPan:pan window:win];   // 方案A 系统原生交互 pop
     }
 
     CGPoint loc = [pan locationInView:win];
@@ -964,7 +951,7 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
             // handleNavigationTransition:）。方向由 OBApplyParallax 的 edge 分支处理，正确无误。
             OBLog(@"trigger: nav pop 右缘自定义镜像转场，popViewControllerAnimated");
             [nav popViewControllerAnimated:YES];
-        } else if (self.interacting && ![ObackPreferences navParallaxEnabled]) {
+        } else if (self.interacting) {
             // 方案 A：交互 pop 已在 beginTransition 通过 handleNavigationTransition: 启动，
             // 此处不再调用 popViewControllerAnimated:（否则会触发第二次转场/黑屏）。
             OBLog(@"trigger: nav pop 已启动(系统原生交互)，忽略重复 popViewControllerAnimated");
@@ -1145,7 +1132,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     // 永不 interactive，当场切非交互 popViewControllerAnimated:（永不失效，代价不跟手）。
     // 探测仅用于方案A 识别微信等自定义 nav（系统原生交互转场能否启动）。nav 视差实验走自定义转场，
     // 其 transitionCoordinator 可能 interactive=NO → 误判 _navPopProbeFailed → 非交互重复 pop + 冲突，故跳过。
-    if (self.currentParallaxToView && self.currentEdge != ObackEdgeRight && !_navPopProbed && ![ObackPreferences navParallaxEnabled]) {
+    if (self.currentParallaxToView && self.currentEdge != ObackEdgeRight && !_navPopProbed) {
         _navPopProbed = YES;
         if (!_navPopProbeFailed) {
             UINavigationController *navP = nil;
@@ -1171,7 +1158,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     }
 
     _currentPercent = p;
-    if (self.currentParallaxToView && ([ObackPreferences navParallaxEnabled] || self.currentEdge == ObackEdgeRight)) {
+    if (self.currentParallaxToView && (self.currentEdge == ObackEdgeRight)) {
         // 实验：自定义 nav 视差 scrub（同 modal 方案B 机制，驱动 animator 的 fractionComplete）
         if (self.interactive) [self.interactive updateWithPercent:p];
     } else if (self.currentParallaxToView) {
@@ -1270,7 +1257,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     // 灵敏度滑块只对 modal dismiss(方案B 自定义转场)生效——这是为换取"零冻结/原生手感"的取舍，
     // 不回退到自定义 nav 转场（那曾是导致黑屏/冻结的根因）。
     if (self.currentParallaxToView) {
-        if ([ObackPreferences navParallaxEnabled] || self.currentEdge == ObackEdgeRight) {
+        if (self.currentEdge == ObackEdgeRight) {
             // 实验：自定义 nav 视差收尾（同 modal 方案B 机制，含右缘固定自定义镜像转场；复用已验证的 forceFinishIfNeeded）
             if (_transitionTriggered) {
                 if (commit) [self.interactive finish];
@@ -1435,7 +1422,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     ObackParams *p = [ObackPreferences params];
     if (_indicator) [self dismissIndicatorCommitted:NO params:p window:win];
     if (self.currentParallaxToView) {
-        if ([ObackPreferences navParallaxEnabled] || self.currentEdge == ObackEdgeRight) {
+        if (self.currentEdge == ObackEdgeRight) {
             // 实验：自定义 nav 视差取消（同 modal 方案B：含右缘固定自定义镜像转场；驱动 animator 反向回弹 + watchdog 兜底收尾）
             if (_transitionTriggered && self.interactive) [self.interactive cancel];
             [self _scheduleCompletionWatchdog];
