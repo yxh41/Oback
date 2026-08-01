@@ -55,7 +55,8 @@ static void OBApplyParallax(CGFloat percent,
     // commitVelocity 同步下调到 400，让一般甩动(flick)也能可靠提交。
     p.commitRatio      = 0.30;
     p.commitVelocity   = 400.0;
-    // 弹性补间：默认开。松手后按释放速度做动量继承的 spring 收尾，比线性 easeOut 更跟手、更高级。
+    // 弹性补间：默认开。松手收尾用带释放速度初速度的弹簧（动量继承生效）——快甩更快归位、更跟手；
+    // 关闭或系统减弱动态时降级为线性 easeOut。
     p.springEnabled    = YES;
     // 弹窗下拉卡片圆角：默认关（方案B 保守路径；开启后下拉 sheet 时渐进圆角，更贴近 iOS 原生 sheet）。
     p.cardCornerEnabled = NO;
@@ -80,7 +81,8 @@ static void OBApplyParallax(CGFloat percent,
 
 - (void)animateTransition:(id<UIViewControllerContextTransitioning>)ctx {
     // 诊断：入口确定执行一次（每次转场开始）。注意此刻 releaseVelocity 仍为 beginTransition 清零后的 0，
-    // 真实速度在 finish 时写入并体现在「animator spring applied」日志里。此处仅确认走了弹簧/线性分支。
+    // 真实速度在 finish 时由 ObackManager 写入，并被 forceFinishIfNeeded 的弹簧收尾消费（动量继承生效）。
+    // 非交互路径（点系统返回按钮）走此处；交互手势路径不经此方法，直接走 forceFinishIfNeeded。
     self.context = ctx;   // 记入上下文：兜底强制收尾时仍需它调 completeTransition
     CGFloat vel    = [ObackManager shared].releaseVelocity;
     CGFloat startP = [ObackManager shared].releasePercent;
@@ -225,22 +227,43 @@ static void OBApplyParallax(CGFloat percent,
 
     __block BOOL transitionFinished = NO;
 
-    // 用标准 UIView 动画把视图从当前中间态归位到终态（0.22s easeOut）
-    [UIView animateWithDuration:0.22 delay:0
-                         options:UIViewAnimationOptionCurveEaseOut
-                      animations:^{
+    // 动量继承收尾：取消时 ObackManager 已把 releaseVelocity 清零→温和回弹；
+    // 提交时带入真实前向速度→快甩更快归位（更跟手，贴近系统原生 sheet 手势）。
+    // 用带 initialVelocity 的弹簧替代固定 easeOut（绝不改用 continueAnimation 续跑旧路径——
+    // 那会与 double-fetch 防冻结设计冲突）。springEnabled 关闭或系统减弱动态时降级为线性 easeOut。
+    CGFloat w = fromView.window ? fromView.window.bounds.size.width
+                                : [UIScreen mainScreen].bounds.size.width;
+    CGFloat sv = (w > 0) ? (self.releaseVelocity / w) : 0.0;   // 归一化到全程比例
+    sv = MAX(-2.0, MIN(2.0, sv));                              // 限幅，防极端速度弹飞
+    BOOL reduceMotion = UIAccessibilityIsReduceMotionEnabled();
+    BOOL spring = self.params.springEnabled && !reduceMotion;
+    NSObject<UITimingCurveProvider> *tp;
+    if (spring) {
+        // mass=1.0 / dampingRatio=0.82 → 轻微欠阻尼，自然回弹；initialVelocity 继承松手速度
+        tp = [[UISpringTimingParameters alloc]
+            initWithMass:1.0 dampingRatio:0.82 initialVelocity:CGVectorMake(sv, 0.0)];
+    } else {
+        tp = [[UICubicTimingParameters alloc] initWithAnimationCurve:UIViewAnimationCurveEaseOut];
+    }
+    OBLog(@"animator spring applied (spring=%d vel=%.0f sv=%.2f)", spring, self.releaseVelocity, sv);
+
+    // 一次性弹簧/线性收尾（立即启动，系统持有 animator 至完成，无需本地 retain）。
+    // duration 仅作 API 上限提示，spring 实际时长由 settlingDuration 决定。
+    [UIViewPropertyAnimator
+        runningPropertyAnimatorWithDuration:MAX(0.3, self.params.duration)
+        timingParameters:tp
+        animations:^{
         // OBApplyParallax(1)=提交终态, OBApplyParallax(0)=取消回初始态
         UIView *tpView = toView;
         OBApplyParallax(commit ? 1.0 : 0.0, fromView, tpView,
                         self.edge, self.params);
-        // 取消回弹时阴影随页面滑回一同淡出到 0（而非动画回满值再于 completion 瞬清零 → 避免突兀 pop）；
-        // 提交时 OBApplyParallax(1) 已将阴影置 0，无需额外处理。同一 UIView 动画事务内再次赋值即更新动画目标值。
+        // 取消回弹时阴影随页面滑回一同淡出到 0；提交时 OBApplyParallax(1) 已将阴影置 0。
         if (!commit) fromView.layer.shadowOpacity = 0.0;
         // 自定义子视图淡出（阴影等）
         for (UIView *sub in container.subviews) {
             if (sub != fromView && sub != toView) sub.alpha = 0.0;
         }
-    } completion:^(BOOL finished) {
+    } completion:^(UIViewAnimatingPosition finalPosition) {
         if (transitionFinished) return;
         transitionFinished = YES;
         // 清理圆角/阴影残留（取消返回时 fromView 留在屏上，须清掉投影避免永久残留）
@@ -261,12 +284,14 @@ static void OBApplyParallax(CGFloat percent,
         for (UIView *sub in subs) {
             if (sub != fromView && sub != toView) [sub removeFromSuperview];
         }
-        OBLog(@"animator forceComplete done (completion, cancelled=%d)", !commit);
+        OBLog(@"animator forceComplete done (spring completion, cancelled=%d)", !commit);
     }];
+    [tp release];   // MRC：alloc 所得；timing 已拷贝进 animator，释放所有权
 
-    // 保险：0.3 秒后如果 completion 仍未触发，强制完成转场。
-    // 避免某些 App 中 UIView 动画 completion 延迟 1~2 秒甚至永不触发导致界面冻结。
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+    // 保险：0.6 秒后若 completion 仍未触发，强制完成转场（防冻结双保险，原样保留）。
+    // 延迟取 0.6s 以覆盖弹簧 settle（典型 <0.6s），避免在正常弹簧收尾尚未完成时提前拆除容器打断视觉；
+    // 仅在 completion 延迟/不触发的 App 下由本兜底接管。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (transitionFinished) return;
         transitionFinished = YES;
