@@ -271,12 +271,25 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     id bl = d[@"blacklistApps"];
     NSUInteger blCount = [bl isKindOfClass:[NSArray class]] ? [bl count] : 0;
     id wlm = d[@"whitelistMode"];
-    NSLog(@"[Oback-diag] %@ bid=%@ isAllowed=%d whitelistMode=%@ blacklistCount=%lu capsuleEffect=%ld navParallax=%d state=%@",
-          manual ? @"(手动dump)" : @"(注入)",
-          bid, [ObackPreferences isAllowed], wlm,
-          (unsigned long)blCount, (long)[ObackPreferences capsuleEffect],
-          [ObackPreferences navParallaxEnabled],
-          self.interacting ? @"交互中" : (_started ? @"已注入" : @"未注入"));
+    NSString *line = [NSString stringWithFormat:@"[%@] %@ bid=%@ isAllowed=%d whitelistMode=%@ blacklistCount=%lu capsuleEffect=%ld navParallax=%d state=%@",
+                      manual ? @"手动dump" : @"注入",
+                      [NSDate date], bid, [ObackPreferences isAllowed], wlm,
+                      (unsigned long)blCount, (long)[ObackPreferences capsuleEffect],
+                      [ObackPreferences navParallaxEnabled],
+                      self.interacting ? @"交互中" : (_started ? @"已注入" : @"未注入")];
+    NSLog(@"[Oback-diag] %@", line);   // 给有 Mac 的人：log stream | grep Oback-diag
+    // 同时写手机本地文件：无 Mac 用户可用 Filza 直接看 /var/mobile/oback_diag.log，
+    // 「立即打印诊断」按钮也会读此文件在手机上展示（跨进程：各 App 各自写自己的 bid）。
+    NSString *path = @"/var/mobile/oback_diag.log";
+    NSString *out = [line stringByAppendingString:@"\n"];
+    NSFileHandle *fh = [NSFileHandle fileHandleForUpdatingAtPath:path];
+    if (fh) {
+        [fh seekToEndOfFile];
+        [fh writeData:[out dataUsingEncoding:NSUTF8StringEncoding]];
+        [fh closeFile];
+    } else {
+        [out writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
 }
 
 #pragma mark - 启动与挂载
