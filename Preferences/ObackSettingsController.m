@@ -220,11 +220,10 @@ static NSDictionary *_obSliderUnits(void) {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          CFSTR("com.zlhkf.oback.diagNow"),
                                          NULL, NULL, TRUE);
-    // 等各 App 写完（~1s）再读文件并在手机上展示，完全不依赖 Mac
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        [self _obShowDiagFile];
-    });
+    // 等各 App 写完（~1s）再读文件并在手机上展示，完全不依赖 Mac。
+    // 用 performSelector:afterDelay: 而非 dispatch_after —— 避免依赖 <dispatch/dispatch.h>
+    // （theos 精简头文件子集不一定透传，DISPATCH_TIME_NOW/NSEC_PER_SEC 会成未声明标识符导致 -Werror 编译失败）。
+    [self performSelector:@selector(_obShowDiagFile) withObject:nil afterDelay:1.0];
 }
 
 // 读本地诊断文件并在手机上以文本框展示（无 Mac 也能看）；空文件给排查提示
