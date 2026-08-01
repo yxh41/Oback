@@ -2,34 +2,29 @@
 #import "ObackManager.h"   // 读取松手速度/进度做动量继承（ObackManager.h 已 import ObackTransition.h，无循环依赖）
 
 // 核心：根据百分比把"当前页"和"上一页"摆到位，模拟 OPPO 风格边缘返回
-// parallaxToView（现恒为 NO）→ 弹窗 dismiss 方案B：只动被 dismiss 的 fromView(sheet 滑出+轻微缩小)，
-//                       绝不碰底层 presenting(toView)（黑屏根因），也不加深遮罩（避免已可见背景闪暗）。
+// 弹窗 dismiss 方案B：只动被 dismiss 的 fromView(sheet 滑出+轻微缩小)，
+// 绝不碰底层 presenting(toView)（黑屏根因），也不加深遮罩（避免已可见背景闪暗）。
 // 注：自定义 nav 视差（实验）功能已移除——nav pop 一律走系统原生转场（方案A），不再经本文件自定义动画。
 static void OBApplyParallax(CGFloat percent,
                             UIView *fromView,
                             UIView *toView,
                             ObackEdge edge,
-                            ObackParams *p,
-                            BOOL parallaxToView,
-                            BOOL scaleToView) {
+                            ObackParams *p) {
     CGFloat w = fromView.window ? fromView.window.bounds.size.width
                                 : [UIScreen mainScreen].bounds.size.width;
     if (w <= 0) w = [UIScreen mainScreen].bounds.size.width;
 
     percent = MAX(0.0, MIN(1.0, percent));
     CGFloat dir = (edge == ObackEdgeLeft) ? 1.0 : -1.0;
-    (void)scaleToView;
-    (void)parallaxToView;   // 仅弹窗 dismiss(方案B) 使用，parallaxToView 恒为 NO（消除 -Wunused-parameter）
 
     // 当前页/被 dismiss 的 sheet：始终按方向平移；方案B 下额外给一点点缩小增强"飞出"感
-    CGFloat fromScale = 1.0;
-    if (!parallaxToView) fromScale = 1.0 - 0.08 * percent;
+    CGFloat fromScale = 1.0 - 0.08 * percent;
     fromView.transform = CGAffineTransformConcat(
         CGAffineTransformMakeTranslation(dir * percent * w, 0),
         CGAffineTransformMakeScale(fromScale, fromScale));
 
     // 方案B：底层 presenting 绝不碰（黑屏根因）；不加深遮罩（避免已可见背景闪暗）。
-    // 注：nav 视差（parallaxToView=YES 平移上一页+阴影渐隐）已移除，本函数现仅弹窗 dismiss(方案B) 使用。
+    // 注：nav 视差（平移上一页+阴影渐隐）已移除，本函数现仅弹窗 dismiss(方案B) 使用。
     toView.transform = CGAffineTransformIdentity;
     // 弹窗 dismiss：可选卡片圆角（拉出时渐进圆角，模拟 iOS sheet 下拉手感）
     if (p.cardCornerEnabled) {
@@ -75,7 +70,6 @@ static void OBApplyParallax(CGFloat percent,
     if (self = [super init]) {
         _edge = edge;
         self.params = params ?: [ObackParams defaults];
-        _parallaxToView = NO;    // nav 视差已移除：本动画器现仅弹窗 dismiss 方案B 使用，parallaxToView 恒为 NO
     }
     return self;
 }
@@ -133,33 +127,20 @@ static void OBApplyParallax(CGFloat percent,
     UIView *fromView = from.view;
     UIView *toView   = to.view;
 
-    if (self.parallaxToView) {
-        // 阴影渐隐方案（替代原「截图层缩放」）：底页(toView) 真实视图入 container 作底，始终 Identity、
-        // 零 transform、scrollView 安全；不截图、不缩放、不挂 navBar 快照 → 删除快照捕获时序 / 缩放几何 /
-        // 底页空白 / 导航栏消失整类脆弱逻辑（原 b44d033 / 721ef1b / navBar 引擎）。导航栏回归系统管理，稳定。
-        if (fromView.superview != container) [container addSubview:fromView];
-        if (toView && toView.superview != container) {
-            toView.frame = container.bounds;
-            [toView layoutIfNeeded];
-            [container insertSubview:toView atIndex:0];
-        }
-        // 不再创建 _toViewSnapshot / _navBarSnapshot；_restoreNavBar / _cleanupToViewSnapshot 因 nil 守卫为空操作。
-    } else {
-        // 弹窗 dismiss 方案B：底层 presenting(toView) 不碰 transform；目的页正常挂载。
-        // 【黑屏修复】绝对不要无条件把 toView 塞进临时 container：
-        //   - UIKit App：UIKit 已在转场开始时把 toView 预置进 container → superview==container，本就是空操作；
-        //   - SwiftUI App(如 com.wangcaicalculator.wc，弹窗为 PresentationHostingController)：底层
-        //     UIHostingController 视图挂在 window 下层、不在 container → 原代码 insert 会把它从真实
-        //     层级抽进临时 container，dismiss 完成 UIKit 拆 container 时把它一并销毁 → 返回后整屏黑
-        //     (进程活着、能上滑回桌面、不卡死)。故：仅当 toView 完全无宿主(superview==nil，被系统移出
-        //     窗口、不装进 container 就全程不可见)才装入；否则保持原层级不动，底层自然可见。
-        if (toView.superview == nil) [container insertSubview:toView atIndex:0];
-    }
+    // 弹窗 dismiss 方案B：底层 presenting(toView) 不碰 transform；目的页正常挂载。
+    // 【黑屏修复】绝对不要无条件把 toView 塞进临时 container：
+    //   - UIKit App：UIKit 已在转场开始时把 toView 预置进 container → superview==container，本就是空操作；
+    //   - SwiftUI App(如 com.wangcaicalculator.wc，弹窗为 PresentationHostingController)：底层
+    //     UIHostingController 视图挂在 window 下层、不在 container → 原代码 insert 会把它从真实
+    //     层级抽进临时 container，dismiss 完成 UIKit 拆 container 时把它一并销毁 → 返回后整屏黑
+    //     (进程活着、能上滑回桌面、不卡死)。故：仅当 toView 完全无宿主(superview==nil，被系统移出
+    //     窗口、不装进 container 就全程不可见)才装入；否则保持原层级不动，底层自然可见。
+    if (toView.superview == nil) [container insertSubview:toView atIndex:0];
     [container bringSubviewToFront:fromView];
 
     [self applyShadowTo:fromView];
     // 阴影方案：上一页用真实 toView（Identity，无缩放），doScale=NO
-    OBApplyParallax(0, fromView, toView, self.edge, self.params, self.parallaxToView, NO);
+    OBApplyParallax(0, fromView, toView, self.edge, self.params);
 
     // 初速 0，damping 0.82 给出自然回弹手感
     UISpringTimingParameters *sp = [[UISpringTimingParameters alloc] initWithDampingRatio:0.82];
@@ -178,7 +159,7 @@ static void OBApplyParallax(CGFloat percent,
         CGFloat w = fromView.window ? fromView.window.bounds.size.width
                                     : [UIScreen mainScreen].bounds.size.width;
         CGFloat dir = (blockSelf.edge == ObackEdgeLeft) ? 1.0 : -1.0;
-        CGFloat fromScale = blockSelf.parallaxToView ? 1.0 : 0.92;   // 方案B sheet 飞出终态缩小
+        CGFloat fromScale = 0.92;   // 方案B sheet 飞出终态缩小
         fromView.transform = CGAffineTransformConcat(
             CGAffineTransformMakeTranslation(dir * w, 0),
             CGAffineTransformMakeScale(fromScale, fromScale));
@@ -264,9 +245,9 @@ static void OBApplyParallax(CGFloat percent,
     }
 
     BOOL commit = !_interactiveCancelled;
-    OBLog(@"animator forceFinish animating (commit=%d edge=%@ parallaxToView=%d toViewInContainer=%d)",
+    OBLog(@"animator forceFinish animating (commit=%d edge=%@ toViewInContainer=%d)",
           commit, self.edge == ObackEdgeLeft ? @"左" : @"右",
-          self.parallaxToView, (toView.superview == container));
+          (toView.superview == container));
 
     __block BOOL transitionFinished = NO;
 
@@ -276,9 +257,8 @@ static void OBApplyParallax(CGFloat percent,
                       animations:^{
         // OBApplyParallax(1)=提交终态, OBApplyParallax(0)=取消回初始态
         UIView *tpView = self.toViewSnapshot ?: toView;
-        BOOL tpScale = (self.parallaxToView && self.toViewSnapshot != nil);
         OBApplyParallax(commit ? 1.0 : 0.0, fromView, tpView,
-                        self.edge, self.params, self.parallaxToView, tpScale);
+                        self.edge, self.params);
         // 取消回弹时阴影随页面滑回一同淡出到 0（而非动画回满值再于 completion 瞬清零 → 避免突兀 pop）；
         // 提交时 OBApplyParallax(1) 已将阴影置 0，无需额外处理。同一 UIView 动画事务内再次赋值即更新动画目标值。
         if (!commit) fromView.layer.shadowOpacity = 0.0;
@@ -348,7 +328,7 @@ static void OBApplyParallax(CGFloat percent,
 - (void)applyShadowTo:(UIView *)v {
     // 弹窗下拉卡片圆角开启时，圆角需 masksToBounds=YES 才能显示，会裁掉阴影；
     // 该路径下以圆角为主、放弃阴影，避免两者互相打架。
-    BOOL cornering = (self.params.cardCornerEnabled && !self.parallaxToView);
+    BOOL cornering = self.params.cardCornerEnabled;
     v.layer.shadowColor = [UIColor blackColor].CGColor;
     v.layer.shadowOpacity = (self.params.shadowEnabled && !cornering) ? self.params.shadowOpacity : 0.0;
     v.layer.shadowRadius = self.params.shadowRadius;
@@ -364,7 +344,6 @@ static void OBApplyParallax(CGFloat percent,
     if (self = [super init]) {
         _edge = edge;
         self.params = params ?: [ObackParams defaults];
-        _parallaxToView = NO;    // nav 视差已移除：弹窗 dismiss 方案B 使用，parallaxToView 恒为 NO
     }
     return self;
 }
