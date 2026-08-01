@@ -807,7 +807,7 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     }
 
     self.currentEdge = edge;
-    OBLog(@"shouldBegin=YES (kind=%@ edge=%@ top=%@ nav.childCount=%lu presenting=%d parallaxToView=%d)",
+    OBLog(@"shouldBegin=YES (kind=%@ edge=%@ top=%@ nav.childCount=%lu presenting=%d currentParallaxToView=%d)",
           kind, edge == ObackEdgeLeft ? @"左" : @"右",
           NSStringFromClass([top class]),
           (unsigned long)nav.viewControllers.count, top.presentingViewController != nil,
@@ -867,7 +867,7 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     // window pan 与 nav pan 同时开火（二者 delegate 均为 self，shouldRequireFailureOf 会互相跳过而不协调）。
     {
         UIWindow *dbgWin = [self _windowForPan:pan];
-        OBLog(@"beginTransition: entered (parallaxToView=%d top=%@ panView=%@ kind=%@)",
+        OBLog(@"beginTransition: entered (currentParallaxToView=%d top=%@ panView=%@ kind=%@)",
               self.currentParallaxToView,
               NSStringFromClass([[self topMost:dbgWin.rootViewController] class]),
               NSStringFromClass([[pan view] class]),
@@ -946,7 +946,7 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
         self.currentParallaxToView = YES;   // nav pop 视差（移动上一页）
         if (self.currentEdge == ObackEdgeRight) {
             // 右缘固定走自定义镜像转场：真正触发 pop，由 nav delegate(ObackNavDelegate) 返回
-            // ObackAnimator(parallaxToView=YES) + interactionController 返回 self.interactive 接管，
+            // ObackAnimator（自定义转场）+ interactionController 返回 self.interactive 接管，
             // 后续 updateTransition 用 self.interactive updateWithPercent 做 scrub（不再喂
             // handleNavigationTransition:）。方向由 OBApplyParallax 的 edge 分支处理，正确无误。
             OBLog(@"trigger: nav pop 右缘自定义镜像转场，popViewControllerAnimated");
@@ -957,7 +957,7 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
             OBLog(@"trigger: nav pop 已启动(系统原生交互)，忽略重复 popViewControllerAnimated");
         } else {
             // 自定义 nav 视差(实验) 或 非交互兜底：真正触发 pop，由 nav delegate(ObackNavDelegate)
-            // 返回 ObackAnimator(parallaxToView=YES) + interactionController 返回 self.interactive 接管 scrub。
+            // 返回 ObackAnimator（自定义转场）+ interactionController 返回 self.interactive 接管 scrub。
             OBLog(@"trigger: nav pop 自定义视差/兜底，popViewControllerAnimated");
             [nav popViewControllerAnimated:YES];
         }
