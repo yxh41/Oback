@@ -104,7 +104,6 @@ static BOOL oback_shouldBackOff(void) {
     if ([ObackManager shared].interacting) {
         ObackAnimator *a = [[[ObackAnimator alloc] initWithEdge:[ObackManager shared].currentEdge
                                                            params:[ObackPreferences params]] autorelease];
-        a.parallaxToView = [ObackManager shared].currentParallaxToView;  // 弹窗 dismiss 置 NO(方案B: 只动 sheet)
         [ObackManager shared].interactive.animator = a;   // 反向引用，finish/cancel 时改弹簧速度
         [ObackManager shared].currentAnimator = a;
         return a;
