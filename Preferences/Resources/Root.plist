@@ -138,6 +138,28 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
+			<string>调节阴影的浓度（0–1）。数值越大阴影越深重，越小越淡。（默认原生边缘返回走系统转场不消费此参数；仅弹窗返回时生效。）</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>default</key>
+			<real>0.25</real>
+			<key>defaults</key>
+			<string>com.zlhkf.oback</string>
+			<key>key</key>
+			<string>shadowOpacity</string>
+			<key>label</key>
+			<string>阴影浓度</string>
+			<key>max</key>
+			<real>1.0</real>
+			<key>min</key>
+			<real>0.0</real>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
 			<string>调节松手后完成或取消返回动画的时长（0.15–0.6 秒）。越短越跟手，越长越顺滑。（注：默认原生边缘返回走系统转场，不消费以下动画参数；仅弹窗返回时生效，属预期行为而非 bug。）</string>
 		</dict>
 		<dict>
