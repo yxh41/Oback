@@ -231,7 +231,8 @@ static void OBApplyParallax(CGFloat percent,
     // 提交时带入真实前向速度→快甩更快归位（更跟手）。
     // 注：目标 CI 的 iOS SDK 未暴露 UISpringTimingParameters.initialVelocity 与
     // +runningPropertyAnimatorWithDuration:...（-Werror 下编译失败），无法用真弹簧初速做动量继承；
-    // 故改用「按释放速度动态缩短/延长收尾时长」的等效方案（基础 0.22s easeOut，甩得越猛收尾越短），
+    // 故改用「按释放速度动态缩短/延长收尾时长」的等效方案，基础时长取自 self.params.duration
+    // （即设置面板「动画时长」滑块，范围 0.15–0.6s，尊重用户设置），甩得越猛收尾越短，
     // 同样达到"快甩更跟手"的观感，且对现有功能零影响、零 SDK 兼容性风险。
     CGFloat w = fromView.window ? fromView.window.bounds.size.width
                                 : [UIScreen mainScreen].bounds.size.width;
@@ -239,13 +240,14 @@ static void OBApplyParallax(CGFloat percent,
     sv = MAX(-2.0, MIN(2.0, sv));                              // 限幅，防极端速度
     BOOL reduceMotion = UIAccessibilityIsReduceMotionEnabled();
     BOOL springLike = self.params.springEnabled && !reduceMotion;
-    // 动态时长：|sv| 越大（甩得越猛）收尾越短 → 更跟手；sv≈0（轻拖/取消）保持温和。
-    CGFloat baseDur = 0.22;
+    // 动态时长：基础时长取自「动画时长」滑块；|sv| 越大（甩得越猛）收尾越短 → 更跟手；sv≈0（轻拖/取消）保持基础时长。
+    // 这是把 duration 接进手指交互松手路径的关键——此前该滑块只在非交互转场（点系统返回按钮）生效。
+    CGFloat baseDur = self.params.duration;                   // 接上滑块（非交互+交互松手全状态生效）
     CGFloat asv = (sv > 0) ? sv : -sv;
-    CGFloat dur = baseDur / (1.0 + asv * 0.8);                 // sv=±2 → ≈0.12s；sv=0 → 0.22s
-    dur = MAX(0.12, MIN(0.32, dur));
-    if (!springLike) dur = baseDur;                            // 关闭弹性/减弱动态→固定 0.22s 兜底
-    OBLog(@"animator momentum-eased (springLike=%d vel=%.0f sv=%.2f dur=%.2f)", springLike, self.releaseVelocity, sv, dur);
+    CGFloat dur = baseDur / (1.0 + asv * 0.8);                 // sv=±2 → ≈ baseDur*0.385；sv=0 → baseDur
+    dur = MAX(0.10, MIN(baseDur, dur));                        // 不超过基础时长，且不低于 0.1s 防过短
+    if (!springLike) dur = baseDur;                            // 关闭弹性/减弱动态→用基础时长固定 easeOut
+    OBLog(@"animator momentum-eased (springLike=%d vel=%.0f sv=%.2f dur=%.2f baseDur=%.2f)", springLike, self.releaseVelocity, sv, dur, baseDur);
 
     // 标准 UIView 动画收尾（基础 API，SDK 全版本可用）；时长由释放速度调制。
     [UIView animateWithDuration:dur delay:0
@@ -285,9 +287,10 @@ static void OBApplyParallax(CGFloat percent,
         OBLog(@"animator forceComplete done (completion, cancelled=%d)", !commit);
     }];
 
-    // 保险：0.35 秒后若 completion 仍未触发，强制完成转场（防冻结双保险，原样保留）。
-    // dur 上限 0.32s，0.35s 兜底在动画视觉完成后触发，避免打断正常收尾。
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+    // 保险：动画视觉完成后若 completion 仍未触发，强制完成转场（防冻结双保险，原样保留）。
+    // safetyDelay 取最终 dur + 0.12s 余量（且不低于 0.35s），确保不会在收尾动画进行中（尤其 duration 调大时）提前打断。
+    CGFloat safetyDelay = MAX(0.35, dur + 0.12);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(safetyDelay * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (transitionFinished) return;
         transitionFinished = YES;
