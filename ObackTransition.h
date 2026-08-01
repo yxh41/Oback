@@ -57,12 +57,6 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 @property (nonatomic, assign) CGFloat releasePercent;
 // finish=NO / cancel=YES：供 completion 决定 completeTransition 方向（避免反向动画 finalPosition 误判导致取消却提交了 pop）
 @property (nonatomic, assign) BOOL interactiveCancelled;
-// 导航栏协同引擎（实验 nav 视差专用）：转场期间快照 live UINavigationBar 挂到 fromView 随其视差移动，
-// completeTransition 后（含 cancel / watchdog 兜底 / dealloc）必还原真实 bar，避免导航栏损坏/消失。
-@property (nonatomic, retain) UIView *navBarSnapshot;            // 快照视图（MRC retain）
-@property (nonatomic, retain) UIView *toViewSnapshot;             // 实验 nav 视差：上一页缩放视差层（截图，避免 scale 真实 toView 破坏 scrollView）；MRC retain
-@property (nonatomic, assign) UINavigationController *navBarNav; // 真实 bar 所属 nav（assign，不 retain 避免循环）
-@property (nonatomic, assign) BOOL navBarWasHidden;              // 转场前真实 bar 的 hidden 状态
 - (instancetype)initWithEdge:(ObackEdge)edge params:(ObackParams *)params;
 // 兜底收尾：若动画器因状态错位（continueAnimation 空操作等）未能自行触发 completion，
 // 由 manager 定时器调用，按 interactiveCancelled 一次性 completeTransition，杜绝"转场孤儿化→界面冻结"。
