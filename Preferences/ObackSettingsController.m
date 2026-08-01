@@ -241,9 +241,9 @@ static NSDictionary *_obSliderUnits(void) {
         [self presentViewController:a animated:YES completion:nil];
         return;
     }
-    UIViewController *vc = [[[UIViewController alloc] init] autorelease];
+    UIViewController *vc = [[UIViewController alloc] init];   // ARC bundle：禁止 autorelease（否则 -Werror 编译失败）
     vc.title = @"Oback 诊断（各 App）";
-    UITextView *tv = [[[UITextView alloc] initWithFrame:vc.view.bounds] autorelease];
+    UITextView *tv = [[UITextView alloc] initWithFrame:vc.view.bounds];
     tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     UIFont *tvFont = [UIFont fontWithName:@"Menlo" size:11];
     if (!tvFont) tvFont = [UIFont systemFontOfSize:11];
@@ -251,10 +251,10 @@ static NSDictionary *_obSliderUnits(void) {
     tv.text = content;
     tv.editable = NO;
     [vc.view addSubview:tv];
-    UINavigationController *nav = [[[UINavigationController alloc] initWithRootViewController:vc] autorelease];
-    UIBarButtonItem *done = [[[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+    UIBarButtonItem *done = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
                                                                            target:self
-                                                                           action:@selector(_obDismissDiag)] autorelease];
+                                                                           action:@selector(_obDismissDiag)];
     vc.navigationItem.rightBarButtonItem = done;
     [self presentViewController:nav animated:YES completion:nil];
 }
