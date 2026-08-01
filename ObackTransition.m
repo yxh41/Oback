@@ -171,8 +171,7 @@ static void OBApplyParallax(CGFloat percent,
         if (blockSelf.completed) { blockSelf = nil; return; }   // 已被 manager 兜底收尾 → 防重复 completeTransition
         blockSelf.completed = YES;
         if (blockSelf.context) [blockSelf.context completeTransition:!cancelled];
-        [blockSelf _restoreNavBar];   // 还原真实导航栏（实验 nav 视差）
-        [blockSelf _cleanupToViewSnapshot:toView];   // 还原真实底页可见 + 移除截图层
+        if (toView) toView.hidden = NO;   // 还原真实底页可见
         OBLog(@"animator done (cancelled=%d)", cancelled);
         blockSelf = nil;   // 打破循环引用（MRC 无 __weak）
     }];
@@ -188,31 +187,6 @@ static void OBApplyParallax(CGFloat percent,
 // completion 里做 cleanup；completeTransition 由 completion + dispatch_after(0.3s) 双重
 // 保险确保一定被调用，避免某些 App 中 completion 延迟 1~2 秒导致界面冻结。
 // _completed 守卫防重复（finish/cancel 先调一次，watchdog 0.5s 后调则直接返回）。
-// 还原真实导航栏（与 _navBarSnapshot 配对）：转场完成/取消/watchdog 兜底、dealloc 均调用，
-// 确保真实 bar 必还原（hidden 写回原值），杜绝导航栏永久消失。_navBarSnapshot 非空才执行（幂等）。
-- (void)_restoreNavBar {
-    if (!_navBarSnapshot) return;
-    [_navBarSnapshot removeFromSuperview];
-    [_navBarSnapshot release];
-    _navBarSnapshot = nil;
-    if (_navBarNav) {
-        @try { _navBarNav.navigationBar.hidden = _navBarWasHidden; }
-        @catch (NSException *e) { OBLog(@"restoreNavBar hidden 写回异常: %@", e.reason); }
-        _navBarNav = nil;
-    }
-    OBLog(@"navBar 还原: 真实 bar 显示恢复 (hidden=%d)", _navBarWasHidden);
-}
-
-// 实验 nav 视差清理（与 _toViewSnapshot 配对）：还原真实底页可见、移除并释放截图层。
-// 转场完成/取消/watchdog 兜底、dealloc 前的各出口均调用，确保真实底页必现、截图层不泄漏。
-- (void)_cleanupToViewSnapshot:(UIView *)realToView {
-    if (_toViewSnapshot) {
-        [_toViewSnapshot removeFromSuperview];
-        [_toViewSnapshot release];
-        _toViewSnapshot = nil;
-    }
-    if (realToView) realToView.hidden = NO;
-}
 
 - (void)forceFinishIfNeeded {
     if (_completed) return;
@@ -256,7 +230,7 @@ static void OBApplyParallax(CGFloat percent,
                          options:UIViewAnimationOptionCurveEaseOut
                       animations:^{
         // OBApplyParallax(1)=提交终态, OBApplyParallax(0)=取消回初始态
-        UIView *tpView = self.toViewSnapshot ?: toView;
+        UIView *tpView = toView;
         OBApplyParallax(commit ? 1.0 : 0.0, fromView, tpView,
                         self.edge, self.params);
         // 取消回弹时阴影随页面滑回一同淡出到 0（而非动画回满值再于 completion 瞬清零 → 避免突兀 pop）；
@@ -281,8 +255,7 @@ static void OBApplyParallax(CGFloat percent,
         } @catch (NSException *exception) {
             OBLog(@"forceComplete completeTransition CRASH: %@", exception.reason);
         }
-        [self _restoreNavBar];   // 还原真实导航栏（实验 nav 视差）
-        [self _cleanupToViewSnapshot:toView];   // 还原真实底页可见 + 移除/释放截图层
+        if (toView) toView.hidden = NO;   // 还原真实底页可见
         // 显式清理所有非 from/to 子视图（遮罩等）
         NSArray *subs = [[container.subviews copy] autorelease];
         for (UIView *sub in subs) {
@@ -304,8 +277,7 @@ static void OBApplyParallax(CGFloat percent,
         } @catch (NSException *exception) {
             OBLog(@"forceComplete completeTransition CRASH (dispatch_after): %@", exception.reason);
         }
-        [self _restoreNavBar];   // 还原真实导航栏（实验 nav 视差）
-        [self _cleanupToViewSnapshot:toView];   // 还原真实底页可见 + 移除/释放截图层
+        if (toView) toView.hidden = NO;   // 还原真实底页可见
         NSArray *subs = [[container.subviews copy] autorelease];
         for (UIView *sub in subs) {
             if (sub != fromView && sub != toView) [sub removeFromSuperview];
@@ -320,8 +292,6 @@ static void OBApplyParallax(CGFloat percent,
 - (void)dealloc {
     if (_params) [_params release];
     [_propertyAnimator release];
-    if (_navBarSnapshot) [_navBarSnapshot release];   // 兜底（正常路径已在 _restoreNavBar 释放）
-    if (_toViewSnapshot) [_toViewSnapshot release];   // 兜底（正常路径已在 _cleanupToViewSnapshot 释放）
     [super dealloc];
 }
 
