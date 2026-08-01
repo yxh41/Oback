@@ -181,9 +181,19 @@ static void OBApplyParallax(CGFloat percent,
     // MRC：禁用 __weak，用 __block 且 completion 内置 nil 打破 self->animator->block->self 循环引用
     __block ObackAnimator *blockSelf = self;
     [anim addAnimations:^{
-        UIView *tpView = blockSelf.toViewSnapshot ?: toView;
-        BOOL tpScale = (blockSelf.parallaxToView && blockSelf.toViewSnapshot != nil);
-        OBApplyParallax(1, fromView, tpView, blockSelf.edge, blockSelf.params, blockSelf.parallaxToView, tpScale);
+        // 仅驱动 transform（UIView 属性，scrub 阶段 UIViewPropertyAnimator 插值可靠）。
+        // 阴影渐隐不在这里做：手动 scrub 时 animator 对 CALayer.shadowOpacity 的逐帧插值不可靠
+        // （真机实测拖动时阴影浓度恒定不衰减）。改由 updateWithPercent: 按 percent 确定性即时驱动，
+        // 松手收尾由 forceFinishIfNeeded 的标准 UIView 动画平滑驱动（见下方）。两者作用于同一
+        // fromView.layer.shadowOpacity，且 animator block 不再触碰阴影，故无 CA 动画占位冲突。
+        CGFloat w = fromView.window ? fromView.window.bounds.size.width
+                                    : [UIScreen mainScreen].bounds.size.width;
+        CGFloat dir = (blockSelf.edge == ObackEdgeLeft) ? 1.0 : -1.0;
+        CGFloat fromScale = blockSelf.parallaxToView ? 1.0 : 0.92;   // 方案B sheet 飞出终态缩小
+        fromView.transform = CGAffineTransformConcat(
+            CGAffineTransformMakeTranslation(dir * w, 0),
+            CGAffineTransformMakeScale(fromScale, fromScale));
+        toView.transform = CGAffineTransformIdentity;
     }];
     [anim addCompletion:^(UIViewAnimatingPosition finalPosition) {
         // 以 interactiveCancelled 为准（finish=NO/cancel=YES），避免反向动画 finalPosition 误判
@@ -280,6 +290,9 @@ static void OBApplyParallax(CGFloat percent,
         BOOL tpScale = (self.parallaxToView && self.toViewSnapshot != nil);
         OBApplyParallax(commit ? 1.0 : 0.0, fromView, tpView,
                         self.edge, self.params, self.parallaxToView, tpScale);
+        // 取消回弹时阴影随页面滑回一同淡出到 0（而非动画回满值再于 completion 瞬清零 → 避免突兀 pop）；
+        // 提交时 OBApplyParallax(1) 已将阴影置 0，无需额外处理。同一 UIView 动画事务内再次赋值即更新动画目标值。
+        if (!commit) fromView.layer.shadowOpacity = 0.0;
         // 自定义子视图淡出（阴影等）
         for (UIView *sub in container.subviews) {
             if (sub != fromView && sub != toView) sub.alpha = 0.0;
@@ -386,6 +399,24 @@ static void OBApplyParallax(CGFloat percent,
         [pa pauseAnimation];   // inactive -> 启动并立即暂停，进入可 scrub 态
     }
     pa.fractionComplete = percent;
+
+    // 确定性逐级驱动阴影渐隐：手动 scrub 阶段 UIViewPropertyAnimator 不会对 CALayer.shadowOpacity
+    // 做可靠的逐帧插值（真机实测拖动时阴影浓度恒定不衰减，即"没有渐隐的变化"）。
+    // 这里按 percent 直接算并即时落值，确保「越拉阴影越淡、拉到底(percent=1)完全消失」的跟手反馈。
+    // 注意：animator block 已不再触碰阴影，故此处显式赋值不会被暂停态 CA 动画的 presentation 值盖掉。
+    if (self.animator.parallaxToView) {
+        id<UIViewControllerContextTransitioning> ctx = self.animator.context;
+        UIViewController *fromVC = [ctx viewControllerForKey:UITransitionContextFromViewControllerKey];
+        UIView *fromView = fromVC.view;
+        if (fromView) {
+            ObackParams *p = self.animator.params;
+            CGFloat base = (p.shadowEnabled) ? p.shadowOpacity : 0.0;
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];   // 拖动期间即时跟随，不补帧动画（否则延迟/拖影）
+            fromView.layer.shadowOpacity = base * (1.0 - percent);
+            [CATransaction commit];
+        }
+    }
 }
 
 - (void)finish {

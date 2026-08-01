@@ -2,7 +2,7 @@
 
 iOS 越狱 tweak，OPPO 风格边缘手势返回（左右边缘内滑+视差），全局注入 `com.apple.UIKit`。
 Theos(Logos)+ObjC(MRC)，Windows 编写，GitHub Actions(roothide theos, arm64e) 出 .deb，需 macOS 真机装包验证。
-本地 git 易损坏（flaky），远程为准；`main(9bf479e)` 稳定不动，功能走 `feat/navbar-coordination`。
+本地 git 易损坏（flaky），远程为准；`main` 为已验证稳定主线（手势修复经 58~63 日志多轮真机收敛），历史上功能走 `feat/navbar-coordination`。分支策略见下方"分支策略"小节（严禁合并 feat→main）。
 
 ## 铁律（已稳定，勿破）
 - **PreferenceLoader 面板**：禁 `cellClassForSpecifier:` 换自定义 cell（SIGABRT）；禁 `PSApplicationCell`（未声明→-Werror 不出包）；
@@ -12,8 +12,13 @@ Theos(Logos)+ObjC(MRC)，Windows 编写，GitHub Actions(roothide theos, arm64e)
 - **交互转场冻结**：`ObackInteractiveTransition` 必须继承 `UIPercentDrivenInteractiveTransition`，用
   `update/finish/cancelInteractiveTransition`；绝不可手调 `[_ctx completeTransition:]` 或重写 `startInteractiveTransition:` 不调 super。
   pop/dismiss 只在首次横向拖动(p>0.001)触发，绝不 Began 即调。修复 `28fc77b`。
-- **MRC**：禁 `__weak`/`@property(weak)`；`alloc` 交已 retain 宿主须 `autorelease`；类方法工厂返回须 `autorelease`；
+- **MRC（仅 tweak 本体 `.dylib`）**：禁 `__weak`/`@property(weak)`；`alloc` 交已 retain 宿主须 `autorelease`；类方法工厂返回须 `autorelease`；
   每个类 dealloc 释放所有 retain 属性。`autorelease]]` 多一个 `]` 即错（clang expected identifier）。
+  ⚠️ **Preferences bundle（`ObackSettingsController.m` / `ObackAppListController.m` / `ObackPreferences.m` 等 Preferences target）是 ARC 编译**——
+  显式 `autorelease`/`retain`/`release` 会被 `-Werror` 直接拒（`error: 'autorelease' is unavailable: not available in automatic reference counting mode`）。
+  **两套 target 编译标志不同**：tweak 本体 MRC，Preferences bundle ARC。在 Preferences 文件里一律用 ARC 形式（`[[X alloc] init]`，不写 autorelease），
+  注释可标「ARC bundle：不用 autorelease」。tweak 本体 MRC 文件里仍可正常 autorelease。本次 d295c98 编译失败正是因我在 ARC 的
+  `ObackSettingsController.m` 里手写了 4 处 autorelease（line 245/247/255/258）。
 - **系统进程/triggerWidth/nav**：`com.apple.*`+包管理器排除；`triggerWidth` 默认 40（≥35）；nav pop 仅手势时接 `ObackAnimator`。
 - **默认全局生效**：`whitelistMode` 默认 NO（全局+黑名单），否则主功能没效果。
 - **黑名单失效排查铁律**：黑名单「拦不住」但 App 里仍有胶囊/仍崩 → 99% 是「列表存的 bid ≠ App 运行时 `mainBundle.bundleIdentifier`」
@@ -27,7 +32,7 @@ Theos(Logos)+ObjC(MRC)，Windows 编写，GitHub Actions(roothide theos, arm64e)
 ## 架构决策（feat/navbar-coordination）
 - **方案A（默认，左缘 nav pop）**：纯系统原生 `handleNavigationTransition:`，零冻结/原生手感/最省电；灵敏度滑块对 nav pop 不生效（仅 modal dismiss 生效）。
 - **方案B（modal dismiss）**：自定义 `ObackAnimator`+`ObackInteractiveTransition`，只移 sheet 不动 presenting，安全无黑屏。
-- **实验（opt-in）**：`navParallaxEnabled` 默认关，自定义 nav 视差转场（parallaxToView=YES），验证前勿默认开。
+- **实验（opt-in）**：`navParallaxEnabled` 默认关，自定义 nav 转场（`parallaxToView=YES`）。**实现已改为「阴影渐隐」方案**（当前页平移 + 左/右缘阴影随进度 1→0 渐隐，上一页保持 Identity 天然可见），不再截图/缩放——去掉底页空白/scrollView 错位/导航栏消失整类坑（commit `1bd8aec`）。**阴影参数可调**：`shadowOffset`(0~20pt 纵深) / `shadowRadius`(0~40pt 柔和度)，默认 6/12（commit `602d444`）。验证前勿默认开。
 - **右缘（2026-07-26 改 rightSimplePop）**：右缘不再喂系统左原点 `handleNavigationTransition:`（算错底页坐标→空白），也不进自定义视差。
   shouldBegin 右缘置 `rightSimplePop=YES`(currentParallaxToView=NO)；updateTransition 仅更新胶囊；
   endTransition 松手提交才 `popViewControllerAnimated:` 非交互返回——零空白、方向正确、不破坏导航栏。
@@ -55,3 +60,9 @@ Theos(Logos)+ObjC(MRC)，Windows 编写，GitHub Actions(roothide theos, arm64e)
   （POST `actions/workflows/build.yml/dispatches` `{"ref":"feat/navbar-coordination"}`，需 PAT）。
 - 本地 git 损坏时：从远程干净克隆 feature 分支，再覆盖编辑文件后提交直推（勿用损坏的本地仓库）。
 - 诊断日志 `/var/mobile/oback_debug.log`（删旧→复现→Filza 取回）。参考调研见 `REFERENCE_GITHUB.md`。
+
+## 分支策略（2026-07-29 澄清）
+- **历史**：`feat/navbar-coordination` 仅在早期 `3a520cf`（`Merge branch 'feat/navbar-coordination'`）合并过一次；此后 `main` 与 `feat` **分叉并行**：`main` 继续推进全套已验证手势修复（流光/`cdd4046`/`5d050a3`/`7168514`/`a1c79d7`…）、图标 `layout/` 下发、`diagBanner` 横幅；`feat` 在自己分支新增 6 个 main 没有的提交。
+- **严禁合并 feat → main**：feat 上的 `7ad634e`（左缘 nav pop 对 App 自带全屏返回 QQ/TIM“整体让步”）与 main 已验证方案（`cdd4046` 同时识别 + `5d050a3` `shouldBeRequiredToFailBy` 压制）是**相反手势策略且未经验证**；合并会用未验证方案覆盖已验证稳定方案，重引双返回/不返回/闪退。
+- feat 独有提交：`bea1d8c`（入口 plist 加 icon 键）、`7c210a7`/`4199406`/`6dab632`（设置入口图标 icon@3x/@2x/icon.png 29pt，与 main 的 `layout/` 下发方式不同）、`7ad634e`（整体让步策略）、`f93969a`（去重 AppTool 日志）。
+- 处置：`main` 为唯一稳定主线。**`feat/navbar-coordination` 已于 2026-07-29 经用户确认作废并删除（本地 `bea1d8c` + 远程）**。今后功能直接在 `main` 上做，勿再开长期 feature 分支以免再次分叉冲突。
