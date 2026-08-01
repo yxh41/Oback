@@ -23,7 +23,7 @@
 // 方案B（弹窗/sheet 下拉返回）专属设置项——关掉「弹窗返回增强设置」开关时整体隐藏，
 // 避免用户在日常用方案A（原生 nav pop）时误调这些"调了无变化"的滑块。
 @interface ObackSettingsController ()
-@property (nonatomic, strong) NSArray *allSpecifiers;   // 完整 specifier 列表（过滤前），供按开关显隐方案B 项
+@property (nonatomic, strong) NSMutableArray *allSpecifiers;   // 完整 specifier 列表（过滤前），供按开关显隐方案B 项
 @end
 
 // ── 每个滑块 key 对应的单位后缀 ──────────────────────────────
