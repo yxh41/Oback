@@ -168,7 +168,14 @@ static NSTimeInterval __obDebugLogCacheTS = 0;
                    @"com.apple.Music", @"com.apple.Maps" ] retain];   // MRC：静态变量需 retain（autorelease 会在 drain 后野指针）
     });
     NSString *bid = NSBundle.mainBundle.bundleIdentifier;
-    return bid ? [safe containsObject:bid] : NO;
+    if (!bid) return NO;
+    if ([safe containsObject:bid]) return YES;   // 种子系统 App 永远在名单（无需勾选）
+    // 用户在设置「选视差程序」里手动勾选的 App（跨 App 全局文件真相源，ObackAppListController 写入 parallaxApps）。
+    id v = [[self _mergedPrefs] objectForKey:@"parallaxApps"];
+    if ([v isKindOfClass:[NSArray class]]) {
+        return [(NSArray *)v containsObject:bid];
+    }
+    return NO;
 }
 
 // 导航视差实验开关：设置面板「导航视差（实验）」(key=navParallax)，默认关。

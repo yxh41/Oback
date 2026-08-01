@@ -10,9 +10,13 @@
 @property (nonatomic, copy) NSString *mode;
 @end
 
-// 两个薄子类仅用于让入口链接指向不同 mode，免去在 plist 里传参。
+// 薄子类仅用于让入口链接指向不同 mode，免去在 plist 里传参。
 @interface ObackWhiteListController : ObackAppListController
 @end
 
 @interface ObackBlackListController : ObackAppListController
+@end
+
+// 视差安全名单选择器：mode=parallax，存储 key=parallaxApps（与黑白名单同一套手写 App 列表，零自定义 cell）。
+@interface ObackParallaxListController : ObackAppListController
 @end
