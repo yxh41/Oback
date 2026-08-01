@@ -20,6 +20,12 @@
 - (void)setPreferenceValue:(id)value forSpecifier:(PSSpecifier *)specifier;
 @end
 
+// 方案B（弹窗/sheet 下拉返回）专属设置项——关掉「弹窗返回增强设置」开关时整体隐藏，
+// 避免用户在日常用方案A（原生 nav pop）时误调这些"调了无变化"的滑块。
+@interface ObackSettingsController ()
+@property (nonatomic, strong) NSArray *allSpecifiers;   // 完整 specifier 列表（过滤前），供按开关显隐方案B 项
+@end
+
 // ── 每个滑块 key 对应的单位后缀 ──────────────────────────────
 static NSDictionary *_obSliderUnits(void) {
     static NSDictionary *d = nil;
@@ -51,6 +57,11 @@ static NSDictionary *_obSliderUnits(void) {
     [super setPreferenceValue:value forSpecifier:specifier];
     NSString *key = [specifier propertyForKey:@"key"];
     if (key) oback_setGlobalPref(key, value);
+    // 「弹窗返回增强设置」开关翻转 → 重排表格以显隐方案B 专属项。
+    // 用 afterDelay:0 脱离当前 setPreferenceValue 调用栈，避免 reload 与开关 cell 配置重入。
+    if ([key isEqualToString:@"sheetEnhanceEnabled"]) {
+        [self performSelector:@selector(reloadSpecifiers) withObject:nil afterDelay:0];
+    }
 }
 
 // 兜底镜像：每次打开设置页，把各开关/滑块的当前值从「设置」App 自身容器(suite)同步到
@@ -71,11 +82,63 @@ static NSDictionary *_obSliderUnits(void) {
     }
 }
 
+// 方案B（弹窗返回）专属键集合：关掉「弹窗返回增强设置」时整体隐藏这些项及其独占分组头。
+static NSSet *_obPlanBKeys(void) {
+    static NSSet *s = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        s = [NSSet setWithObjects:
+             @"shadowEnabled", @"shadowOffset", @"shadowRadius", @"shadowOpacity",
+             @"duration", @"springEnabled", @"cardCornerEnabled", @"cardCornerValue",
+             @"commitRatio", @"commitVelocity", nil];
+    });
+    return s;
+}
+
+// 读取「弹窗返回增强设置」开关：设置 plist 经 NSUserDefaults(suite) 写入（同进程可读到），
+// 未设置 → 默认开（保留现有用户看到的全部项）。
+- (BOOL)_obShowPlanB {
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:@"com.zlhkf.oback"];
+    id v = [d objectForKey:@"sheetEnhanceEnabled"];
+    return v ? [v boolValue] : YES;
+}
+
 - (NSArray *)specifiers {
-    if (!_specifiers) {
-        _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
+    if (!_allSpecifiers) {
+        _allSpecifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
     }
-    return _specifiers;
+    // 展开（默认）→ 直接返回完整列表
+    if ([self _obShowPlanB]) {
+        _specifiers = _allSpecifiers;
+        return _allSpecifiers;
+    }
+    // 收敛：隐藏方案B 专属项及其"仅含方案B 子项"的分组头
+    NSArray *all = _allSpecifiers;
+    NSUInteger n = all.count;
+    NSMutableArray *out = [NSMutableArray arrayWithCapacity:n];
+    for (NSUInteger i = 0; i < n; i++) {
+        PSSpecifier *s = all[i];
+        NSString *cell = [s propertyForKey:@"cell"];
+        if ([cell isEqualToString:@"PSGroupCell"]) {
+            // 判定该组后续（直到下一个 PSGroupCell）所有 keyed 子项是否全为方案B
+            BOOL allPlanB = YES, hasChild = NO;
+            for (NSUInteger j = i + 1; j < n; j++) {
+                PSSpecifier *c = all[j];
+                NSString *cc = [c propertyForKey:@"cell"];
+                if ([cc isEqualToString:@"PSGroupCell"]) break;
+                NSString *ck = [c propertyForKey:@"key"];
+                if (ck) { hasChild = YES; if (![_obPlanBKeys() containsObject:ck]) { allPlanB = NO; break; } }
+            }
+            if (hasChild && allPlanB) continue;   // 隐藏该分组头（其下全是方案B 项）
+            [out addObject:s];
+        } else {
+            NSString *k = [s propertyForKey:@"key"];
+            if (k && [_obPlanBKeys() containsObject:k]) continue;  // 隐藏方案B 项
+            [out addObject:s];
+        }
+    }
+    _specifiers = out;
+    return out;
 }
 
 #pragma mark - PSSliderCell delegate（端点文字）
