@@ -211,10 +211,20 @@ static NSDictionary *_obSliderUnits(void) {
 
 // PSButtonCell 的 action 会打到本控制器（无参调用，安全）。向所有已注入 Oback 的 App 广播一次诊断请求，
 // 各 App 的 ObackManager 收到后打印 [Oback-diag]（含前台/后台 App 真实 bid），无需重启 App。
+// ⚠️ 设置面板本身被排除注入（com.apple.* 不注入），无法在此打印自身诊断；故用 UIAlert 给出即时反馈，
+// 避免「点了按钮手机上没任何反应」的错觉，并明确告知去 Mac 看日志。
 - (void)dumpDiagnostics {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          CFSTR("com.zlhkf.oback.diagNow"),
                                          NULL, NULL, TRUE);
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"已广播诊断请求"
+                         message:@"已向所有已注入 Oback 的 App 广播（含前台/后台）。\n请在 Mac 终端执行：\nlog stream | grep Oback-diag\n查看各 App 的真实 bundle id 与设置状态。"
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"好"
+                                              style:UIAlertActionStyleDefault
+                                            handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 // 真正执行重置：清空 com.zlhkf.oback 域 → 重建 specifiers → 表格回弹默认值
