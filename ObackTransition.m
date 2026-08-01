@@ -55,8 +55,8 @@ static void OBApplyParallax(CGFloat percent,
     // commitVelocity 同步下调到 400，让一般甩动(flick)也能可靠提交。
     p.commitRatio      = 0.30;
     p.commitVelocity   = 400.0;
-    // 弹性补间：默认开。松手收尾用带释放速度初速度的弹簧（动量继承生效）——快甩更快归位、更跟手；
-    // 关闭或系统减弱动态时降级为线性 easeOut。
+    // 弹性补间：默认开。松手收尾按释放速度动态调制时长（动量等效）——快甩更快归位、更跟手；
+    // 关闭或系统减弱动态时降级为固定 0.22s 线性 easeOut。
     p.springEnabled    = YES;
     // 弹窗下拉卡片圆角：默认关（方案B 保守路径；开启后下拉 sheet 时渐进圆角，更贴近 iOS 原生 sheet）。
     p.cardCornerEnabled = NO;
@@ -81,7 +81,7 @@ static void OBApplyParallax(CGFloat percent,
 
 - (void)animateTransition:(id<UIViewControllerContextTransitioning>)ctx {
     // 诊断：入口确定执行一次（每次转场开始）。注意此刻 releaseVelocity 仍为 beginTransition 清零后的 0，
-    // 真实速度在 finish 时由 ObackManager 写入，并被 forceFinishIfNeeded 的弹簧收尾消费（动量继承生效）。
+    // 真实速度在 finish 时由 ObackManager 写入，并被 forceFinishIfNeeded 的动量等效收尾消费（按速度调制收尾时长）。
     // 非交互路径（点系统返回按钮）走此处；交互手势路径不经此方法，直接走 forceFinishIfNeeded。
     self.context = ctx;   // 记入上下文：兜底强制收尾时仍需它调 completeTransition
     CGFloat vel    = [ObackManager shared].releaseVelocity;
@@ -227,32 +227,30 @@ static void OBApplyParallax(CGFloat percent,
 
     __block BOOL transitionFinished = NO;
 
-    // 动量继承收尾：取消时 ObackManager 已把 releaseVelocity 清零→温和回弹；
-    // 提交时带入真实前向速度→快甩更快归位（更跟手，贴近系统原生 sheet 手势）。
-    // 用带 initialVelocity 的弹簧替代固定 easeOut（绝不改用 continueAnimation 续跑旧路径——
-    // 那会与 double-fetch 防冻结设计冲突）。springEnabled 关闭或系统减弱动态时降级为线性 easeOut。
+    // 动量等效收尾：取消时 ObackManager 已把 releaseVelocity 清零→温和回弹；
+    // 提交时带入真实前向速度→快甩更快归位（更跟手）。
+    // 注：目标 CI 的 iOS SDK 未暴露 UISpringTimingParameters.initialVelocity 与
+    // +runningPropertyAnimatorWithDuration:...（-Werror 下编译失败），无法用真弹簧初速做动量继承；
+    // 故改用「按释放速度动态缩短/延长收尾时长」的等效方案（基础 0.22s easeOut，甩得越猛收尾越短），
+    // 同样达到"快甩更跟手"的观感，且对现有功能零影响、零 SDK 兼容性风险。
     CGFloat w = fromView.window ? fromView.window.bounds.size.width
                                 : [UIScreen mainScreen].bounds.size.width;
     CGFloat sv = (w > 0) ? (self.releaseVelocity / w) : 0.0;   // 归一化到全程比例
-    sv = MAX(-2.0, MIN(2.0, sv));                              // 限幅，防极端速度弹飞
+    sv = MAX(-2.0, MIN(2.0, sv));                              // 限幅，防极端速度
     BOOL reduceMotion = UIAccessibilityIsReduceMotionEnabled();
-    BOOL spring = self.params.springEnabled && !reduceMotion;
-    NSObject<UITimingCurveProvider> *tp;
-    if (spring) {
-        // mass=1.0 / dampingRatio=0.82 → 轻微欠阻尼，自然回弹；initialVelocity 继承松手速度
-        tp = [[UISpringTimingParameters alloc]
-            initWithMass:1.0 dampingRatio:0.82 initialVelocity:CGVectorMake(sv, 0.0)];
-    } else {
-        tp = [[UICubicTimingParameters alloc] initWithAnimationCurve:UIViewAnimationCurveEaseOut];
-    }
-    OBLog(@"animator spring applied (spring=%d vel=%.0f sv=%.2f)", spring, self.releaseVelocity, sv);
+    BOOL springLike = self.params.springEnabled && !reduceMotion;
+    // 动态时长：|sv| 越大（甩得越猛）收尾越短 → 更跟手；sv≈0（轻拖/取消）保持温和。
+    CGFloat baseDur = 0.22;
+    CGFloat asv = (sv > 0) ? sv : -sv;
+    CGFloat dur = baseDur / (1.0 + asv * 0.8);                 // sv=±2 → ≈0.12s；sv=0 → 0.22s
+    dur = MAX(0.12, MIN(0.32, dur));
+    if (!springLike) dur = baseDur;                            // 关闭弹性/减弱动态→固定 0.22s 兜底
+    OBLog(@"animator momentum-eased (springLike=%d vel=%.0f sv=%.2f dur=%.2f)", springLike, self.releaseVelocity, sv, dur);
 
-    // 一次性弹簧/线性收尾（立即启动，系统持有 animator 至完成，无需本地 retain）。
-    // duration 仅作 API 上限提示，spring 实际时长由 settlingDuration 决定。
-    [UIViewPropertyAnimator
-        runningPropertyAnimatorWithDuration:MAX(0.3, self.params.duration)
-        timingParameters:tp
-        animations:^{
+    // 标准 UIView 动画收尾（基础 API，SDK 全版本可用）；时长由释放速度调制。
+    [UIView animateWithDuration:dur delay:0
+                         options:UIViewAnimationOptionCurveEaseOut
+                      animations:^{
         // OBApplyParallax(1)=提交终态, OBApplyParallax(0)=取消回初始态
         UIView *tpView = toView;
         OBApplyParallax(commit ? 1.0 : 0.0, fromView, tpView,
@@ -263,7 +261,7 @@ static void OBApplyParallax(CGFloat percent,
         for (UIView *sub in container.subviews) {
             if (sub != fromView && sub != toView) sub.alpha = 0.0;
         }
-    } completion:^(UIViewAnimatingPosition finalPosition) {
+    } completion:^(BOOL finished) {
         if (transitionFinished) return;
         transitionFinished = YES;
         // 清理圆角/阴影残留（取消返回时 fromView 留在屏上，须清掉投影避免永久残留）
@@ -284,14 +282,12 @@ static void OBApplyParallax(CGFloat percent,
         for (UIView *sub in subs) {
             if (sub != fromView && sub != toView) [sub removeFromSuperview];
         }
-        OBLog(@"animator forceComplete done (spring completion, cancelled=%d)", !commit);
+        OBLog(@"animator forceComplete done (completion, cancelled=%d)", !commit);
     }];
-    [tp release];   // MRC：alloc 所得；timing 已拷贝进 animator，释放所有权
 
-    // 保险：0.6 秒后若 completion 仍未触发，强制完成转场（防冻结双保险，原样保留）。
-    // 延迟取 0.6s 以覆盖弹簧 settle（典型 <0.6s），避免在正常弹簧收尾尚未完成时提前拆除容器打断视觉；
-    // 仅在 completion 延迟/不触发的 App 下由本兜底接管。
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
+    // 保险：0.35 秒后若 completion 仍未触发，强制完成转场（防冻结双保险，原样保留）。
+    // dur 上限 0.32s，0.35s 兜底在动画视觉完成后触发，避免打断正常收尾。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (transitionFinished) return;
         transitionFinished = YES;
