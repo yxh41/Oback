@@ -9,9 +9,16 @@ Theos(Logos)+ObjC(MRC)，Windows 编写，GitHub Actions(roothide theos, arm64e)
   图标用 `PSTitleValueCell`+`setProperty:icon forKey:@"iconImage"`+`UIImage imageWithContentsOfFile:`；
   `willDisplayCell:` 绝不可调 `[super ...]`；`didSelectRowAtIndexPath:` 必须 `if([super respondsToSelector:...])` 防护。
 - **modal 黑屏禁区**：禁全局 `presentViewController:` 劫持。dismiss 方案B=只移 sheet(缩8%)绝不碰 presenting/不加深遮罩。
-- **交互转场冻结**：`ObackInteractiveTransition` 必须继承 `UIPercentDrivenInteractiveTransition`，用
-  `update/finish/cancelInteractiveTransition`；绝不可手调 `[_ctx completeTransition:]` 或重写 `startInteractiveTransition:` 不调 super。
+- **交互转场冻结（架构）**：`ObackInteractiveTransition` **不继承** `UIPercentDrivenInteractiveTransition`（早期用它 →
+  与中断式动画器并存时部分 App(微信自定义 nav)动画器不被续跑 → `completeTransition` 永不触发 → 冻结，见 `ObackTransition.h` 注释）。
+  改为遵循 `UIViewControllerInteractiveTransitioning`，在 `updateWithPercent:` 直接驱动 `animator.propertyAnimator.fractionComplete`
+  （Apple 推荐模式，且 `ObackAnimator` 已实现 `interruptibleAnimatorForTransition:`）。`completeTransition` 仅由
+  `ObackAnimator` completion + `forceFinishIfNeeded` 的 `dispatch_after` 双重保险调用，交互控制器绝不手调（防双重/漏调）。
   pop/dismiss 只在首次横向拖动(p>0.001)触发，绝不 Began 即调。修复 `28fc77b`。
+- **UIViewPropertyAnimator 手动 scrub 不插值 CALayer 阴影属性**：手动设 `fractionComplete` 拖动时，animator 对
+  `layer.shadowOpacity` 等 CALayer 属性**不会逐帧插值**（暂停态 CA 动画"按住"presentation 值），真机阴影浓度恒定不变（即「没有渐隐的变化」）。
+  要在拖动中让阴影随进度变化，必须在 `updateWithPercent:` 用 `CATransaction(disableActions)` **显式**按 percent 设 `shadowOpacity=base*(1-percent)`，
+  且 animator 的 `addAnimations` block **不得触碰该阴影属性**（否则占位冲突盖掉显式赋值）。松手收尾走标准 UIView 动画（CATransaction 对阴影插值可靠）。见修复 `de704fb`。
 - **MRC（仅 tweak 本体 `.dylib`）**：禁 `__weak`/`@property(weak)`；`alloc` 交已 retain 宿主须 `autorelease`；类方法工厂返回须 `autorelease`；
   每个类 dealloc 释放所有 retain 属性。`autorelease]]` 多一个 `]` 即错（clang expected identifier）。
   ⚠️ **Preferences bundle（`ObackSettingsController.m` / `ObackAppListController.m` / `ObackPreferences.m` 等 Preferences target）是 ARC 编译**——
