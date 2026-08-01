@@ -29,7 +29,6 @@ static NSDictionary *_obSliderUnits(void) {
             @"triggerWidth":    @" pt",
             @"shadowOffset":  @" pt",
             @"shadowRadius":  @" pt",
-            @"dimAlpha":        @"",
             @"duration":        @" s",
             @"commitRatio":     @"",
             @"commitVelocity":  @"",
