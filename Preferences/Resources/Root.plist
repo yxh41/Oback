@@ -62,6 +62,20 @@
 			<key>defaults</key>
 			<string>com.zlhkf.oback</string>
 			<key>footnote</key>
+			<string>开（默认）：显示「弹窗（下拉 sheet）返回」专属的阴影 / 动画时长 / 弹性收尾 / 灵敏度等设置——这些仅在弹窗返回时生效，常用 App 内原生返回（方案A）不消费。关：隐藏这些用不到的项，面板只剩日常真正能调动的「触发宽度」与各全局开关，清爽不误调。</string>
+			<key>key</key>
+			<string>sheetEnhanceEnabled</string>
+			<key>label</key>
+			<string>弹窗返回增强设置</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.zlhkf.oback</string>
+			<key>footnote</key>
 			<string>返回过程中给当前页面叠加投影，增强层叠立体感。（注：默认原生边缘返回走系统转场，不消费以下动画参数；仅弹窗返回时生效，属预期行为而非 bug。）</string>
 			<key>key</key>
 			<string>shadowEnabled</string>
