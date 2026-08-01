@@ -207,6 +207,16 @@ static NSDictionary *_obSliderUnits(void) {
     [self presentViewController:alert animated:YES completion:nil];
 }
 
+#pragma mark - 立即打印诊断
+
+// PSButtonCell 的 action 会打到本控制器（无参调用，安全）。向所有已注入 Oback 的 App 广播一次诊断请求，
+// 各 App 的 ObackManager 收到后打印 [Oback-diag]（含前台/后台 App 真实 bid），无需重启 App。
+- (void)dumpDiagnostics {
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.zlhkf.oback.diagNow"),
+                                         NULL, NULL, TRUE);
+}
+
 // 真正执行重置：清空 com.zlhkf.oback 域 → 重建 specifiers → 表格回弹默认值
 - (void)_obPerformReset {
     NSString *domain = @"com.zlhkf.oback";

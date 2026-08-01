@@ -334,7 +334,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>开启后把每次手势判定写入 /var/mobile/oback_debug.log（可用 Filza 抓取发我分析）。日用机建议关闭，避免日志频繁写盘。</string>
+			<string>开启后把每次手势判定写入 /var/mobile/oback_debug.log（可用 Filza 抓取发我分析）。日用机建议关闭，避免日志频繁写盘。另：「立即打印诊断」按钮可随时向各 App 广播一次诊断横幅（无需重启），用于核对当前 App 真实 bid / 名单命中 / 视差状态。</string>
 			<key>label</key>
 			<string>调试</string>
 		</dict>
@@ -379,6 +379,14 @@
 			<string>diagBanner</string>
 			<key>label</key>
 			<string>诊断横幅</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>action</key>
+			<string>dumpDiagnostics</string>
+			<key>label</key>
+			<string>立即打印诊断</string>
 		</dict>
 		<dict>
 			<key>cell</key>

@@ -218,6 +218,17 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
 
 @end
 
+// 诊断广播（设置面板「立即打印诊断」按钮 → 跨进程 Darwin 通知 → 各 App 实例打印 [Oback-diag]）
+@interface ObackManager ()
+- (void)_emitDiagWithManual:(BOOL)manual;
+@end
+
+static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    @autoreleasepool {
+        [(ObackManager *)observer _emitDiagWithManual:YES];
+    }
+}
+
 @implementation ObackManager {
     BOOL   _started;
     CGFloat _currentPercent;
@@ -241,8 +252,31 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
 + (instancetype)shared {
     static ObackManager *m;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ m = [[ObackManager alloc] init]; });
+    dispatch_once(&once, ^{
+        m = [[ObackManager alloc] init];
+        // 注册「立即打印诊断」跨进程通知：设置面板按钮广播，各 App 的 ObackManager 收到后打印 [Oback-diag]
+        // （含前台/后台 App 真实 bid）。observer 用单例自身，单例永不释放，(void*) 转换安全（MRC 无多 retain）。
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                        (void *)m, obDiagNowCallback,
+                                        CFSTR("com.zlhkf.oback.diagNow"), NULL,
+                                        CFNotificationSuspensionBehaviorDeliverImmediately);
+    });
     return m;
+}
+
+- (void)_emitDiagWithManual:(BOOL)manual {
+    NSDictionary *d = [ObackPreferences _mergedPrefs];
+    NSString *bid = NSBundle.mainBundle.bundleIdentifier;
+    if (!bid) bid = @"(nil)";
+    id bl = d[@"blacklistApps"];
+    NSUInteger blCount = [bl isKindOfClass:[NSArray class]] ? [bl count] : 0;
+    id wlm = d[@"whitelistMode"];
+    NSLog(@"[Oback-diag] %@ bid=%@ isAllowed=%d whitelistMode=%@ blacklistCount=%lu capsuleEffect=%ld navParallax=%d state=%@",
+          manual ? @"(手动dump)" : @"(注入)",
+          bid, [ObackPreferences isAllowed], wlm,
+          (unsigned long)blCount, (long)[ObackPreferences capsuleEffect],
+          [ObackPreferences navParallaxEnabled],
+          self.interacting ? @"交互中" : (_started ? @"已注入" : @"未注入"));
 }
 
 #pragma mark - 启动与挂载
@@ -255,13 +289,7 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     // 抓到本 App 真实 bid 与名单状态，用于确认①装的是哪个包②黑名单数组是否真正加载/命中（此前文件日志因容器隔离抓不到拼多多）。
     // 默认关：日用机零日志噪声；需要时临时 defaults 写入 diagBanner=1 即可开启，仍保留绕过容器隔离的诊断能力。
     if ([ObackPreferences diagBannerEnabled]) {
-        NSDictionary *d = [ObackPreferences _mergedPrefs];
-        NSLog(@"[Oback-diag] bid=%@ whitelistMode=%@ blacklistApps=%@ isAllowed=%d debugLog=%@",
-              NSBundle.mainBundle.bundleIdentifier,
-              d[@"whitelistMode"],
-              d[@"blacklistApps"],
-              [ObackPreferences isAllowed],
-              d[@"debugLog"]);
+        [self _emitDiagWithManual:NO];   // 注入时打印诊断横幅（key=diagBanner）：真实 bid / 名单状态 / 视差等
     }
     // 黑白名单铁律：黑名单 App 完全不注入（不挂手势/不关系统手势/不链 nav），从根避免黑名单 App 因注入闪退。
     if (![ObackPreferences isAllowed]) {
