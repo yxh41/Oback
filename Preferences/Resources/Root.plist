@@ -227,6 +227,8 @@
 			<real>12.0</real>
 			<key>defaults</key>
 			<string>com.zlhkf.oback</string>
+			<key>footnote</key>
+			<string>仅弹窗返回（方案B）时生效；默认左缘原生 nav 返回（方案A，系统转场）不消费此参数——调了无变化属预期，非 bug。</string>
 			<key>key</key>
 			<string>cardCornerValue</string>
 			<key>label</key>
@@ -283,6 +285,8 @@
 			<real>400.0</real>
 			<key>defaults</key>
 			<string>com.zlhkf.oback</string>
+			<key>footnote</key>
+			<string>仅弹窗返回（方案B）时生效；默认左缘原生 nav 返回（方案A，系统转场）不消费此参数——调了无变化属预期，非 bug。</string>
 			<key>key</key>
 			<string>commitVelocity</string>
 			<key>label</key>
