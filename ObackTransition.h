@@ -46,8 +46,6 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 @interface ObackAnimator : NSObject <UIViewControllerAnimatedTransitioning>
 @property (nonatomic, assign) ObackEdge edge;
 @property (nonatomic, retain) ObackParams *params;
-// YES=nav pop 视差(移动上一页)；NO=弹窗 dismiss 方案B(只动被 dismiss 的 sheet，绝不碰底层 presenting，避免黑屏)
-@property (nonatomic, assign) BOOL parallaxToView;
 // 速度感知弹簧核心：中断式动画器由 interruptibleAnimatorForTransition: 构建并缓存
 @property (nonatomic, retain) UIViewPropertyAnimator *propertyAnimator;
 // 转场上下文（animateTransition: 时记入，finish/cancel 动画器若未能自行收尾由兜底强制 completeTransition）
@@ -81,8 +79,6 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 @interface ObackInteractiveTransition : NSObject <UIViewControllerInteractiveTransitioning>
 @property (nonatomic, assign) ObackEdge edge;
 @property (nonatomic, retain) ObackParams *params;
-// 同 ObackAnimator.parallaxToView 含义
-@property (nonatomic, assign) BOOL parallaxToView;
 // 反向引用当前动画器，finish/cancel 时用来更新弹簧速度/续跑（assign：避免与动画器互相 retain 成环，MRC 无 __weak）
 @property (nonatomic, assign) ObackAnimator *animator;
 - (instancetype)initWithEdge:(ObackEdge)edge params:(ObackParams *)params;
