@@ -60,8 +60,8 @@ static void OBApplyParallax(CGFloat percent,
     p.leftEnabled      = YES;
     p.rightEnabled     = YES;
     p.hapticEnabled    = YES;
-    p.parallaxOffset   = 0.30;
-    p.previousScaleMin = 0.92;
+    p.shadowOffset   = 6.0;
+    p.shadowRadius   = 12.0;
     p.shadowEnabled    = YES;
     p.shadowOpacity    = 0.25;
     p.duration         = 0.32;
@@ -349,8 +349,8 @@ static void OBApplyParallax(CGFloat percent,
     BOOL cornering = (self.params.cardCornerEnabled && !self.parallaxToView);
     v.layer.shadowColor = [UIColor blackColor].CGColor;
     v.layer.shadowOpacity = (self.params.shadowEnabled && !cornering) ? self.params.shadowOpacity : 0.0;
-    v.layer.shadowRadius = 12.0;
-    v.layer.shadowOffset = CGSizeMake((self.edge == ObackEdgeLeft ? -6.0 : 6.0), 0.0);
+    v.layer.shadowRadius = self.params.shadowRadius;
+    v.layer.shadowOffset = CGSizeMake((self.edge == ObackEdgeLeft ? -1.0 : 1.0) * self.params.shadowOffset, 0.0);
     v.layer.masksToBounds = NO;
 }
 

@@ -94,21 +94,21 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>调节返回时上一页随手势探出的位移比例（0–0.6）。数值越大探出越明显。</string>
+			<string>调节返回时当前页阴影的水平偏移（0–20pt）。数值越大，页面「抬起」的纵深感越强。（默认原生边缘返回走系统转场不消费此参数；仅开启『导航视差（实验）』或弹窗返回时生效。）</string>
 		</dict>
 		<dict>
 			<key>cell</key>
 			<string>PSSliderCell</string>
 			<key>default</key>
-			<real>0.3</real>
+			<real>6.0</real>
 			<key>defaults</key>
 			<string>com.zlhkf.oback</string>
 			<key>key</key>
-			<string>parallaxOffset</string>
+			<string>shadowOffset</string>
 			<key>label</key>
-			<string>视差位移</string>
+			<string>阴影偏移</string>
 			<key>max</key>
-			<real>0.6</real>
+			<real>20.0</real>
 			<key>min</key>
 			<real>0.0</real>
 		</dict>
@@ -116,23 +116,23 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>调节静止时上一页的最小缩放比例（0.8–1.0）。调小纵深感更强。（注：默认原生边缘返回走系统转场，不消费以下动画参数；仅开启『导航视差（实验）』或弹窗返回时生效，属预期行为而非 bug。）</string>
+			<string>调节阴影的模糊半径（0–40pt）。数值越大阴影越柔和弥散。（默认原生边缘返回走系统转场不消费此参数；仅开启『导航视差（实验）』或弹窗返回时生效。）</string>
 		</dict>
 		<dict>
 			<key>cell</key>
 			<string>PSSliderCell</string>
 			<key>default</key>
-			<real>0.92</real>
+			<real>12.0</real>
 			<key>defaults</key>
 			<string>com.zlhkf.oback</string>
 			<key>key</key>
-			<string>previousScaleMin</string>
+			<string>shadowRadius</string>
 			<key>label</key>
-			<string>上一页最小缩放</string>
+			<string>阴影柔和度</string>
 			<key>max</key>
-			<real>1.0</real>
+			<real>40.0</real>
 			<key>min</key>
-			<real>0.8</real>
+			<real>0.0</real>
 		</dict>
 		<dict>
 			<key>cell</key>

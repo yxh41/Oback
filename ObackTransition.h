@@ -29,8 +29,8 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 @property (nonatomic, assign) BOOL    leftEnabled;       // 左边缘返回
 @property (nonatomic, assign) BOOL    rightEnabled;      // 右边缘返回
 @property (nonatomic, assign) BOOL    hapticEnabled;     // 触感反馈
-@property (nonatomic, assign) CGFloat parallaxOffset;    // 上一页视差位移比例 (0~0.6)
-@property (nonatomic, assign) CGFloat previousScaleMin;  // 上一页最小缩放 (0.8~1)
+@property (nonatomic, assign) CGFloat shadowOffset;   // 阴影水平偏移(pt)，控制"抬起"纵深感（0~20）
+@property (nonatomic, assign) CGFloat shadowRadius;    // 阴影模糊半径(pt)，控制柔和度（0~40）
 @property (nonatomic, assign) BOOL    shadowEnabled;     // 当前页阴影
 @property (nonatomic, assign) CGFloat shadowOpacity;     // 阴影浓度
 @property (nonatomic, assign) NSTimeInterval duration;   // 释放后补间时长 (s)

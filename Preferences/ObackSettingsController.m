@@ -27,8 +27,8 @@ static NSDictionary *_obSliderUnits(void) {
     dispatch_once(&once, ^{
         d = @{
             @"triggerWidth":    @" pt",
-            @"parallaxOffset":  @"",
-            @"previousScaleMin": @"",
+            @"shadowOffset":  @" pt",
+            @"shadowRadius":  @" pt",
             @"dimAlpha":        @"",
             @"duration":        @" s",
             @"commitRatio":     @"",
