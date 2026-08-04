@@ -155,8 +155,9 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 #pragma mark 存储与列表生成
 
 - (NSString *)_storeKey {
-    if ([self.mode isEqualToString:@"white"])    return @"whitelistApps";
-    if ([self.mode isEqualToString:@"leftedge"]) return @"leftEdgeExcludeApps";
+    if ([self.mode isEqualToString:@"white"])      return @"whitelistApps";
+    if ([self.mode isEqualToString:@"leftedge"])   return @"leftEdgeExcludeApps";
+    if ([self.mode isEqualToString:@"globalback"]) return @"globalBackApps";
     return @"blacklistApps";
 }
 
@@ -533,6 +534,15 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 - (id)init {
     if (self = [super init]) {
         self.mode = @"leftedge";
+    }
+    return self;
+}
+@end
+
+@implementation ObackGlobalBackListController
+- (id)init {
+    if (self = [super init]) {
+        self.mode = @"globalback";
     }
     return self;
 }

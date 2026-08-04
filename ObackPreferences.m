@@ -142,6 +142,19 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     return [self _bid:bid matchesList:list];
 }
 
+// 全局返回列表：命中此列表的 App 启用「全屏/任意位置返回」——Oback 左缘 edge pan 不接管
+// （交全屏 pan 统一接管左→右 nav pop），系统 interactivePop 仍禁用防双触发；右缘 modal dismiss
+// 仍由 Oback 提供。≠ 黑名单（整 App 不注入）、≠ 左缘排除（左缘交还系统原生 interactivePop）。
+// 默认关（列表空）；仅勾选 App 开启，其他 App 行为零变化。
++ (BOOL)isGlobalBackEnabled {
+    NSDictionary *d = [self _mergedPrefs];
+    NSArray *list = [d objectForKey:@"globalBackApps"];
+    if (![list isKindOfClass:[NSArray class]] || list.count == 0) return NO;
+    NSString *bid = NSBundle.mainBundle.bundleIdentifier;
+    if (!bid) return NO;
+    return [self _bid:bid matchesList:list];
+}
+
 // 调试日志总开关：设置面板「调试日志」(key=debugLog)。
 // 默认关（日用机省电省盘）；开启后常驻开，需用户在设置面板手动关闭（已移除「30 分钟自动过期写回」，避免开着开着突然没日志的困惑）。
 // 内存缓存 5s，避免每次同步 NSUserDefaults IO（OBLog 调用频率不低，即便关闭仍走此检查）。

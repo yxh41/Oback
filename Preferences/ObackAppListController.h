@@ -21,3 +21,7 @@
 @interface ObackLeftExcludeListController : ObackAppListController
 @end
 
+// 全局返回列表：命中的 App 启用全屏/任意位置返回（左缘交全屏 pan 接管、右缘 dismiss 保留），用法同黑白名单。
+@interface ObackGlobalBackListController : ObackAppListController
+@end
+

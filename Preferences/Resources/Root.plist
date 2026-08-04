@@ -360,6 +360,16 @@
 		</dict>
 		<dict>
 			<key>cell</key>
+			<string>PSLinkCell</string>
+			<key>detail</key>
+			<string>ObackGlobalBackListController</string>
+			<key>footnote</key>
+			<string>把想用「全屏/任意位置返回」的 App 加进来：命中后该 App 的 Oback 左右缘不再接管（单一手势源），改由 Oback 全屏 pan 从屏幕左侧约 1/3 起滑、横向滑动即返回——解决部分 App 中间手势返回不便。右缘弹窗 dismiss 仍由 Oback 提供。默认关，仅勾选 App 开启；其他 App 行为零变化。全屏 pan 仅响应「左侧起滑 + 横向滑动占优」，不会误吞 App 内纵向滚动/图片浏览。</string>
+			<key>label</key>
+			<string>选全局返回程序</string>
+		</dict>
+		<dict>
+			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
 			<string>开启后把每次手势判定写入 /var/mobile/oback_debug.log（可用 Filza 抓取发我分析）。日用机建议关闭，避免日志频繁写盘。另：「立即打印诊断」按钮可向各 App 广播一次诊断（无需重启、无需 Mac）：各 App 把结果写入 /var/mobile/oback_diag.log 并在手机上直接弹文本框展示，用于核对当前 App 真实 bid / 名单命中 / 视差状态；也可随时用 Filza 看该文件。</string>
