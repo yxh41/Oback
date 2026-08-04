@@ -600,6 +600,14 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
 // 供 _linkNavPopGesturesInWindow（链接时机触发）与 gestureRecognizerShouldBegin（右缘懒补链）两处复用，
 // 专治 QQ 聊天等「进会话后才懒加载挂上」的晚到右缘手势——链接函数跑时它尚未出现、从未被压住。
 - (void)_obLinkRightEdgeOpponentPansInWindow:(UIWindow *)win {
+    // 左缘排除列表命中：不放任 Oback 右缘 pan 对 App 自有 pan 做 requireGestureRecognizerToFail:
+    // 链接（含懒补链路径），以免压制 App 自带中间/全屏手势动画（如 QQ 聊天中间手势）。
+    // 左缘已交还系统、右缘返回仍由 Oback 经自然边缘优先级提供、弹窗 dismiss 不变 —— 非交还右缘、非黑名单。
+    if ([ObackPreferences isLeftEdgeExcluded]) {
+        OBLog(@"rightLink: 左缘排除列表命中，跳过对手 pan 链接（释放 App 自有手势，右缘返回仍由 Oback 提供）(bid=%@)",
+              NSBundle.mainBundle.bundleIdentifier);
+        return;
+    }
     NSMutableArray *rightPans = [NSMutableArray array];
     NSArray *pans = objc_getAssociatedObject(win, kPanKey);
     if ([pans isKindOfClass:[NSArray class]]) {
