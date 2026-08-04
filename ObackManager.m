@@ -277,10 +277,11 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     id bl = d[@"blacklistApps"];
     NSUInteger blCount = [bl isKindOfClass:[NSArray class]] ? [bl count] : 0;
     id wlm = d[@"whitelistMode"];
-    NSString *line = [NSString stringWithFormat:@"[%@] %@ bid=%@ isAllowed=%d whitelistMode=%@ blacklistCount=%lu leftEdgeExcluded=%d capsuleEffect=%ld state=%@",
+    NSString *line = [NSString stringWithFormat:@"[%@] %@ bid=%@ isAllowed=%d whitelistMode=%@ blacklistCount=%lu leftEdgeExcluded=%d navPopFallback=%d capsuleEffect=%ld state=%@",
                       manual ? @"手动dump" : @"注入",
                       [NSDate date], bid, [ObackPreferences isAllowed], wlm,
                       (unsigned long)blCount, (int)[ObackPreferences isLeftEdgeExcluded],
+                      (int)[ObackPreferences isNavPopFallback],
                       (long)[ObackPreferences capsuleEffect],
                                             self.interacting ? @"交互中" : (_started ? @"已注入" : @"未注入")];
     NSLog(@"[Oback-diag] %@", line);   // 给有 Mac 的人：log stream | grep Oback-diag
@@ -1696,6 +1697,10 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     // 类名兜底（防 bundle id 读取异常 / 微信变体）
     NSString *navCls = NSStringFromClass([nav class]);
     if (navCls && [navCls hasPrefix:@"MMUI"]) return NO; // 微信系自定义 nav
+    // 用户自选「无动画修复程序」：系统交互转场不渲染/无动画的自定义 nav（如酷安），
+    // 强制走 rightSimplePop 非交互标准滑出返回（有动画、不跟手），避免方案A 空转瞬切无动画。
+    // 设置页「选无动画修复程序」按 App 勾选写入 navPopFallbackApps；仅命中 App 受影响，其他 App 零变化。
+    if ([ObackPreferences isNavPopFallback]) return NO;
     // 标准 nav：必须有可用的系统交互转场 target
     id t = [self navPopSystemTargetForNav:nav];
     return (t != nil);
