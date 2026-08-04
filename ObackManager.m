@@ -372,16 +372,8 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     // 普通 window 级 pan 在可滚动列表（朋友圈 feed / 聊天列表）上会被 scrollView 的 pan 抢赢识别，
     // 导致 shouldBegin=YES（胶囊出现）却永远进不了 Began（无返回）——日志实证。屏幕边缘 pan 自带
     // 「边缘优先于滚动」的系统级优先级，正是原生 interactivePop 在列表页也能用的原理，从根上根治。
-    ObackPanGestureRecognizer *panR = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
-                                                                                 action:@selector(handlePan:)] autorelease];
-    panR.delegate = self;
-    panR.maximumNumberOfTouches = 1;
-    panR.cancelsTouchesInView = NO;
-    panR.delaysTouchesBegan   = NO;
-    panR.edges = UIRectEdgeRight;
-
-    // 全局返回 App：左缘 edge pan 完全交全屏 pan 接管（单一手势源，杜绝双返回），故不挂 window 左缘 panL；
-    // 右缘 panR（modal dismiss）照常挂载。
+    // 全局返回 App：左缘 + 右缘 edge pan 全部交还系统/App 原生（单一手势源 = 全屏 pan，杜绝双返回）。
+    // 右缘 panR（含 modal dismiss）也一并不挂——这类 App 全局返回已让单手返回足够方便，Oback 右缘不再需要。
     ObackPanGestureRecognizer *panL = nil;
     if (![ObackPreferences isGlobalBackEnabled]) {
         panL = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
@@ -394,11 +386,21 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
         [win addGestureRecognizer:panL];
     }
 
-    [win addGestureRecognizer:panR];
+    ObackPanGestureRecognizer *panR = nil;
+    if (![ObackPreferences isGlobalBackEnabled]) {
+        panR = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
+                                                         action:@selector(handlePan:)] autorelease];
+        panR.delegate = self;
+        panR.maximumNumberOfTouches = 1;
+        panR.cancelsTouchesInView = NO;
+        panR.delaysTouchesBegan   = NO;
+        panR.edges = UIRectEdgeRight;
+        [win addGestureRecognizer:panR];
+    }
     // 全局返回：全屏 pan（普通 UIPanGestureRecognizer，非边缘——UIScreenEdgePanGestureRecognizer 在
     // edges=0 时永不 begin，不能用）。仅 isGlobalBackEnabled 的 App 才挂；gestureRecognizerShouldBegin
     // 里仅允许「左热区起滑」，handleGlobalPan 进一步按「横向滑动占优」才接管 nav pop，否则交还 App。
-    // 与左右缘 edge pan 完全独立（单一手势源，杜绝双返回）。右缘 modal dismiss 仍由 panR 提供。
+    // 与左右缘 edge pan 完全独立（单一手势源，杜绝双返回）。全局返回 App 的左右缘均交还系统，无 Oback edge pan。
     if ([ObackPreferences isGlobalBackEnabled]) {
         UIPanGestureRecognizer *panG = [[[UIPanGestureRecognizer alloc] initWithTarget:self
                                                                                 action:@selector(handleGlobalPan:)] autorelease];
@@ -413,9 +415,12 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     }
     // 这两个 window pan 仅用于「modal dismiss」检测（kind=modal）。nav pop 的边缘 pan 改挂到
     // nav.view（见 _attachNavPanToNav:），以在可滚动列表页也能压过 scrollView 的 pan。
+    // 全局返回 App：panL/panR 均不挂，pans 为空数组（仅全屏 pan 在 window 上，独立分流）。
     if (panL) objc_setAssociatedObject(panL, kPanKindKey, @"modal", OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(panR, kPanKindKey, @"modal", OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    NSArray *pans = panL ? @[panL, panR] : @[panR];
+    if (panR) objc_setAssociatedObject(panR, kPanKindKey, @"modal", OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    NSMutableArray *pans = [NSMutableArray array];
+    if (panL) [pans addObject:panL];
+    if (panR) [pans addObject:panR];
     objc_setAssociatedObject(win, kAttachedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(win, kPanKey, pans, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     OBLog(@"attached pan gesture to window %@ (bounds=%.0fx%.0f)", win,
@@ -511,8 +516,8 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     // 右缘由 nav.view 右缘 pan 稳定接管——正是「之前能用的那套」。左缘窗口级 pan 同理 defer 给 nav 左缘 pan。
     UIRectEdge edges[2] = { UIRectEdgeLeft, UIRectEdgeRight };
     for (NSUInteger i = 0; i < 2; i++) {
-        // 全局返回 App：左缘 edge pan 交全屏 pan 接管，nav.view 左缘 pan 不挂（右缘照常保留）。
-        if ([ObackPreferences isGlobalBackEnabled] && edges[i] == UIRectEdgeLeft) continue;
+        // 全局返回 App：左右缘 edge pan 都交还系统/App 原生，nav.view 不挂任何边缘 pan（含右缘）。
+        if ([ObackPreferences isGlobalBackEnabled]) continue;
         ObackPanGestureRecognizer *pan = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
                                                                                      action:@selector(handlePan:)] autorelease];
         pan.delegate = self;
@@ -779,9 +784,12 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
         OBLog(@"shouldBegin=NO (左缘排除列表命中，交还系统: bid=%@)", NSBundle.mainBundle.bundleIdentifier);
         return NO;
     }
-    // 全局返回 App：左缘 edge pan（window panL / nav.view 左缘，kind 不论）一律交全屏 pan 接管（单一手势源，杜绝双返回）；右缘保留（modal dismiss）。
-    if ([ObackPreferences isGlobalBackEnabled] && edge == ObackEdgeLeft) {
-        OBLog(@"shouldBegin=NO (全局返回 App 左缘交全屏 pan 接管: bid=%@)", NSBundle.mainBundle.bundleIdentifier);
+    // 全局返回 App：左右缘 edge pan（window panL/panR、nav.view 左右缘，kind 不论）一律交还系统/App 原生
+    // （单一手势源 = 全屏 pan，杜绝双返回）。右缘 modal dismiss 也交还原生——这类 App 全局返回已让单手返回足够方便，
+    // Oback 右缘不再需要。
+    if ([ObackPreferences isGlobalBackEnabled] && (edge == ObackEdgeLeft || edge == ObackEdgeRight)) {
+        OBLog(@"shouldBegin=NO (全局返回 App 左右缘交还原生: edge=%@ bid=%@)",
+              edge == ObackEdgeLeft ? @"左" : @"右", NSBundle.mainBundle.bundleIdentifier);
         return NO;
     }
     if (!nav) {
@@ -920,7 +928,7 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     CGPoint loc = [pan locationInView:win];
     CGFloat w = win.bounds.size.width;
     if (w <= 0) return NO;
-    // 仅左侧约 1/3 热区起滑才接管；右侧起滑交给 Oback 右缘 edge pan（modal dismiss）
+    // 仅左侧约 1/3 热区起滑才接管；右侧起滑交还系统/App 原生（全局返回 App 的 Oback 右缘已禁用）
     if (loc.x > w / 3.0) { OBLog(@"globalShouldBegin=NO (非左热区 x=%.1f w=%.1f)", loc.x, w); return NO; }
     UINavigationController *nav = objc_getAssociatedObject(pan, kObackNavKey);
     UIViewController *top = nil;
