@@ -928,8 +928,14 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     CGPoint loc = [pan locationInView:win];
     CGFloat w = win.bounds.size.width;
     if (w <= 0) return NO;
-    // 仅左侧约 1/3 热区起滑才接管；右侧起滑交还系统/App 原生（全局返回 App 的 Oback 右缘已禁用）
-    if (loc.x > w / 3.0) { OBLog(@"globalShouldBegin=NO (非左热区 x=%.1f w=%.1f)", loc.x, w); return NO; }
+    // 热区按触发侧：左手侧(默认)=左侧约 1/3 起滑；右手侧=右侧约 1/4 起滑（薄热区，类似边缘手势插件）。
+    // 对侧起滑一律交还系统/App 原生（全局返回 App 的 Oback 右缘已禁用）。
+    BOOL rightSide = [ObackPreferences isGlobalBackRightSide];
+    if (rightSide) {
+        if (loc.x < w * 3.0 / 4.0) { OBLog(@"globalShouldBegin=NO (非右热区 x=%.1f w=%.1f)", loc.x, w); return NO; }
+    } else {
+        if (loc.x > w / 3.0) { OBLog(@"globalShouldBegin=NO (非左热区 x=%.1f w=%.1f)", loc.x, w); return NO; }
+    }
     UINavigationController *nav = objc_getAssociatedObject(pan, kObackNavKey);
     UIViewController *top = nil;
     if (nav) top = nav.topViewController;
@@ -966,9 +972,16 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
             CGFloat dx = cur.x - _globalStart.x;
             CGFloat dy = cur.y - _globalStart.y;
             CGPoint v = [pan velocityInView:win];
-            if (dx > 6.0) {
-                // 向右且横向占优(>1.3x)：确认接管
-                if (v.x > 0 && (v.x * v.x) > (v.y * v.y) * 1.69) {
+            BOOL rightSide = [ObackPreferences isGlobalBackRightSide];
+            // 左手侧(默认)：从左侧热区起滑、向右滑(dx>0)=返回；右手侧：从右侧薄热区起滑、向左滑(dx<0)=返回。
+            // currentEdge 随之设左/右缘，转场 dir 自动镜像（见 updateTransition/endTransition 的 dir 取值）。
+            CGFloat backThresh = rightSide ? -6.0 : 6.0;
+            BOOL movingBack  = rightSide ? (dx < backThresh) : (dx > backThresh);
+            BOOL movingAway  = rightSide ? (dx > 6.0)      : (dx < -6.0);
+            if (movingBack) {
+                CGFloat vx = v.x;
+                // 横向占优(>1.3x)且方向正确：确认接管
+                if ((rightSide ? vx < 0 : vx > 0) && (vx * vx) > (v.y * v.y) * 1.69) {
                     _globalDriven = YES;
                     UINavigationController *nav = objc_getAssociatedObject(pan, kObackNavKey);
                     if (!nav) {
@@ -980,12 +993,12 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
                     BOOL stdNav = [self _navPopShouldDriveSystemNav:nav];  // 标准nav=YES(方案A) / 微信等=NO(rightSimplePop)
                     self.currentParallaxToView = stdNav;
                     self.rightSimplePop = !stdNav;
-                    self.currentEdge = ObackEdgeLeft;
+                    self.currentEdge = rightSide ? ObackEdgeRight : ObackEdgeLeft;
                     [self beginTransition:pan];   // 驱动 nav pop + 显示胶囊（复用已验证转场链路）
                 } else {
                     [self _cancelGlobalPan:pan];
                 }
-            } else if (dx < -6.0 || dy > 6.0 || dy < -6.0) {
+            } else if (movingAway || dy > 6.0 || dy < -6.0) {
                 [self _cancelGlobalPan:pan];
             }
             break;
