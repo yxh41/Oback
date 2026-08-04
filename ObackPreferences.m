@@ -155,6 +155,19 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     return [self _bid:bid matchesList:list];
 }
 
+// 无动画修复列表：命中此列表的 App，其左缘/全局返回强制走 rightSimplePop 非交互标准滑出返回
+// （系统交互转场不渲染/无动画的自定义 nav，如酷安 com.coolapk.app），避免方案A 空转瞬切无动画。
+// 与微信硬编码特例（_navPopShouldDriveSystemNav:）同源行为，但改为按 App 用户勾选（设置页「选无动画修复程序」写入 navPopFallbackApps）。
+// 默认空（列表空）→ 不影响任何 App；仅勾选 App 的左缘+全局返回改走 rightSimplePop（有动画、不跟手），右缘/弹窗不受影响。
++ (BOOL)isNavPopFallback {
+    NSDictionary *d = [self _mergedPrefs];
+    NSArray *list = [d objectForKey:@"navPopFallbackApps"];
+    if (![list isKindOfClass:[NSArray class]] || list.count == 0) return NO;
+    NSString *bid = NSBundle.mainBundle.bundleIdentifier;
+    if (!bid) return NO;
+    return [self _bid:bid matchesList:list];
+}
+
 // 调试日志总开关：设置面板「调试日志」(key=debugLog)。
 // 默认关（日用机省电省盘）；开启后常驻开，需用户在设置面板手动关闭（已移除「30 分钟自动过期写回」，避免开着开着突然没日志的困惑）。
 // 内存缓存 5s，避免每次同步 NSUserDefaults IO（OBLog 调用频率不低，即便关闭仍走此检查）。
