@@ -370,6 +370,18 @@
 		</dict>
 		<dict>
 			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>全局返回·右手热区</string>
+			<key>key</key>
+			<string>globalBackRightSide</string>
+			<key>default</key>
+			<false/>
+			<key>footnote</key>
+			<string>开=全局返回 App 的触发带挪到屏幕右侧（薄热区，类似边缘手势插件），拇指从右缘向左滑返回——右手单握不用把拇指伸到左边。关=左侧热区+右滑返回（左手单握，默认）。仅影响「选全局返回程序」里勾选的 App。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
 			<string>PSLinkCell</string>
 			<key>detail</key>
 			<string>ObackNavPopFallbackController</string>
