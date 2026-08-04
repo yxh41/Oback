@@ -354,7 +354,7 @@
 			<key>detail</key>
 			<string>ObackLeftExcludeListController</string>
 			<key>footnote</key>
-			<string>把左缘 / 自带手势体验不好的 App 加进来：命中后该 App 的左缘交还系统原生返回（不再由 Oback 接管、不再禁用其 interactivePop）；同时 Oback 不再用 requireToFail 压住 App 自带的右缘 / 中间 / 全屏手势（如 QQ 聊天中间手势动画被压制）。右缘返回与弹窗 dismiss 仍由 Oback 提供。≠ 黑名单（黑名单是整 App 不注入）。适合「左缘会闪退」「左缘返回动画与 App 自身手势冲突」「App 自带中间手势被 Oback 压制」的 App。</string>
+			<string>把左缘体验不好的 App 加进来：命中后该 App 的左缘交还系统原生返回（不再由 Oback 接管、不再禁用其 interactivePop），右缘返回与弹窗 dismiss 仍由 Oback 提供。≠ 黑名单（黑名单是整 App 不注入）。适合「左缘会闪退」或「左缘返回动画与 App 自身手势冲突」的 App。</string>
 			<key>label</key>
 			<string>选左缘排除程序</string>
 		</dict>
