@@ -1619,9 +1619,9 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         if (!t && !knownCustom) {
             OBLog(@"[diag-navTarget] nil | bid=%@ nav=%@ ipg=%@ enabled=%d targets.count=%lu delegate=%@",
                   bid, NSStringFromClass([nav class]), ipg,
-                  (ipg ? (int)ipg.enabled : -1),
+                  (ipg ? (int)((UIGestureRecognizer *)ipg).enabled : -1),
                   (unsigned long)(targets ? targets.count : 0),
-                  (ipg ? [ipg delegate] : nil));
+                  (ipg ? [(UIGestureRecognizer *)ipg delegate] : nil));
         }
         return t;
     } @catch (NSException *e) {
