@@ -97,8 +97,6 @@
 			<string>com.zlhkf.oback</string>
 			<key>key</key>
 			<string>triggerWidth</string>
-			<key>showValue</key>
-			<true/>
 			<key>label</key>
 			<string>触发宽度 (pt)</string>
 			<key>max</key>
@@ -121,8 +119,6 @@
 			<string>com.zlhkf.oback</string>
 			<key>key</key>
 			<string>shadowOffset</string>
-			<key>showValue</key>
-			<true/>
 			<key>label</key>
 			<string>阴影偏移</string>
 			<key>max</key>
@@ -145,8 +141,6 @@
 			<string>com.zlhkf.oback</string>
 			<key>key</key>
 			<string>shadowRadius</string>
-			<key>showValue</key>
-			<true/>
 			<key>label</key>
 			<string>阴影柔和度</string>
 			<key>max</key>
@@ -169,8 +163,6 @@
 			<string>com.zlhkf.oback</string>
 			<key>key</key>
 			<string>shadowOpacity</string>
-			<key>showValue</key>
-			<true/>
 			<key>label</key>
 			<string>阴影浓度</string>
 			<key>max</key>
@@ -193,8 +185,6 @@
 			<string>com.zlhkf.oback</string>
 			<key>key</key>
 			<string>duration</string>
-			<key>showValue</key>
-			<true/>
 			<key>label</key>
 			<string>动画时长 (s)</string>
 			<key>max</key>
@@ -255,8 +245,6 @@
 			<string>仅弹窗返回（方案B）时生效；默认左缘原生 nav 返回（方案A，系统转场）不消费此参数——调了无变化属预期，非 bug。</string>
 			<key>key</key>
 			<string>cardCornerValue</string>
-			<key>showValue</key>
-			<true/>
 			<key>label</key>
 			<string>圆角半径 (pt)</string>
 			<key>max</key>
@@ -297,8 +285,6 @@
 			<string>com.zlhkf.oback</string>
 			<key>key</key>
 			<string>commitRatio</string>
-			<key>showValue</key>
-			<true/>
 			<key>label</key>
 			<string>提交位移阈值</string>
 			<key>max</key>
@@ -317,8 +303,6 @@
 			<string>仅弹窗返回（方案B）时生效；默认左缘原生 nav 返回（方案A，系统转场）不消费此参数——调了无变化属预期，非 bug。</string>
 			<key>key</key>
 			<string>commitVelocity</string>
-			<key>showValue</key>
-			<true/>
 			<key>label</key>
 			<string>提交速度阈值</string>
 			<key>max</key>
