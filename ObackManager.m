@@ -1607,9 +1607,25 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         id ipg = nav.interactivePopGestureRecognizer;
         NSArray *targets = [ipg valueForKey:@"_targets"];
         id targetObj = targets.firstObject;
-        return [targetObj valueForKey:@"target"];
+        id t = [targetObj valueForKey:@"target"];
+        // [诊断 2026-08-04] 取不到系统 target 时细分打印 nav/ipg 状态，定位为何无法跟手：
+        //  - ipg=nil                                → nav 压根没交互 pop（自研容器）
+        //  - ipg 存在但 enabled=0                    → 仅被禁（可尝试重新 enabled 后喂系统转场）
+        //  - ipg 存在 enabled=1 但 targets=0         → target 被剥（自研返回手势换掉系统转场，必须走自定义转场）
+        // 仅对"非微信类"的未知非标准 nav 打印，避免微信等已知项刷屏。
+        NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
+        BOOL knownCustom = (bid && [bid caseInsensitiveCompare:@"com.tencent.xin"] == NSOrderedSame)
+                        || (nav && [NSStringFromClass([nav class]) hasPrefix:@"MMUI"]);
+        if (!t && !knownCustom) {
+            OBLog(@"[diag-navTarget] nil | bid=%@ nav=%@ ipg=%@ enabled=%d targets.count=%lu delegate=%@",
+                  bid, NSStringFromClass([nav class]), ipg,
+                  (ipg ? (int)ipg.enabled : -1),
+                  (unsigned long)(targets ? targets.count : 0),
+                  (ipg ? [ipg delegate] : nil));
+        }
+        return t;
     } @catch (NSException *e) {
-        OBLog(@"navPopSystemTarget fail: %@", e);
+        OBLog(@"navPopSystemTarget fail: %@ (nav=%@)", e, NSStringFromClass([nav class]));
         return nil;
     }
 }
