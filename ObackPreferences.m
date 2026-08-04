@@ -168,6 +168,15 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     return [self _bid:bid matchesList:list];
 }
 
+// 全局返回触发侧：开=右侧薄热区 + 左滑返回（右手单握，拇指不用伸到左边）；关=左侧热区 + 右滑返回
+// （左手单握，默认）。仅影响「全局返回列表」内 App 的全屏 pan 起滑位置与手势方向；其他 App 零变化。
+// 右侧路径走 currentEdge=ObackEdgeRight 自定义镜像转场（与弹窗 dismiss 同套 ObackAnimator，已验证）。
++ (BOOL)isGlobalBackRightSide {
+    NSDictionary *d = [self _mergedPrefs];
+    id v = [d objectForKey:@"globalBackRightSide"];
+    return v ? [v boolValue] : NO;   // 未设置 → 默认左(关)
+}
+
 // 调试日志总开关：设置面板「调试日志」(key=debugLog)。
 // 默认关（日用机省电省盘）；开启后常驻开，需用户在设置面板手动关闭（已移除「30 分钟自动过期写回」，避免开着开着突然没日志的困惑）。
 // 内存缓存 5s，避免每次同步 NSUserDefaults IO（OBLog 调用频率不低，即便关闭仍走此检查）。
