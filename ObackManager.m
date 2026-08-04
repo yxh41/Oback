@@ -249,9 +249,10 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     BOOL   _navPopProbed;        // 运行时探测门控: 独立于 _transitionTriggered，确保左缘 nav 首次横拖必探测一次
     UIGestureRecognizer *_simulOpponent; // 同时识别冲突: 左缘接管型nav场景下记下的对手pan(retain 自己持有, 防 pop 文章后对手随 VC/WKWebView 释放成悬空指针 → beginTransition 解引用 EXC_BAD_ACCESS)。仅 beginTransition 取消一次, endTransition/abortTransition 收尾 release+nil。
     // 全局返回：全屏 pan 相关状态
-    UIPanGestureRecognizer *_globalPan;  // 全屏 pan 引用（gestureRecognizerShouldBegin 识别用）
     CGPoint _globalStart;                // 全屏 pan 起点（Began 记录，Changed 判定方向）
     BOOL    _globalDriven;               // 全屏 pan 是否已确认横向意图并交给 beginTransition 驱动
+    // 注：不再用单 ivar _globalPan 存引用（多 window 会被覆盖成孤儿 pan → 漏进边缘分支访问 pan.edges 崩）；
+    // 改用关联对象标记 kGlobalPanKey 识别全屏 pan（见 gestureRecognizerShouldBegin: 与 attachToWindow:）
 }
 
 + (instancetype)shared {
@@ -405,8 +406,8 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
         panG.cancelsTouchesInView = NO;   // 只观察、绝不吞 App 触摸（与 panL/panR 一致）
         panG.delaysTouchesBegan   = NO;
         [win addGestureRecognizer:panG];
-        _globalPan = panG;                // 存 ivar 供 shouldBegin 识别
-        objc_setAssociatedObject(panG, kPanKindKey, @"nav", OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // 用关联对象标记识别全屏 pan（不依赖单 ivar，多 window 也能正确分流，避免孤儿 pan 漏进边缘分支访问 pan.edges 崩）
+        objc_setAssociatedObject(panG, kGlobalPanKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         OBLog(@"attached 全局返回全屏 pan to window %@ (globalBackEnabled)", win);
     }
     // 这两个 window pan 仅用于「modal dismiss」检测（kind=modal）。nav pop 的边缘 pan 改挂到
@@ -719,8 +720,9 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
 // 只在"落在边缘 + 可返回 + 不在黑名单"时，手势才接管，否则放行给 App 自身
 - (BOOL)gestureRecognizerShouldBegin:(UIScreenEdgePanGestureRecognizer *)pan {
     // 全局返回：全屏 pan 是普通 UIPanGestureRecognizer，无 edges，不能走下方 edge 判定（访问 pan.edges 会崩）。
-    // 故在开头单独分流到 _globalPanShouldBegin:（其内仅做左热区 + nav pop 判定，不访问 edges）。
-    if (_globalPan && (id)pan == (id)_globalPan) {
+    // 用关联对象标记 kGlobalPanKey 识别（替代单 ivar，多 window 不会被覆盖成孤儿 pan → 漏进边缘分支崩），
+    // 命中即分流到 _globalPanShouldBegin:（其内仅做左热区 + nav pop 判定，不访问 edges）。
+    if (objc_getAssociatedObject(pan, kGlobalPanKey)) {
         return [self _globalPanShouldBegin:pan];
     }
     // [2026-08-01 残影加固] 每轮手势从干净态起：先复位 cancelsTouchesInView=NO（默认安全值），
