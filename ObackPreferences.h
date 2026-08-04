@@ -7,6 +7,7 @@
 + (BOOL)isAllowed;        // 统一判断：当前 App 是否允许生效（白名单/黑名单模式）
 + (BOOL)isLeftEdgeExcluded;  // 左缘排除列表：命中 App 左缘交还系统原生返回（保留右缘+弹窗），≠ 全局黑名单
 + (BOOL)isGlobalBackEnabled; // 全局返回列表：命中 App 启用全屏/任意位置返回（左缘交全屏 pan 接管、右缘 dismiss 保留），默认关、≠ 黑名单
++ (BOOL)isNavPopFallback; // 无动画修复列表：命中 App 左缘/全局返回强制走 rightSimplePop 非交互标准滑出（系统交互转场不渲染的自定义 nav，如酷安），默认关、≠ 黑名单/左缘排除
 + (BOOL)debugLogEnabled;  // 调试日志总开关（设置面板「调试日志」），默认关（批次A 改为关 + 缓存 + 30min 自动过期）
 + (BOOL)doubleReturnDiagEnabled;  // 双返回诊断（设置面板「双返回诊断」），默认关
 + (BOOL)diagBannerEnabled;  // 诊断横幅独立隐藏开关（key=diagBanner），默认关；开→每次注入打印 [Oback-diag] 横幅，关→完全静默
