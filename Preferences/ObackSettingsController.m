@@ -35,6 +35,8 @@ static NSDictionary *_obSliderUnits(void) {
             @"triggerWidth":    @" pt",
             @"shadowOffset":  @" pt",
             @"shadowRadius":  @" pt",
+            @"shadowOpacity": @"",
+            @"cardCornerValue": @" pt",
             @"duration":        @" s",
             @"commitRatio":     @"",
             @"commitVelocity":  @"",
@@ -215,13 +217,13 @@ static NSSet *_obPlanBKeys(void) {
     // 从 slider.value 读真值（滑块位置永远是对的，不依赖 UserDefaults 默认值注册）
     [self _obRefreshLabel:lbl key:key value:slider.value];
 
-    // 定位：右上角，垂直偏上（在滑块上方，不抢滑块视觉空间）
+    // 定位：右上角，垂直偏上（在滑块上方，不抢滑块视觉空间）；按文字自适应宽度防裁切
     CGFloat margin = 16;
     CGFloat w = cell.contentView.bounds.size.width;
     if (w > 0) {
-        lbl.frame = CGRectMake(w - 60 - margin,
-                               2,   // 贴顶，与 label 文字基线对齐
-                               60, 18);
+        [lbl sizeToFit];
+        CGFloat lw = lbl.frame.size.width;
+        lbl.frame = CGRectMake(w - lw - margin, 2, lw, 18);
     }
 }
 
@@ -232,6 +234,14 @@ static NSSet *_obPlanBKeys(void) {
     UILabel *lbl = _valueLabels[key];
     if (!lbl) return;
     [self _obRefreshLabel:lbl key:key value:sender.value];
+    // 拖动时数值长度可能变化（如 9→10、0.25→1），重新自适应宽度并右对齐，防裁切
+    UIView *sup = lbl.superview;
+    CGFloat w = sup ? sup.bounds.size.width : 0;
+    if (w > 0) {
+        [lbl sizeToFit];
+        CGFloat lw = lbl.frame.size.width;
+        lbl.frame = CGRectMake(w - lw - 16, 2, lw, 18);
+    }
 }
 
 #pragma mark - 内部辅助
