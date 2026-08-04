@@ -17,3 +17,7 @@
 @interface ObackBlackListController : ObackAppListController
 @end
 
+// 左缘排除列表：命中的 App 左缘交还系统原生返回（保留右缘+弹窗），用法同黑白名单。
+@interface ObackLeftExcludeListController : ObackAppListController
+@end
+

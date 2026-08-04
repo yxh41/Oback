@@ -131,6 +131,17 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     }
 }
 
+// 左缘排除列表：命中此列表的 App，左缘不再由 Oback 接管（交还系统原生 interactivePop），
+// 但右缘返回 + 弹窗 dismiss 仍由 Oback 提供。≠ 全局黑名单（黑名单是整 App 不注入）。
++ (BOOL)isLeftEdgeExcluded {
+    NSDictionary *d = [self _mergedPrefs];
+    NSArray *list = [d objectForKey:@"leftEdgeExcludeApps"];
+    if (![list isKindOfClass:[NSArray class]] || list.count == 0) return NO;
+    NSString *bid = NSBundle.mainBundle.bundleIdentifier;
+    if (!bid) return NO;
+    return [self _bid:bid matchesList:list];
+}
+
 // 调试日志总开关：设置面板「调试日志」(key=debugLog)。
 // 默认关（日用机省电省盘）；开启后常驻开，需用户在设置面板手动关闭（已移除「30 分钟自动过期写回」，避免开着开着突然没日志的困惑）。
 // 内存缓存 5s，避免每次同步 NSUserDefaults IO（OBLog 调用频率不低，即便关闭仍走此检查）。

@@ -156,6 +156,7 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 
 - (NSString *)_storeKey {
     if ([self.mode isEqualToString:@"white"])    return @"whitelistApps";
+    if ([self.mode isEqualToString:@"leftedge"]) return @"leftEdgeExcludeApps";
     return @"blacklistApps";
 }
 
@@ -523,6 +524,15 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 - (id)init {
     if (self = [super init]) {
         self.mode = @"black";
+    }
+    return self;
+}
+@end
+
+@implementation ObackLeftExcludeListController
+- (id)init {
+    if (self = [super init]) {
+        self.mode = @"leftedge";
     }
     return self;
 }

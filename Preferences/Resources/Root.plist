@@ -350,6 +350,16 @@
 		</dict>
 		<dict>
 			<key>cell</key>
+			<string>PSLinkCell</string>
+			<key>detail</key>
+			<string>ObackLeftExcludeListController</string>
+			<key>footnote</key>
+			<string>把左缘体验不好的 App 加进来：命中后该 App 的左缘交还系统原生返回（不再由 Oback 接管、不再禁用其 interactivePop），右缘返回与弹窗 dismiss 仍由 Oback 提供。≠ 黑名单（黑名单是整 App 不注入）。适合「左缘会闪退」或「左缘返回动画与 App 自身手势冲突」的 App。</string>
+			<key>label</key>
+			<string>选左缘排除程序</string>
+		</dict>
+		<dict>
+			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
 			<string>开启后把每次手势判定写入 /var/mobile/oback_debug.log（可用 Filza 抓取发我分析）。日用机建议关闭，避免日志频繁写盘。另：「立即打印诊断」按钮可向各 App 广播一次诊断（无需重启、无需 Mac）：各 App 把结果写入 /var/mobile/oback_diag.log 并在手机上直接弹文本框展示，用于核对当前 App 真实 bid / 名单命中 / 视差状态；也可随时用 Filza 看该文件。</string>

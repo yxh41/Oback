@@ -172,7 +172,9 @@ static BOOL oback_shouldBackOff(void) {
     // gestureRecognizer:shouldRequireFailureOfGestureRecognizer: 单向处理（OUR delegate 决策，
     // 对手无法否决，且避免与系统手势互锁导致两边都不 begin）。微信等事后重开 enabled 时，
     // 我们的边缘 pan 会让步给它（单层原生返回），绝不会双触发。
-    self.interactivePopGestureRecognizer.enabled = NO;
+    if (![ObackPreferences isLeftEdgeExcluded]) {
+        self.interactivePopGestureRecognizer.enabled = NO;
+    }
     %orig(fd);
 }
 
@@ -186,7 +188,9 @@ static BOOL oback_shouldBackOff(void) {
     // 无论在哪一处调用 super 都能挂上边缘 pan（幂等，重复挂无效）；绕过自定义容器枚举遗漏。
     if (![ObackPreferences isAllowed]) return;
     [[ObackManager shared] _attachNavPanToNav:self win:self.view.window];
+    if (![ObackPreferences isLeftEdgeExcluded]) {
     self.interactivePopGestureRecognizer.enabled = NO;
+    }
     OBLog(@"swizzle nav viewDidLoad: nav=%@ 已挂 oback 边缘 pan", NSStringFromClass([self class]));
 }
 
@@ -197,7 +201,9 @@ static BOOL oback_shouldBackOff(void) {
     // （朋友圈所在 nav 不在 win.rootViewController 标准 childViewControllers 链上，旧枚举永远漏挂 → 无返回）。
     if (![ObackPreferences isAllowed]) return;
     [[ObackManager shared] _attachNavPanToNav:self win:self.view.window];
+    if (![ObackPreferences isLeftEdgeExcluded]) {
     self.interactivePopGestureRecognizer.enabled = NO;
+    }
     // 全窗口链接：每 nav 显示跑一次（非每次手势），让原生 interactivePop / 插件边缘手势 /
     // 已存在的 scrollView 失败于我们的 pan（成对依赖持久）。晚到的 scrollView 由 shouldBegin 精准补链覆盖。
     UIWindow *lnkWin = self.view.window;
@@ -215,7 +221,9 @@ static BOOL oback_shouldBackOff(void) {
     if (![ObackPreferences isAllowed]) return;
     if (self.view.window) {
         [[ObackManager shared] _attachNavPanToNav:self win:self.view.window];
+        if (![ObackPreferences isLeftEdgeExcluded]) {
         self.interactivePopGestureRecognizer.enabled = NO;
+        }
     }
 }
 

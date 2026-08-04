@@ -271,10 +271,11 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     id bl = d[@"blacklistApps"];
     NSUInteger blCount = [bl isKindOfClass:[NSArray class]] ? [bl count] : 0;
     id wlm = d[@"whitelistMode"];
-    NSString *line = [NSString stringWithFormat:@"[%@] %@ bid=%@ isAllowed=%d whitelistMode=%@ blacklistCount=%lu capsuleEffect=%ld state=%@",
+    NSString *line = [NSString stringWithFormat:@"[%@] %@ bid=%@ isAllowed=%d whitelistMode=%@ blacklistCount=%lu leftEdgeExcluded=%d capsuleEffect=%ld state=%@",
                       manual ? @"手动dump" : @"注入",
                       [NSDate date], bid, [ObackPreferences isAllowed], wlm,
-                      (unsigned long)blCount, (long)[ObackPreferences capsuleEffect],
+                      (unsigned long)blCount, (int)[ObackPreferences isLeftEdgeExcluded],
+                      (long)[ObackPreferences capsuleEffect],
                                             self.interacting ? @"交互中" : (_started ? @"已注入" : @"未注入")];
     NSLog(@"[Oback-diag] %@", line);   // 给有 Mac 的人：log stream | grep Oback-diag
     // 同时写手机本地文件：无 Mac 用户可用 Filza 直接看 /var/mobile/oback_diag.log，
@@ -546,6 +547,10 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
             OBLog(@"linkNav: 跳过排除 nav（朋友圈等），保留原生 interactivePop");
             return;
         }
+        if ([ObackPreferences isLeftEdgeExcluded]) {
+            OBLog(@"linkNav: 左缘排除列表命中，保留系统原生 interactivePop (bid=%@)", NSBundle.mainBundle.bundleIdentifier);
+            return;
+        }
         nav.interactivePopGestureRecognizer.enabled = NO;
         linked++;
     }];
@@ -733,6 +738,11 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
               top ? NSStringFromClass([top class]) : @"nil",
               (int)(top.presentingViewController != nil),
               (unsigned long)(nav ? nav.viewControllers.count : 0));
+    }
+    // 左缘排除列表：命中的 App 左缘交还系统原生返回（不接管、不关 interactivePop），右缘/弹窗不受影响。
+    if (edge == ObackEdgeLeft && [kind isEqualToString:@"nav"] && [ObackPreferences isLeftEdgeExcluded]) {
+        OBLog(@"shouldBegin=NO (左缘排除列表命中，交还系统: bid=%@)", NSBundle.mainBundle.bundleIdentifier);
+        return NO;
     }
     if (!nav) {
         top = [self topMost:win.rootViewController];
