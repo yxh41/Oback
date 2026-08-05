@@ -1117,7 +1117,7 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
                 // 横向占优(>1.3x)且方向正确：确认接管
                 if ((rightSide ? vx < 0 : vx > 0) && (vx * vx) > (v.y * v.y) * 1.69) {
                     _globalDriven = YES;
-                    OBLog(@"handleGlobalPan -> _globalDriven=YES（接管转场）；useOBAnimator=%d", useOBAnimator);
+                    OBLog(@"handleGlobalPan -> _globalDriven=YES（接管转场）；useOBAnimator=%d", [self _navPopShouldUseObackAnimator:nav]);
                     // 全局返回：横向意图确认、接管转场这一刻给轻量触感反馈（与边缘手势 shouldBegin 一致）；
                     // 之前该路径完全没接 haptic，故「全局返回无触感」是 missing 而非失效。
                     ObackParams *p = [ObackPreferences params];
