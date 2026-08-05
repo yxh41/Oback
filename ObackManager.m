@@ -743,14 +743,22 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
         @try { [g requireGestureRecognizerToFail:globalPan]; } @catch (NSException *e) {}
     }];
     if ([ObackPreferences doubleReturnDiagEnabled]) {
+        NSMutableArray *all = [NSMutableArray array];
         NSMutableArray *opp = [NSMutableArray array];
         [self _enumeratePansInView:win depth:0 block:^(UIPanGestureRecognizer *g){
-            if (g.delegate == self) return;
-            if (scrollPanCls && [g isKindOfClass:scrollPanCls]) return;
+            BOOL isSelf = (g.delegate == self);
+            BOOL isScroll = (scrollPanCls && [g isKindOfClass:scrollPanCls]);
+            [all addObject:[NSString stringWithFormat:@"%@@%@%@%@",
+                            NSStringFromClass([g class]), NSStringFromClass([g.view class]),
+                            isSelf ? @"[Oback]" : @"", isScroll ? @"★scroll" : @""]];
+            if (isSelf) return;                 // 跳过 Oback 自己的 pan
+            if (isScroll) return;               // 当前实现跳过 scroll pan（可能正是 QQ 全屏返回对手，故在 all 里单独列出供核对）
             [opp addObject:[NSString stringWithFormat:@"%@@%@",
                             NSStringFromClass([g class]), NSStringFromClass([g.view class])]];
         }];
-        OBLog(@"diag[全屏链接] panG 命中；对手 pan 共 %lu → %@",
+        OBLog(@"diag[全屏链接] panG=%@ 命中；全窗口 pan 共 %lu → %@",
+              NSStringFromClass([globalPan.view class]), (unsigned long)all.count, all);
+        OBLog(@"diag[全屏链接] 其中「非 Oback 非 scroll」对手 pan 共 %lu → %@",
               (unsigned long)opp.count, opp);
     }
 }
@@ -1071,6 +1079,8 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
         if ([self _navPopShouldUseObackAnimator:nil]) {
             [self _obLinkFullScreenOpponentPansIfStale:win];   // QQ/TIM 懒补链全屏对手手势压制（治晚到全屏手势）
         }
+        OBLog(@"globalShouldBegin=YES (loc.x=%.1f 有nav pop=%lu, QQ/TIM=%d)", loc.x,
+              (unsigned long)nav.viewControllers.count, [self _navPopShouldUseObackAnimator:nil]);
         return YES;
     }
     return NO;  // 无 nav pop：不接管，交还（modal dismiss 由 Oback 右缘提供）
@@ -1085,6 +1095,8 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
             _globalStart = [pan locationInView:[self _windowForPan:pan]];
             _globalDriven = NO;
             self.interacting = YES;   // 占住，防其他 pan 同时在 shouldBegin 被放行
+            OBLog(@"handleGlobalPan Began (panView=%@, QQ/TIM=%d)", NSStringFromClass([[pan view] class]),
+                  [self _navPopShouldUseObackAnimator:nil]);
             break;                     // 不立即驱动 nav pop、不显示胶囊（方向未定）
         }
         case UIGestureRecognizerStateChanged: {
@@ -1105,6 +1117,7 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
                 // 横向占优(>1.3x)且方向正确：确认接管
                 if ((rightSide ? vx < 0 : vx > 0) && (vx * vx) > (v.y * v.y) * 1.69) {
                     _globalDriven = YES;
+                    OBLog(@"handleGlobalPan -> _globalDriven=YES（接管转场）；useOBAnimator=%d", useOBAnimator);
                     // 全局返回：横向意图确认、接管转场这一刻给轻量触感反馈（与边缘手势 shouldBegin 一致）；
                     // 之前该路径完全没接 haptic，故「全局返回无触感」是 missing 而非失效。
                     ObackParams *p = [ObackPreferences params];
