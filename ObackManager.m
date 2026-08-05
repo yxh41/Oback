@@ -608,6 +608,11 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     // 不引入感知延迟；仅在右缘才短暂等待 Oback 判定，符合"边缘=Oback/中间=QQ"。
     // 右缘对手 pan 链接抽取到 _obLinkRightEdgeOpponentPansInWindow:（同款逻辑，现已供懒补链复用）
     [self _obLinkRightEdgeOpponentPansInWindow:win];
+    // [2026-08-05 QQ/TIM 左缘根治] 左缘对手 pan 链接（仅 QQ/TIM：NTPushPopLib 左缘自定义手势非系统
+    // interactivePop、禁不掉），压住其左缘手势使 Oback 独占、与右缘表现一致；其他 App 不调用、路径零改动。
+    if ([self _navPopShouldUseObackAnimator:nil]) {
+        [self _obLinkLeftEdgeOpponentPansInWindow:win];
+    }
     CFTimeInterval dt = (CACurrentMediaTime() - t0) * 1000.0;
     OBLog(@"linkNav: 链接 %lu 个返回手势 (耗时 %.2f ms) @window=%@",
           (unsigned long)linked, dt, NSStringFromClass([win class]));
@@ -675,6 +680,56 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     if (now - __lastRightLinkTS < 2.0) return;
     __lastRightLinkTS = now;
     [self _obLinkRightEdgeOpponentPansInWindow:win];
+}
+
+// [2026-08-05 QQ/TIM 左缘根治] 左缘「对手手势 requireToFail 我们的左缘 pan」链接，
+// 镜像右缘 _obLinkRightEdgeOpponentPansInWindow:，专治 QQ/TIM 自研转场库 NTPushPopLib
+// 的左缘自定义手势——它不与系统 interactivePopGestureRecognizer 共用，禁用后者也压不住它，
+// 故左缘起滑时我们的 pan 与 QQ 左缘手势同时开火、抢走转场 → 表现为「瞬闪/不跟手」
+// （右缘因已有对等压制故已跟手，左缘此前缺此环）。让窗口内所有非 Oback 的 pan 失败于
+// 我们的左缘 pan：Oback 独占左缘返回；边缘外（中间）左缘 pan 不 begin → 对手 pan 正常触发（QQ 原手势保留）。
+- (void)_obLinkLeftEdgeOpponentPansInWindow:(UIWindow *)win {
+    NSMutableArray *leftPans = [NSMutableArray array];
+    NSArray *pans = objc_getAssociatedObject(win, kPanKey);
+    if ([pans isKindOfClass:[NSArray class]]) {
+        for (ObackPanGestureRecognizer *op in pans) {
+            if (op.edges & UIRectEdgeLeft) [leftPans addObject:op];
+        }
+    }
+    [self _enumerateEdgeGesturesInView:win depth:0 block:^(UIScreenEdgePanGestureRecognizer *g){
+        if (g.delegate == self && (g.edges & UIRectEdgeLeft)) [leftPans addObject:g];
+    }];
+    if (leftPans.count == 0) return;
+    // 让窗口内所有「对手 pan」（QQ 等 App 自定义的左缘手势，通常是 plain UIPanGestureRecognizer，
+    // 少数是屏幕边缘 pan）失败于我们的左缘 pan：Oback 独占左缘返回，对手在左缘让步（单向，无死锁）；
+    // 边缘外（中间）我们的左缘 pan 不 begin → 对手 pan 正常触发（QQ 原手势保留）。
+    [self _enumeratePansInView:win depth:0 block:^(UIPanGestureRecognizer *g){
+        if (g.delegate == self) return;            // 跳过我们自己的 pan（避免自引用）
+        for (ObackPanGestureRecognizer *lp in leftPans) {
+            @try { [g requireGestureRecognizerToFail:lp]; } @catch (NSException *e) {}
+        }
+    }];
+    if ([ObackPreferences doubleReturnDiagEnabled]) {
+        NSMutableArray *opp = [NSMutableArray array];
+        [self _enumeratePansInView:win depth:0 block:^(UIPanGestureRecognizer *g){
+            if (g.delegate == self) return;
+            [opp addObject:[NSString stringWithFormat:@"%@@%@",
+                            NSStringFromClass([g class]), NSStringFromClass([g.view class])]];
+        }];
+        OBLog(@"diag[左缘链接(懒)] 左缘 pan=%lu 个；对手 pan 共 %lu → %@",
+              (unsigned long)leftPans.count, (unsigned long)opp.count, opp);
+    }
+}
+
+// 左缘懒补链：仅当近期未做过左缘链接（2s 节流）时才扫描对手 pan。
+// 链接是「持久依赖」：一旦 requireToFail 建立便一直生效，故此处只为「发现晚到的新手势」，
+// 不必每次滑动都全树遍历。左缘 begin 频率极低，全局 2s 节流足够且不会跨 App 互相饿死。
+- (void)_obLinkLeftEdgeOpponentPansIfStale:(UIWindow *)win {
+    static NSTimeInterval __lastLeftLinkTS = 0;
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (now - __lastLeftLinkTS < 2.0) return;
+    __lastLeftLinkTS = now;
+    [self _obLinkLeftEdgeOpponentPansInWindow:win];
 }
 
 // 双返回诊断：列出本 window 视图树里所有「边缘返回手势」的精确类名 + 所属视图类。
@@ -894,9 +949,14 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     // [2026-07-27 QQ 右缘根治] 右缘懒补链：复刻 scrollView 即时补链同款思路，专治「晚到右缘手势」。
     // QQ 聊天的右缘手势常是进会话后才懒加载挂上，链接函数(_linkNavPopGesturesInWindow)跑时它尚未出现、
     // 从未被 requireToFail → 我们的右缘 begin 后 QQ 手势也 begin 抢赢。此处右缘 begin 时就地补一次
-    // 对手 pan 链接（2s 节流，仅抓晚到的新手势），确保右缘 Oback 独占、中间仍归 QQ。左缘不受影响。
+    // 对手 pan 链接（2s 节流，仅抓晚到的新手势），确保右缘 Oback 独占、中间仍归 QQ。
+    // [2026-08-05 QQ/TIM 左缘根治] 左缘同等处理：仅 QQ/TIM（navPopUseObackAnimator=YES）在左缘 begin 时
+    // 补链，压住 NTPushPopLib 左缘自定义手势，使左缘 Oback 独占、与右缘表现一致；其他 App 左缘不补链、
+    // 路径零改动。
     if (edge == ObackEdgeRight) {
         [self _obLinkRightEdgeOpponentPansIfStale:win];
+    } else if (edge == ObackEdgeLeft && self.navPopUseObackAnimator) {
+        [self _obLinkLeftEdgeOpponentPansIfStale:win];
     }
     // 关键修复：胶囊在 shouldBegin=YES 时即显示，而非等 Began。左边缘会被系统原生
     // interactivePopGestureRecognizer（UIScreenEdgePanGestureRecognizer）抢走，导致我们的手势
