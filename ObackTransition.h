@@ -46,6 +46,7 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 @interface ObackAnimator : NSObject <UIViewControllerAnimatedTransitioning>
 @property (nonatomic, assign) ObackEdge edge;
 @property (nonatomic, retain) ObackParams *params;
+@property (nonatomic, assign) BOOL navPop;          // nav pop 模式：纯平移+阴影渐隐（上一页 Identity），区别于弹窗 dismiss 的缩放飞出
 // 速度感知弹簧核心：中断式动画器由 interruptibleAnimatorForTransition: 构建并缓存
 @property (nonatomic, retain) UIViewPropertyAnimator *propertyAnimator;
 // 转场上下文（animateTransition: 时记入，finish/cancel 动画器若未能自行收尾由兜底强制 completeTransition）

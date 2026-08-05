@@ -9,7 +9,8 @@ static void OBApplyParallax(CGFloat percent,
                             UIView *fromView,
                             UIView *toView,
                             ObackEdge edge,
-                            ObackParams *p) {
+                            ObackParams *p,
+                            BOOL navPop) {
     CGFloat w = fromView.window ? fromView.window.bounds.size.width
                                 : [UIScreen mainScreen].bounds.size.width;
     if (w <= 0) w = [UIScreen mainScreen].bounds.size.width;
@@ -18,7 +19,8 @@ static void OBApplyParallax(CGFloat percent,
     CGFloat dir = (edge == ObackEdgeLeft) ? 1.0 : -1.0;
 
     // 当前页/被 dismiss 的 sheet：始终按方向平移；方案B 下额外给一点点缩小增强"飞出"感
-    CGFloat fromScale = 1.0 - 0.08 * percent;
+    // navPop：不缩放（纯平移+阴影渐隐，上一页 Identity 天然可见）
+    CGFloat fromScale = navPop ? 1.0 : (1.0 - 0.08 * percent);
     fromView.transform = CGAffineTransformConcat(
         CGAffineTransformMakeTranslation(dir * percent * w, 0),
         CGAffineTransformMakeScale(fromScale, fromScale));
@@ -142,7 +144,7 @@ static void OBApplyParallax(CGFloat percent,
 
     [self applyShadowTo:fromView];
     // 阴影方案：上一页用真实 toView（Identity，无缩放），doScale=NO
-    OBApplyParallax(0, fromView, toView, self.edge, self.params);
+    OBApplyParallax(0, fromView, toView, self.edge, self.params, self.navPop);
 
     // 初速 0，damping 0.82 给出自然回弹手感
     UISpringTimingParameters *sp = [[UISpringTimingParameters alloc] initWithDampingRatio:0.82];
@@ -161,7 +163,7 @@ static void OBApplyParallax(CGFloat percent,
         CGFloat w = fromView.window ? fromView.window.bounds.size.width
                                     : [UIScreen mainScreen].bounds.size.width;
         CGFloat dir = (blockSelf.edge == ObackEdgeLeft) ? 1.0 : -1.0;
-        CGFloat fromScale = 0.92;   // 方案B sheet 飞出终态缩小
+        CGFloat fromScale = blockSelf.navPop ? 1.0 : 0.92;   // navPop 纯平移；方案B sheet 飞出终态缩小
         fromView.transform = CGAffineTransformConcat(
             CGAffineTransformMakeTranslation(dir * w, 0),
             CGAffineTransformMakeScale(fromScale, fromScale));
@@ -256,7 +258,7 @@ static void OBApplyParallax(CGFloat percent,
         // OBApplyParallax(1)=提交终态, OBApplyParallax(0)=取消回初始态
         UIView *tpView = toView;
         OBApplyParallax(commit ? 1.0 : 0.0, fromView, tpView,
-                        self.edge, self.params);
+                        self.edge, self.params, self.navPop);
         // 取消回弹时阴影随页面滑回一同淡出到 0；提交时 OBApplyParallax(1) 已将阴影置 0。
         if (!commit) fromView.layer.shadowOpacity = 0.0;
         // 自定义子视图淡出（阴影等）

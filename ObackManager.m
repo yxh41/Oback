@@ -824,6 +824,8 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
         // 原生边缘返回与我们的 pan 同时驱动同一 _UINavigationInteractiveTransition → 双返回。
         // 起滑瞬间(shouldBegin 确认有效 pop)再压死一次，确保本次只有我们的 pan 驱动转场。
         nav.interactivePopGestureRecognizer.enabled = NO;
+        BOOL useOBAnimator = [self _navPopShouldUseObackAnimator:nav];
+        self.navPopUseObackAnimator = useOBAnimator;
         if (edge == ObackEdgeRight) {
             self.currentParallaxToView = NO;
             self.rightSimplePop = YES;   // 右缘：非交互 pop（松手提交才 popViewControllerAnimated:，零空白/不破坏导航栏/不进自定义转场）
@@ -846,6 +848,12 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
             // 发 touchesCancelled → 卡片激活被取消；松手即于 endTransition/abortTransition 复位 NO。
             // 纯边缘点击不令 pan began(无位移) → cancelsTouchesInView 维持 NO → 朋友圈/列表点击照常(保留
             // cancelsTouchesInView=NO 已验证的“点得进”行为)。方案 A 标准 nav 不受影响(rightSimplePop=NO)。
+        }
+        // [QQ/TIM 自研转场 nav] 覆盖为 ObackAnimator 自定义交互 pop（跟手）：左右缘都走自定义，
+        // 不碰 rightSimplePop 也不走方案A（方案A 喂不进 NTPushPopLib 等自研转场 → 瞬返）。
+        if (useOBAnimator) {
+            self.currentParallaxToView = NO;
+            self.rightSimplePop = NO;
         }
     } else {
         if (top.presentingViewController != nil) {
@@ -998,8 +1006,10 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
                     }
                     if (nav) nav.interactivePopGestureRecognizer.enabled = NO;  // 接管前禁用系统 interactivePop 防双触发
                     BOOL stdNav = [self _navPopShouldDriveSystemNav:nav];  // 标准nav=YES(方案A) / 微信等=NO(rightSimplePop)
-                    self.currentParallaxToView = stdNav;
-                    self.rightSimplePop = !stdNav;
+                    BOOL useOBAnimator = [self _navPopShouldUseObackAnimator:nav];
+                    self.navPopUseObackAnimator = useOBAnimator;
+                    self.currentParallaxToView = (stdNav && !useOBAnimator);
+                    self.rightSimplePop = (!stdNav && !useOBAnimator);
                     self.currentEdge = rightSide ? ObackEdgeRight : ObackEdgeLeft;
                     [self beginTransition:pan];   // 驱动 nav pop + 显示胶囊（复用已验证转场链路）
                 } else {
@@ -1065,7 +1075,8 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     // 及其手势识别器发 touchesCancelled，手指滑过的小程序卡片等不会被误触激活（松手不再 touchUpInside/选中）。
     // 方案 A（rightSimplePop=NO）保持 NO——系统原生交互转场自行处理 touch 取消，无需我们干预。
     // 直接按 rightSimplePop 定值（而非仅置 YES），确保每轮 begin 都确定性重设，不依赖上一轮 end/abort 的复位。
-    pan.cancelsTouchesInView = self.rightSimplePop;
+    // QQ/TIM 自定义转场同样需吞掉底层触摸（拖动中暴露的上一页元素不被误触），故一并纳入。
+    pan.cancelsTouchesInView = (self.rightSimplePop || self.navPopUseObackAnimator);
     // 同时识别场景下取消对手(微信朋友圈内部 pan),确保 Oback 左缘 rightSimplePop 独占返回、杜绝双返回
     if (_simulOpponent) {
         [_simulOpponent setState:UIGestureRecognizerStateCancelled];
@@ -1120,12 +1131,18 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
         OBLog(@"pop nav delegateAfter=%@ isOback=%d",
               nav.delegate ? NSStringFromClass([nav.delegate class]) : @"(nil)",
               (int)[[nav.delegate class] isSubclassOfClass:NSClassFromString(@"ObackNavDelegate")]);
-        self.currentParallaxToView = YES;   // nav pop 视差（移动上一页）
-        if (self.currentEdge == ObackEdgeRight) {
+        if (self.navPopUseObackAnimator) {
+            // QQ/TIM：自定义交互 nav pop（ObackAnimator 阴影渐隐，上一页 Identity），跟手，规避自研转场不跟手
+            self.currentParallaxToView = NO;
+            self.rightSimplePop = NO;
+            OBLog(@"trigger: QQ/TIM nav pop 自定义 ObackAnimator，popViewControllerAnimated");
+            [nav popViewControllerAnimated:YES];
+        } else if (self.currentEdge == ObackEdgeRight) {
             // 右缘固定走自定义镜像转场：真正触发 pop，由 nav delegate(ObackNavDelegate) 返回
             // ObackAnimator（自定义转场）+ interactionController 返回 self.interactive 接管，
             // 后续 updateTransition 用 self.interactive updateWithPercent 做 scrub（不再喂
             // handleNavigationTransition:）。方向由 OBApplyParallax 的 edge 分支处理，正确无误。
+            self.currentParallaxToView = YES;   // 右缘自定义镜像转场走 updateTransition 自定义 scrub 分支(1340)
             OBLog(@"trigger: nav pop 右缘自定义镜像转场，popViewControllerAnimated");
             [nav popViewControllerAnimated:YES];
         } else if (self.interacting) {
@@ -1135,6 +1152,7 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
         } else {
             // 自定义 nav 视差(实验) 或 非交互兜底：真正触发 pop，由 nav delegate(ObackNavDelegate)
             // 返回 ObackAnimator（自定义转场）+ interactionController 返回 self.interactive 接管 scrub。
+            self.currentParallaxToView = YES;   // 兜底分支走 updateTransition 自定义 scrub 分支(1345)
             OBLog(@"trigger: nav pop 自定义视差/兜底，popViewControllerAnimated");
             [nav popViewControllerAnimated:YES];
         }
@@ -1520,6 +1538,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     self.currentAnimator = nil;   // assign 弱引用，显式清更安全
     _currentPercent = 0;
     _transitionTriggered = NO;
+    self.navPopUseObackAnimator = NO;   // 复位：避免残留导致下次手势误判自定义转场
 }
 
 // 兜底收尾定时器：当前 ObackAnimator 在 0.5s 内若仍未自行完成（completed=NO），
@@ -1625,6 +1644,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     _currentPercent = 0;
     _transitionTriggered = NO;
     self.rightSimplePop = NO;     // 复位：避免残留导致下次手势误判右缘非交互
+    self.navPopUseObackAnimator = NO;   // 复位：避免残留导致下次手势误判自定义转场
 }
 
 #pragma mark - 方案 A：驱动系统原生 nav pop
@@ -1732,6 +1752,21 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     // 标准 nav：必须有可用的系统交互转场 target
     id t = [self navPopSystemTargetForNav:nav];
     return (t != nil);
+}
+
+// 判定 nav pop 是否走 ObackAnimator 自定义交互转场（跟手）。
+// 与 _navPopShouldDriveSystemNav: 互补：后者决定「方案A 系统原生」还是「非交互 rightSimplePop」；
+// 本方法决定「额外走 Oback 自研转场」（仅对自研转场不跟手、但仍能正常 pop 的 App）。
+// 当前命中：QQ(com.tencent.mqq) / TIM(com.tencent.tim) —— 它们用 NTPushPopLib 等自研转场库整体接管
+// 交互返回，方案A 喂不进、运行时会瞬返；但 popViewControllerAnimated: 正常 → 改由 ObackAnimator
+// （阴影渐隐，上一页 Identity 天然可见）接管跟手。仅按 bundle id 圈死，其他 App 零变化。
+- (BOOL)_navPopShouldUseObackAnimator:(UINavigationController *)nav {
+    (void)nav;
+    NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
+    if (!bid) return NO;
+    if ([bid caseInsensitiveCompare:@"com.tencent.mqq"] == NSOrderedSame) return YES; // QQ
+    if ([bid caseInsensitiveCompare:@"com.tencent.tim"] == NSOrderedSame) return YES; // TIM（QQ 同门，自研转场同样不跟手）
+    return NO;
 }
 
 // 把 window pan 作为 sender 喂给系统私有 action handleNavigationTransition:。
