@@ -612,6 +612,7 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     // interactivePop、禁不掉），压住其左缘手势使 Oback 独占、与右缘表现一致；其他 App 不调用、路径零改动。
     if ([self _navPopShouldUseObackAnimator:nil]) {
         [self _obLinkLeftEdgeOpponentPansInWindow:win];
+        [self _obLinkFullScreenOpponentPansInWindow:win];   // [2026-08-05] 全屏返回对手压制（聊天任意位置全屏返回）
     }
     CFTimeInterval dt = (CACurrentMediaTime() - t0) * 1000.0;
     OBLog(@"linkNav: 链接 %lu 个返回手势 (耗时 %.2f ms) @window=%@",
@@ -716,9 +717,49 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
             [opp addObject:[NSString stringWithFormat:@"%@@%@",
                             NSStringFromClass([g class]), NSStringFromClass([g.view class])]];
         }];
-        OBLog(@"diag[左缘链接(懒)] 左缘 pan=%lu 个；对手 pan 共 %lu → %@",
-              (unsigned long)leftPans.count, (unsigned long)opp.count, opp);
+    OBLog(@"diag[左缘链接(懒)] 左缘 pan=%lu 个；对手 pan 共 %lu → %@",
+          (unsigned long)leftPans.count, (unsigned long)opp.count, opp);
     }
+}
+
+// [2026-08-05 QQ/TIM 全屏返回根治] 全屏「对手 pan」链接：QQ 聊天界面任意位置触发的全屏返回手势
+// （NTPushPopLib，plain UIPanGestureRecognizer，非系统 interactivePop）与 Oback 全屏 pan(panG) 抢转场→瞬返。
+// 让窗口内所有非 Oback、非 UIScrollView 滚动的 pan 失败于我们的 panG：Oback 独占全屏返回，QQ 全屏手势让步
+// （单向 requireToFail，无死锁）；纵向滑动时 panG 在 handleGlobalPan 判定非横向后自取消→QQ 可正常触发（但不返回）。
+// 仅 QQ/TIM：_linkNavPopGesturesInWindow（链接时机）与 _globalPanShouldBegin（懒补链）两处调用，其他 App 路径零改动。
+- (void)_obLinkFullScreenOpponentPansInWindow:(UIWindow *)win {
+    UIPanGestureRecognizer *globalPan = nil;
+    for (UIGestureRecognizer *g in win.gestureRecognizers) {
+        if (g.delegate == self && objc_getAssociatedObject(g, kGlobalPanKey)) {
+            if ([g isKindOfClass:[UIPanGestureRecognizer class]]) { globalPan = (UIPanGestureRecognizer *)g; break; }
+        }
+    }
+    if (!globalPan) return;
+    [self _enumeratePansInView:win depth:0 block:^(UIPanGestureRecognizer *g){
+        if (g.delegate == self) return;            // 跳过 Oback 自己的 pan（避免自引用）
+        if ([g isKindOfClass:[UIScrollViewPanGestureRecognizer class]]) return;  // 跳过滚动，防吞聊天列表
+        @try { [g requireGestureRecognizerToFail:globalPan]; } @catch (NSException *e) {}
+    }];
+    if ([ObackPreferences doubleReturnDiagEnabled]) {
+        NSMutableArray *opp = [NSMutableArray array];
+        [self _enumeratePansInView:win depth:0 block:^(UIPanGestureRecognizer *g){
+            if (g.delegate == self) return;
+            if ([g isKindOfClass:[UIScrollViewPanGestureRecognizer class]]) return;
+            [opp addObject:[NSString stringWithFormat:@"%@@%@",
+                            NSStringFromClass([g class]), NSStringFromClass([g.view class])]];
+        }];
+        OBLog(@"diag[全屏链接] panG 命中；对手 pan 共 %lu → %@",
+              (unsigned long)opp.count, opp);
+    }
+}
+
+// 全屏懒补链：仅当近期未做过全屏链接（2s 节流）时才扫描对手 pan（治 QQ 聊天「进会话后懒加载」的晚到全屏手势）。
+- (void)_obLinkFullScreenOpponentPansIfStale:(UIWindow *)win {
+    static NSTimeInterval __lastFullLinkTS = 0;
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (now - __lastFullLinkTS < 2.0) return;
+    __lastFullLinkTS = now;
+    [self _obLinkFullScreenOpponentPansInWindow:win];
 }
 
 // 左缘懒补链：仅当近期未做过左缘链接（2s 节流）时才扫描对手 pan。
@@ -999,10 +1040,18 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     // 热区按触发侧：左手侧(默认)=左侧约 1/3 起滑；右手侧=右侧约 1/4 起滑（薄热区，类似边缘手势插件）。
     // 对侧起滑一律交还系统/App 原生（全局返回 App 的 Oback 右缘已禁用）。
     BOOL rightSide = [ObackPreferences isGlobalBackRightSide];
-    if (rightSide) {
-        if (loc.x < w * 3.0 / 4.0) { OBLog(@"globalShouldBegin=NO (非右热区 x=%.1f w=%.1f)", loc.x, w); return NO; }
+    if ([self _navPopShouldUseObackAnimator:nil]) {
+        // [2026-08-05 QQ/TIM] QQ 聊天界面「任意位置」都能触发全屏返回手势，故 Oback 全屏 pan 在
+        // QQ/TIM 内取消热区限制，任意位置起滑都允许识别；是否真正接管由 handleGlobalPan 横向判定决定。
+        // 否则中间/右侧滑不在左热区→Oback 不 begin→QQ 原生全屏手势抢接管→瞬返。
+        OBLog(@"globalShouldBegin: QQ/TIM 全屏 pan 不限热区（任意位置允许）");
     } else {
-        if (loc.x > w / 3.0) { OBLog(@"globalShouldBegin=NO (非左热区 x=%.1f w=%.1f)", loc.x, w); return NO; }
+        // 仅 QQ/TIM 外保留窄热区（全局返回默认左 1/3 / 右 1/4 薄热区），避免误吞 App 内横向手势。
+        if (rightSide) {
+            if (loc.x < w * 3.0 / 4.0) { OBLog(@"globalShouldBegin=NO (非右热区 x=%.1f w=%.1f)", loc.x, w); return NO; }
+        } else {
+            if (loc.x > w / 3.0) { OBLog(@"globalShouldBegin=NO (非左热区 x=%.1f w=%.1f)", loc.x, w); return NO; }
+        }
     }
     UINavigationController *nav = objc_getAssociatedObject(pan, kObackNavKey);
     UIViewController *top = nil;
@@ -1017,6 +1066,9 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     if (nav && nav.viewControllers.count > 1) {
         // 有 nav pop 可接管：允许识别；系统 interactivePop 的禁用推迟到「确认横向意图」(handleGlobalPan)，
         // 避免纵向滑动被取消后仍禁用系统边缘返回。
+        if ([self _navPopShouldUseObackAnimator:nil]) {
+            [self _obLinkFullScreenOpponentPansIfStale:win];   // QQ/TIM 懒补链全屏对手手势压制（治晚到全屏手势）
+        }
         return YES;
     }
     return NO;  // 无 nav pop：不接管，交还（modal dismiss 由 Oback 右缘提供）
