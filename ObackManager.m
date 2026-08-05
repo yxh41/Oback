@@ -735,16 +735,18 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
         }
     }
     if (!globalPan) return;
+    // UIScrollViewPanGestureRecognizer 是 UIKit 私有类，公共 SDK 头未声明 → 用 NSClassFromString 运行时取，避免编译失败
+    Class scrollPanCls = NSClassFromString(@"UIScrollViewPanGestureRecognizer");
     [self _enumeratePansInView:win depth:0 block:^(UIPanGestureRecognizer *g){
         if (g.delegate == self) return;            // 跳过 Oback 自己的 pan（避免自引用）
-        if ([g isKindOfClass:[UIScrollViewPanGestureRecognizer class]]) return;  // 跳过滚动，防吞聊天列表
+        if (scrollPanCls && [g isKindOfClass:scrollPanCls]) return;  // 跳过滚动，防吞聊天列表（私有类，运行时取）
         @try { [g requireGestureRecognizerToFail:globalPan]; } @catch (NSException *e) {}
     }];
     if ([ObackPreferences doubleReturnDiagEnabled]) {
         NSMutableArray *opp = [NSMutableArray array];
         [self _enumeratePansInView:win depth:0 block:^(UIPanGestureRecognizer *g){
             if (g.delegate == self) return;
-            if ([g isKindOfClass:[UIScrollViewPanGestureRecognizer class]]) return;
+            if (scrollPanCls && [g isKindOfClass:scrollPanCls]) return;
             [opp addObject:[NSString stringWithFormat:@"%@@%@",
                             NSStringFromClass([g class]), NSStringFromClass([g.view class])]];
         }];
