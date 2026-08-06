@@ -1151,6 +1151,12 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
         OBLog(@"globalShouldBegin=NO (横向可滚 scrollView, 交还图片查看器/横向分页横滑)");
         return NO;
     }
+    // [2026-08-06 修复 QQ 侧边栏/抽屉关不掉] QQ 抽屉浮层打开时，用户横滑关抽屉被全屏 pan 抢走
+    // （其关闭手势被 requireToFail panG 压制），只能点按钮关。检测抽屉浮层→交还 QQ 原生关闭手势。
+    if ([self _qqDrawerOpenInWindow:win]) {
+        OBLog(@"globalShouldBegin=NO (QQ 侧边栏抽屉打开, 交还关闭手势)");
+        return NO;
+    }
     if (nav && nav.viewControllers.count > 1) {
         // 有 nav pop 可接管：允许识别；系统 interactivePop 的禁用推迟到「确认横向意图」(handleGlobalPan)，
         // 避免纵向滑动被取消后仍禁用系统边缘返回。
@@ -2176,6 +2182,28 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     if (!sv.scrollEnabled) return NO;
     // 内容宽明显大于可视宽 → 横向可滚（图片查看器 paging：contentSize.width = count * width）
     return (sv.contentSize.width > sv.bounds.size.width * 1.2);
+}
+
+// 检测 QQ 左侧抽屉/侧边栏是否处于打开（浮层遮罩 + 左滑半屏面板）。打开时全屏 pan 不接管返回，
+// 让抽屉自身关闭手势生效（否则用户横滑关抽屉被我们的返回抢走，只能点按钮关）。
+- (BOOL)_qqDrawerOpenInWindow:(UIWindow *)win {
+    if (!win) return NO;
+    CGFloat w = win.bounds.size.width, h = win.bounds.size.height;
+    if (w <= 0 || h <= 0) return NO;
+    return [self _scanDrawerMask:win width:w height:h];
+}
+- (BOOL)_scanDrawerMask:(UIView *)v width:(CGFloat)w height:(CGFloat)h {
+    for (UIView *sub in v.subviews) {
+        CGRect f = sub.frame;
+        // 全屏半透明遮罩（抽屉关闭层）：捕获点击/滑动关闭，alpha<1 且覆盖全屏
+        if (sub.userInteractionEnabled && sub.alpha < 0.98 &&
+            f.size.width >= w * 0.95 && f.size.height >= h * 0.95) return YES;
+        // 左滑半屏面板：贴左、宽度明显小于屏宽（QQ 抽屉菜单约 0.7 屏宽）
+        if (sub.userInteractionEnabled && f.origin.x <= 2 &&
+            f.size.width < w * 0.9 && f.size.width > 0) return YES;
+        if ([self _scanDrawerMask:sub width:w height:h]) return YES;
+    }
+    return NO;
 }
 
 @end
