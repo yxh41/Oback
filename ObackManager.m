@@ -819,22 +819,26 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
                 @try { [globalPan requireGestureRecognizerToFail:g]; } @catch (NSException *e) {}
                 return;
             }
-            // scrollView 按「能否横向滚动」分流：
-            //  · 可横向滚动（图片查看器/横向分页）：panG 让步于 scroll（横滑翻图交还 App，不误判为返回）；
-            //  · 仅纵向滚动（聊天列表等）：scroll 让步于 panG，横滑由 panG 驱动返回，
-            //    纵向滑动由 panG 在 handleGlobalPan 判定非横向后自取消→scroll 接管（不返回）。
+            // [2026-08-06 修复③ 纵滚死 + 快滑瞬闪] 不再用 requireToFail 让 scroll 与全屏 pan 二选一：
+            // 二选一会让纵滑时 scroll 被压制（panG 抢首发 touch，判纵向取消后 scroll 也救不回 → 聊天不能上下滑）；
+            // 且横滑聊天需「多帧确认横向占优」才接管，快滑在确认前松手 → QQ 原生 NTPushPopLib 抢 pop → 瞬闪。
+            // 改为：scroll 与全屏 pan 同时识别（gestureRecognizer:shouldRecognizeSimultaneouslyWithGestureRecognizer:
+            // 对「全屏 pan + scrollPan」返回 YES），由 handleGlobalPan 的方向判定决定接管/交还——
+            //  · 纵滑：panG 与 scroll 同时 begin，panG 判纵向取消、scroll 继续滚（不返回，不卡死）；
+            //  · 横滑聊天：panG 判横向占优即接管返回，set cancelsTouchesInView=YES 吞 scroll 后续。
+            // 图片查看器横滑由 _globalPanShouldBegin 的 _scrollViewIsHorizontallyScrollableAtPoint 提前 return NO 拦截，
+            // 全屏 pan 根本不 begin，故不会与图片查看器 scroll 同时识别（无瞬触返回）。
             BOOL isScroll = (scrollPanCls && [g isKindOfClass:scrollPanCls]);
-            @try {
-                if (isScroll) {
-                    UIScrollView *sv = (UIScrollView *)g.view;
-                    BOOL horiz = (sv && (sv.pagingEnabled ||
-                                         sv.contentSize.width > sv.bounds.size.width + 1.0));
-                    if (horiz) [globalPan requireGestureRecognizerToFail:g];    // 图片查看器：panG 让步
-                    else        [g requireGestureRecognizerToFail:globalPan];   // 聊天列表：scroll 让步，panG 驱动返回
-                } else {
-                    [g requireGestureRecognizerToFail:globalPan];               // 其余 QQ 全屏返回手势失败于 panG
-                }
-            } @catch (NSException *e) {}
+            if (isScroll) {
+                // [2026-08-06 修复③ 纵滚死+快滑瞬闪·仅 QQ/TIM] QQ/TIM 全屏：scroll 与 panG 同时识别（见
+                // gestureRecognizer:shouldRecognizeSimultaneouslyWithGestureRecognizer: 对「全屏 pan + scrollPan」返回 YES），
+                // 由 handleGlobalPan 方向判定接管/交还，取代 requireToFail 二选一（二选一会让纵滑时 scroll 被压制 →
+                // 聊天不能上下滑）。其他 App 保持原 scroll 让步 panG（[g requireToFail:globalPan]，已验证无回归）。
+                if ([self _navPopShouldUseObackAnimator:nil]) return;   // QQ/TIM：交给 simultaneous 协调
+                [g requireGestureRecognizerToFail:globalPan];           // 其他 App：scroll 让步 panG
+                return;
+            }
+            @try { [g requireGestureRecognizerToFail:globalPan]; } @catch (NSException *e) {}  // 其余 QQ 全屏返回手势失败于 panG
         }];
     }
     if ([ObackPreferences doubleReturnDiagEnabled]) {
@@ -1370,15 +1374,23 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
             BOOL movingBack  = rightSide ? (dx < backThresh) : (dx > backThresh);
             BOOL movingAway  = rightSide ? (dx > 6.0)      : (dx < -6.0);
             if (movingBack) {
-                CGFloat vx = v.x;
-                // 横向占优且方向正确：确认接管。QQ/TIM 全屏阈值放宽到 1.5x（容忍纵向抖动），
-                // 避免斜向返回被误判纵向而取消→恢复 QQ 原生 pan→瞬返。
-                CGFloat horizDomThresh = qqMode ? 2.25 : 1.69;
-                if ((rightSide ? vx < 0 : vx > 0) && (vx * vx) > (v.y * v.y) * horizDomThresh) {
+                if (qqMode) {
+                    // [2026-08-06 修复快滑瞬闪·仅 QQ/TIM] 一旦向返回方向移动(dx 超阈值)即接管，不等 velocity 横向占优——
+                    // QQ 原生 NTPushPopLib 会抢 pop，快滑在确认占优前就松手/结束 → Oback 未接管 → QQ 原生抢 pop → 瞬闪。
+                    // 纵滑因 dx 小不进此分支，由下方明显纵向 cancel 交还（scroll 经 simultaneous 继续滚，不卡死）。
                     _globalDriven = YES;
+                } else {
+                    // 其他 App：保持原 velocity 横向占优判定（1.69x），零回归
+                    CGFloat vx = v.x;
+                    if ((rightSide ? vx < 0 : vx > 0) && (vx * vx) > (v.y * v.y) * 1.69) {
+                        _globalDriven = YES;
+                    } else if (fabs(dy) > fabs(dx) * 1.5 && fabs(dy) > 12.0) {
+                        [self _cancelGlobalPan:pan];
+                    }
+                }
+                if (_globalDriven) {
                     OBLog(@"handleGlobalPan -> _globalDriven=YES（接管转场）；useOBAnimator=%d", [self _navPopShouldUseObackAnimator:nil]);
-                    // 全局返回：横向意图确认、接管转场这一刻给轻量触感反馈（与边缘手势 shouldBegin 一致）；
-                    // 之前该路径完全没接 haptic，故「全局返回无触感」是 missing 而非失效。
+                    // 全局返回：横向意图确认、接管转场这一刻给轻量触感反馈（与边缘手势 shouldBegin 一致）
                     ObackParams *p = [ObackPreferences params];
                     if (p.hapticEnabled) {
                         UIImpactFeedbackGenerator *g = [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] autorelease];
@@ -1398,14 +1410,10 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
                     self.rightSimplePop = (!stdNav && !useOBAnimator);
                     self.currentEdge = rightSide ? ObackEdgeRight : ObackEdgeLeft;
                     [self beginTransition:pan];   // 驱动 nav pop + 显示胶囊（复用已验证转场链路）
-                } else {
-                    // 未达横向占优：QQ/TIM 全屏不立即取消（防纵向抖动误杀返回手势、进而恢复 QQ 原生 pan→瞬返）；
-                    // 仅当纵向明显占优(>12px 且 >1.5x 横向)才交还。非 QQ/TIM 保持原即时取消。
-                    if (!qqMode || (fabs(dy) > fabs(dx) * 1.5 && fabs(dy) > 12.0)) {
-                        [self _cancelGlobalPan:pan];
-                    }
                 }
             } else if (movingAway || !qqMode || (fabs(dy) > fabs(dx) * 1.5 && fabs(dy) > 12.0)) {
+                // 未向返回方向移动，或明显纵向为主(>12px 且 >1.5x 横向)：交还。QQ/TIM 全屏纵滚时 scroll 由
+                // simultaneous 同时识别继续滚动（不返回，不卡死）；其他 App 即时交还。
                 [self _cancelGlobalPan:pan];
             }
             break;
@@ -1631,6 +1639,21 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)g
 shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
     if (g == other || other == nil) return NO;
+    // [2026-08-06 修复纵滚死] 全局返回全屏 pan（挂 UIWindow 的普通 UIPanGestureRecognizer，delegate=self）
+    // 与 UIScrollView 的 pan 同时识别：取代 requireToFail 二选一（二选一会让纵滑时 scroll 被压制 →
+    // 聊天不能上下滑）。方向接管/交还由 handleGlobalPan 判定。仅对 scrollPan 返回 YES；QQ 原生 pan /
+    // 引用手势（非 scroll）不受影响（它们走 requireToFail）。
+    Class scrollPanClsSim = NSClassFromString(@"UIScrollViewPanGestureRecognizer");
+    BOOL gIsGlobal = (g.delegate == self && [g.view isKindOfClass:[UIWindow class]] && ![g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]);
+    BOOL oIsGlobal = (other.delegate == self && [other.view isKindOfClass:[UIWindow class]] && ![other isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]);
+    if (gIsGlobal || oIsGlobal) {
+        // 仅 QQ/TIM 全屏返回启用 simultaneous（其他 App 保持原 scroll 让步逻辑，零回归）
+        if ([self _navPopShouldUseObackAnimator:nil]) {
+            UIGestureRecognizer *global = gIsGlobal ? g : other;
+            UIGestureRecognizer *theOther = (global == g) ? other : g;
+            if (theOther.delegate != self && scrollPanClsSim && [theOther isKindOfClass:scrollPanClsSim]) return YES;
+        }
+    }
     if (other.delegate == self) return NO;   // 自身另一个 pan(左/右/modal): 不与之同时识别, 更不记录为对手(否则 beginTransition 会误取消自身 → 右缘被取消 abort)
     if ([other isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return NO; // 同边屏幕边缘手势(微信自带左边缘返回)交 shouldBeRequiredToFailBy 压制, 不在此同时识别(否则双 Began → 双返回)
     if (![g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return NO;
