@@ -876,6 +876,16 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
             OBLog(@"[QQ 原生 pop 压制] 禁用 %@ (view=%@)", cls, NSStringFromClass([g.view class]));
         }];
     }
+    // [2026-08-06 根治 QQ 原生 pop 漏禁] 同时禁用系统 interactivePopGestureRecognizer
+    // （_UIParallaxTransitionPanGestureRecognizer@UILayoutContainerView）。它挂在 nav.view 自身（非 descendant），
+    // 上方 onNav 判定 isDescendantOfView 对其返回 NO → 漏禁；QQ/TIM 用它做原生边缘返回（瞬返动画），
+    // Oback 接管时应一并禁用，由 Oback 独占驱动 pop，杜绝瞬返。
+    UIGestureRecognizer *sysPop = nav.interactivePopGestureRecognizer;
+    if (sysPop && [sysPop isKindOfClass:[UIPanGestureRecognizer class]] && sysPop.enabled) {
+        sysPop.enabled = NO;
+        [suppressed addObject:[NSValue valueWithNonretainedObject:sysPop]];
+        OBLog(@"[QQ 原生 pop 压制] 禁用 %@ (view=%@)", NSStringFromClass([sysPop class]), NSStringFromClass([sysPop.view class]));
+    }
     // 诊断：列出所有「非 Oback 非 scroll」pan 候选（类名+view），便于万一未命中时精准定位 QQ 原生 pan 真实身份
     if ([ObackPreferences doubleReturnDiagEnabled]) {
         NSMutableArray *cand = [NSMutableArray array];
@@ -1209,6 +1219,7 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
 
 - (BOOL)_globalPanShouldBegin:(UIPanGestureRecognizer *)pan {
     if (self.interacting) { OBLog(@"globalShouldBegin=NO (已在交互中)"); return NO; }
+    [self _restoreQQNativePop];   // 清扫上一轮可能残留的禁用（保险；正常路径已在 End/Cancel 恢复，空集合时无日志）
     if (![ObackPreferences isAllowed]) return NO;
     if (![ObackPreferences isGlobalBackEnabled]) return NO;
     UIWindow *win = [self _windowForPan:pan];
@@ -1314,6 +1325,7 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
             CGFloat dy = cur.y - _globalStart.y;
             CGPoint v = [pan velocityInView:win];
             BOOL rightSide = [ObackPreferences isGlobalBackRightSide];
+            BOOL qqMode = [self _navPopShouldUseObackAnimator:nil];   // QQ/TIM 全屏：放宽纵向抖动容忍，防误杀返回手势致瞬返
             // 左手侧(默认)：从左侧热区起滑、向右滑(dx>0)=返回；右手侧：从右侧薄热区起滑、向左滑(dx<0)=返回。
             // currentEdge 随之设左/右缘，转场 dir 自动镜像（见 updateTransition/endTransition 的 dir 取值）。
             CGFloat backThresh = rightSide ? -6.0 : 6.0;
@@ -1321,8 +1333,10 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
             BOOL movingAway  = rightSide ? (dx > 6.0)      : (dx < -6.0);
             if (movingBack) {
                 CGFloat vx = v.x;
-                // 横向占优(>1.3x)且方向正确：确认接管
-                if ((rightSide ? vx < 0 : vx > 0) && (vx * vx) > (v.y * v.y) * 1.69) {
+                // 横向占优且方向正确：确认接管。QQ/TIM 全屏阈值放宽到 1.5x（容忍纵向抖动），
+                // 避免斜向返回被误判纵向而取消→恢复 QQ 原生 pan→瞬返。
+                CGFloat horizDomThresh = qqMode ? 2.25 : 1.69;
+                if ((rightSide ? vx < 0 : vx > 0) && (vx * vx) > (v.y * v.y) * horizDomThresh) {
                     _globalDriven = YES;
                     OBLog(@"handleGlobalPan -> _globalDriven=YES（接管转场）；useOBAnimator=%d", [self _navPopShouldUseObackAnimator:nil]);
                     // 全局返回：横向意图确认、接管转场这一刻给轻量触感反馈（与边缘手势 shouldBegin 一致）；
@@ -1347,9 +1361,13 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
                     self.currentEdge = rightSide ? ObackEdgeRight : ObackEdgeLeft;
                     [self beginTransition:pan];   // 驱动 nav pop + 显示胶囊（复用已验证转场链路）
                 } else {
-                    [self _cancelGlobalPan:pan];
+                    // 未达横向占优：QQ/TIM 全屏不立即取消（防纵向抖动误杀返回手势、进而恢复 QQ 原生 pan→瞬返）；
+                    // 仅当纵向明显占优(>12px 且 >1.5x 横向)才交还。非 QQ/TIM 保持原即时取消。
+                    if (!qqMode || (fabs(dy) > fabs(dx) * 1.5 && fabs(dy) > 12.0)) {
+                        [self _cancelGlobalPan:pan];
+                    }
                 }
-            } else if (movingAway || dy > 6.0 || dy < -6.0) {
+            } else if (movingAway || !qqMode || (fabs(dy) > fabs(dx) * 1.5 && fabs(dy) > 12.0)) {
                 [self _cancelGlobalPan:pan];
             }
             break;
