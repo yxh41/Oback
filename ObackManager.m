@@ -18,7 +18,18 @@ static BOOL _obLogWasOn = NO;   // 跟踪上次开关状态，用于「关→开
 
 void OBLog(NSString *fmt, ...) {
     BOOL enabled = [ObackPreferences debugLogEnabled];
-    if (!enabled) { _obLogWasOn = NO; return; }   // 调试日志关闭 → 完全不写盘/不 NSLog（最省）
+    if (!enabled) {
+        // 开→关翻转：追加「关闭」分隔标记，明确日志边界，消除「关了还有日志」的困惑
+        // （那其实是旧文件累积；有边界标记就能一眼看出哪段是有效日志、哪段是历史）。仅打一次，不持续写。
+        if (_obLogWasOn) {
+            _obLogWasOn = NO;
+            NSString *sep = [NSString stringWithFormat:@"[%@] Oback: === 调试日志已关闭（以下为无效日志/历史）===\n", [NSDate date]];
+            NSString *sp = OBLogPath();
+            NSFileHandle *sfh = [NSFileHandle fileHandleForWritingAtPath:sp];
+            if (sfh) { [sfh seekToEndOfFile]; [sfh writeData:[sep dataUsingEncoding:NSUTF8StringEncoding]]; [sfh closeFile]; }
+        }
+        return;   // 调试日志关闭 → 完全不写正常日志（最省）
+    }
     // 开关从「关→开」翻转：追加一行分隔，明确标识「以下为开关生效后日志」，
     // 消除「这份日志到底是开关开还是关时写的」困惑（配合抓前删旧日志，分析更准）。
     if (!_obLogWasOn) {
