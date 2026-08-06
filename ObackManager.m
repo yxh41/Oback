@@ -827,7 +827,7 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
             @try {
                 if (isScroll) {
                     UIScrollView *sv = (UIScrollView *)g.view;
-                    BOOL horiz = (sv && (sv.pagingEnabled || sv.zoomEnabled ||
+                    BOOL horiz = (sv && (sv.pagingEnabled ||
                                          sv.contentSize.width > sv.bounds.size.width + 1.0));
                     if (horiz) [globalPan requireGestureRecognizerToFail:g];    // 图片查看器：panG 让步
                     else        [g requireGestureRecognizerToFail:globalPan];   // 聊天列表：scroll 让步，panG 驱动返回
