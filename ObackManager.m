@@ -1079,7 +1079,7 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
             if (loc.x > w / 3.0) { OBLog(@"globalShouldBegin=NO (非左热区 x=%.1f w=%.1f)", loc.x, w); return NO; }
         }
     }
-    UINavigationController *nav = objc_getAssociatedObject(pan, kObackNavKey);
+    __block UINavigationController *nav = objc_getAssociatedObject(pan, kObackNavKey);
     UIViewController *top = nil;
     if (nav) top = nav.topViewController;
     if (!top) {
