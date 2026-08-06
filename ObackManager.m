@@ -14,8 +14,21 @@ static NSString *OBLogPath(void) {
     return dir ? [dir stringByAppendingPathComponent:@"oback_debug.log"] : shared;
 }
 
+static BOOL _obLogWasOn = NO;   // 跟踪上次开关状态，用于「关→开」翻转时打分隔标记（明确日志起点边界）
+
 void OBLog(NSString *fmt, ...) {
-    if (![ObackPreferences debugLogEnabled]) return;   // 调试日志关闭 → 完全不写盘/不 NSLog（最省）
+    BOOL enabled = [ObackPreferences debugLogEnabled];
+    if (!enabled) { _obLogWasOn = NO; return; }   // 调试日志关闭 → 完全不写盘/不 NSLog（最省）
+    // 开关从「关→开」翻转：追加一行分隔，明确标识「以下为开关生效后日志」，
+    // 消除「这份日志到底是开关开还是关时写的」困惑（配合抓前删旧日志，分析更准）。
+    if (!_obLogWasOn) {
+        _obLogWasOn = YES;
+        NSString *sep = [NSString stringWithFormat:@"[%@] Oback: === 调试日志已开启（以下为开关生效后日志）===\n", [NSDate date]];
+        NSString *sp = OBLogPath();
+        NSFileHandle *sfh = [NSFileHandle fileHandleForWritingAtPath:sp];
+        if (sfh) { [sfh seekToEndOfFile]; [sfh writeData:[sep dataUsingEncoding:NSUTF8StringEncoding]]; [sfh closeFile]; }
+        else { [sep writeToFile:sp atomically:YES encoding:NSUTF8StringEncoding error:nil]; }
+    }
     va_list ap; va_start(ap, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);

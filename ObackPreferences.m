@@ -179,26 +179,11 @@ static NSTimeInterval __obMergedPrefsTS = 0;
 
 // 调试日志总开关：设置面板「调试日志」(key=debugLog)。
 // 默认关（日用机省电省盘）；开启后常驻开，需用户在设置面板手动关闭（已移除「30 分钟自动过期写回」，避免开着开着突然没日志的困惑）。
-// 内存缓存 5s，避免每次同步 NSUserDefaults IO（OBLog 调用频率不低，即便关闭仍走此检查）。
-static NSNumber *__obDebugLogCache = nil;
-static NSTimeInterval __obDebugLogCacheTS = 0;
-#define OB_DEBUG_LOG_CACHE_TTL 5.0
-
+// 读取统一走 _mergedPrefs（TTL 2s），不再额外加 5s 独立缓存——否则「开关改了要等 5s 才生效/才停止」会表现为时灵时不灵。
 + (BOOL)debugLogEnabled {
-    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-    if (__obDebugLogCache && (now - __obDebugLogCacheTS) < OB_DEBUG_LOG_CACHE_TTL) {
-        return [__obDebugLogCache boolValue];
-    }
     NSDictionary *d = [self _mergedPrefs];
     id v = [d objectForKey:@"debugLog"];
-    BOOL enabled = v ? [v boolValue] : NO;   // 未设置 → 默认关
-    // 不再做自动过期写回：调试期间用户常驻开，自动关闭会导致「开了一会就没日志」的困惑；
-    // 由用户手动关闭即可（开关默认关，日用机省电）。
-    NSNumber *nc = [@(enabled) retain];   // MRC：静态变量持有，必须 retain（autorelease 会在 drain 后野指针）
-    [__obDebugLogCache release];
-    __obDebugLogCache = nc;
-    __obDebugLogCacheTS = now;
-    return enabled;
+    return v ? [v boolValue] : NO;   // 未设置 → 默认关
 }
 
 
