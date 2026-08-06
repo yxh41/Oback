@@ -1156,6 +1156,7 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
         case UIGestureRecognizerStateBegan: {
             _globalStart = [pan locationInView:[self _windowForPan:pan]];
             _globalDriven = NO;
+            pan.cancelsTouchesInView = NO;   // 每轮手势开始确定性重置：纵向滑动时 touch 需正常派发给列表（否则 QQ/TIM 全屏 pan 任意位置 begin 会吞 touch 致聊天列表无法上下滑）
             self.interacting = YES;   // 占住，防其他 pan 同时在 shouldBegin 被放行
             OBLog(@"handleGlobalPan Began (panView=%@, QQ/TIM=%d)", NSStringFromClass([[pan view] class]),
                   [self _navPopShouldUseObackAnimator:nil]);
@@ -1265,7 +1266,12 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     // 方案 A（rightSimplePop=NO）保持 NO——系统原生交互转场自行处理 touch 取消，无需我们干预。
     // 直接按 rightSimplePop 定值（而非仅置 YES），确保每轮 begin 都确定性重设，不依赖上一轮 end/abort 的复位。
     // QQ/TIM 自定义转场同样需吞掉底层触摸（拖动中暴露的上一页元素不被误触），故一并纳入。
-    pan.cancelsTouchesInView = (self.rightSimplePop || self.navPopUseObackAnimator);
+    pan.cancelsTouchesInView = NO;   // 兜底重置（纵向滑动已靠 handleGlobalPan Began 重置；此处再保险）
+    if (self.rightSimplePop || self.navPopUseObackAnimator) {
+        // 确认横向接管后吞掉后续底层 touch：防拖动中暴露的上一页元素被误触激活；
+        // 仅在接管（_globalDriven）后的本轮生效，下一轮 Began 会再重置为 NO。
+        pan.cancelsTouchesInView = YES;
+    }
     // 同时识别场景下取消对手(微信朋友圈内部 pan),确保 Oback 左缘 rightSimplePop 独占返回、杜绝双返回
     if (_simulOpponent) {
         [_simulOpponent setState:UIGestureRecognizerStateCancelled];
