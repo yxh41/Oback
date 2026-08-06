@@ -1320,15 +1320,17 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
     }
     if (!top) return NO;
     if ([self _isExcludedViewController:top]) return NO;
-    // [2026-08-06 修复 图片查看器横滑误触返回] 触摸点下若是横向可滚 scrollView（图片查看器 paging），
-    // 让 App 原生横滑优先，全屏 pan 不接管返回；不影响纵向滚动（纵向 scrollView 由下方 scrollView 优先处理）。
-    if ([self _scrollViewIsHorizontallyScrollableAtPoint:loc inWindow:win]) {
-        OBLog(@"globalShouldBegin=NO (横向可滚 scrollView, 交还图片查看器/横向分页横滑)");
+    // [2026-08-06 修复 图片查看器横滑误触返回] 仅 QQ/TIM：触摸点下横向可滚 scrollView 交还横滑（图片查看器 paging），
+    // 避免全屏 pan 误吞返回。其他 App 不引入此交还（恢复原先全局返回体验），不影响纵向滚动。
+    if ([self _navPopShouldUseObackAnimator:nil] &&
+        [self _scrollViewIsHorizontallyScrollableAtPoint:loc inWindow:win]) {
+        OBLog(@"globalShouldBegin=NO (QQ/TIM 横向可滚 scrollView, 交还图片查看器/横向分页横滑)");
         return NO;
     }
     // [2026-08-06 修正] QQ 抽屉浮层打开时交还关闭手势，但必须双签名（全屏半透明遮罩 + 贴左半屏面板）
     // 且触摸点在左 0.7 屏内，否则不拦截——避免聊天界面常驻的全屏半透明视图被误判为抽屉遮罩而让返回失效。
-    if ([self _qqDrawerOpenInWindow:win] && loc.x < w * 0.7) {
+    // [2026-08-06 收窄] 仅 QQ/TIM 判定抽屉（其他 App 无 QQ 抽屉，此判定仅会误杀），做到"只针对 QQ"。
+    if ([self _navPopShouldUseObackAnimator:nil] && [self _qqDrawerOpenInWindow:win] && loc.x < w * 0.7) {
         OBLog(@"globalShouldBegin=NO (QQ 侧边栏抽屉打开且触摸在左侧, 交还关闭手势)");
         return NO;
     }
@@ -1350,7 +1352,11 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
         case UIGestureRecognizerStateBegan: {
             _globalStart = [pan locationInView:[self _windowForPan:pan]];
             _globalDriven = NO;
-            pan.cancelsTouchesInView = NO;   // 每轮手势开始确定性重置：纵向滑动时 touch 需正常派发给列表（否则 QQ/TIM 全屏 pan 任意位置 begin 会吞 touch 致聊天列表无法上下滑）
+            // [2026-08-06 收窄] 仅 QQ/TIM 在 Began 强制 cancelsTouchesInView=NO：全屏 pan 任意位置 begin 会吞 touch，
+            // 致聊天列表无法上下滑；其他 App 不强制（沿用上轮复位值，已验证无回归），恢复原先全局返回手感。
+            if ([self _navPopShouldUseObackAnimator:nil]) {
+                pan.cancelsTouchesInView = NO;
+            }
             self.interacting = YES;   // 占住，防其他 pan 同时在 shouldBegin 被放行
             // [2026-08-06 根治 QQ 原生 NTPushPopLib 抢先 pop] Began 即禁用 QQ 原生全屏返回 pan，
             // 使其收不到本轮触摸，Oback 独占驱动（不再依赖不可靠的跨 window requireToFail）；
