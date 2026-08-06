@@ -2194,17 +2194,20 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     if (w <= 0 || h <= 0) return NO;
     BOOL mask = NO, panel = NO;
     [self _scanDrawer:win width:w height:h mask:&mask panel:&panel];
+    if (mask || panel) OBLog(@"[drawer-scan] mask=%d panel=%d (w=%.1f) — 若聊天界面误命中请把此行发我定位", mask, panel, w);
     return (mask && panel);
 }
 - (void)_scanDrawer:(UIView *)v width:(CGFloat)w height:(CGFloat)h mask:(BOOL *)mask panel:(BOOL *)panel {
     for (UIView *sub in v.subviews) {
         CGRect f = sub.frame;
-        // 全屏半透明遮罩（抽屉关闭层）：alpha<1 且覆盖全屏
-        if (sub.userInteractionEnabled && sub.alpha < 0.98 &&
+        // 全屏半透明遮罩（抽屉关闭层）：点击空白处关闭抽屉。下限 alpha>=0.05 排除 QQ 聊天界面常驻的
+        // 近全透明背景层——它曾被单 mask 条件误判为抽屉遮罩，是 81a3e07→ebef7cd 聊天界面返回失效主因。
+        if (sub.userInteractionEnabled && sub.alpha >= 0.05 && sub.alpha < 0.98 &&
             f.size.width >= w * 0.95 && f.size.height >= h * 0.95) *mask = YES;
-        // 贴左半屏面板（QQ 抽屉菜单约 0.7 屏宽，排除全屏主界面 w*0.98）
+        // 贴左半屏面板：QQ 抽屉菜单约 0.6~0.8 屏宽。收紧到 [0.4w, 0.86w]——排除近全屏主界面(>=0.98w)
+        // 与左侧窄控件(<0.4w)，避免聊天界面/导航栏子视图被误判为抽屉面板（ebef7cd 的 panel 判定过宽仍误命中）。
         if (sub.userInteractionEnabled && f.origin.x <= 2 &&
-            f.size.width < w * 0.98 && f.size.width > 0) *panel = YES;
+            f.size.width >= w * 0.4 && f.size.width < w * 0.86) *panel = YES;
         [self _scanDrawer:sub width:w height:h mask:mask panel:panel];
     }
 }
