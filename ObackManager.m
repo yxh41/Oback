@@ -1309,7 +1309,11 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
         // 兜底：递归窗口 VC 树解析顶层 UINavigationController（QQ/TIM 自定义容器 topMost 拿不到 nav）。
         if (!nav) nav = [self _topNavControllerInWindow:win];
         if (nav) {
-            objc_setAssociatedObject(pan, kObackNavKey, nav, OBJC_ASSOCIATION_ASSIGN);  // 写回，供 handleGlobalPan 取 nav 驱动 pop
+            // [2026-08-06 崩溃修复] 原 OBJC_ASSOCIATION_ASSIGN：panG 挂 window 长期存活，nav 被 QQ 释放后
+            // 指针悬空，下次手势取出访问 → KERN_INVALID_ADDRESS:0x10 SIGSEGV(见 QQ 崩溃日志)。
+            // 改 RETAIN_NONATOMIC 短期持有(手势活跃期)，手势结束(handleGlobalPan State 分支/abortTransition)清空 → 无悬空/无泄漏。
+            // 注：边缘 pan 的 kObackNavKey 仍保持 ASSIGN(安全：pan 挂 nav.view，pan 存活⊨nav 存活)。
+            objc_setAssociatedObject(pan, kObackNavKey, nav, OBJC_ASSOCIATION_RETAIN_NONATOMIC);  // 写回，供 handleGlobalPan 取 nav 驱动 pop
             OBLog(@"global QQ/TIM: 解析 nav=%@ count=%lu",
                   NSStringFromClass([nav class]), (unsigned long)nav.viewControllers.count);
         }
@@ -1429,6 +1433,11 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
                 [self dismissIndicatorSafety];
             }
             _globalDriven = NO;
+            // [2026-08-06 崩溃修复] 手势结束清空 panG 的 nav 绑定(RETAIN 短期持有→此刻释放)：杜绝悬空指针/跨轮泄漏。
+            // 仅对 window 全屏 pan(带 kGlobalPanKey)生效；边缘 pan 不带该标记、其 ASSIGN 关联本就安全，不受影响。
+            if (objc_getAssociatedObject(pan, kGlobalPanKey)) {
+                objc_setAssociatedObject(pan, kObackNavKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
             break;
         }
         default: break;
@@ -2069,6 +2078,10 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     _transitionTriggered = NO;
     self.rightSimplePop = NO;     // 复位：避免残留导致下次手势误判右缘非交互
     self.navPopUseObackAnimator = NO;   // 复位：避免残留导致下次手势误判自定义转场
+    // [2026-08-06 崩溃修复] 同 endTransition：panG 的 nav 绑定在手势结束时清空(RETAIN→释放)，杜绝悬空/泄漏。
+    if (objc_getAssociatedObject(pan, kGlobalPanKey)) {
+        objc_setAssociatedObject(pan, kObackNavKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
 }
 
 #pragma mark - 方案 A：驱动系统原生 nav pop
