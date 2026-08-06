@@ -763,6 +763,17 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
 // 让窗口内所有非 Oback、非 UIScrollView 滚动的 pan 失败于我们的 panG：Oback 独占全屏返回，QQ 全屏手势让步
 // （单向 requireToFail，无死锁）；纵向滑动时 panG 在 handleGlobalPan 判定非横向后自取消→QQ 可正常触发（但不返回）。
 // 仅 QQ/TIM：_linkNavPopGesturesInWindow（链接时机）与 _globalPanShouldBegin（懒补链）两处调用，其他 App 路径零改动。
+// [2026-08-06] 判断是否为 QQ 单条消息「左滑引用 / 快速回复」手势。这些手势贴在聊天列表 cell 上，
+// 若被全屏返回压制（禁用或 requireToFail 抢赢）会导致引用失效；应让 panG 让步于它们，由 App 原生处理引用。
+- (BOOL)_isQQQuotePan:(UIPanGestureRecognizer *)g {
+    NSString *cls = NSStringFromClass([g class]);
+    NSArray *quoteKw = @[@"SwipeAction", @"QuickReply"];
+    for (NSString *kw in quoteKw) {
+        if ([cls rangeOfString:kw options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
+    }
+    return NO;
+}
+
 - (void)_obLinkFullScreenOpponentPansInWindow:(UIWindow *)win {
     UIPanGestureRecognizer *globalPan = nil;
     for (UIGestureRecognizer *g in win.gestureRecognizers) {
@@ -802,12 +813,27 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
         if (!w) continue;
         [self _enumeratePansInView:w depth:0 block:^(UIPanGestureRecognizer *g){
             if (g.delegate == self) return;            // 跳过 Oback 自己的 pan（避免自引用）
-            // scrollView 优先——panG 失败于 scrollView pan（纵向滚/图片查看器横滑交还 App）；
-            // 非 scrollView 的 QQ 全屏返回手势(NTPushPopLib 等)失败于 panG（Oback 独占返回，瞬返不回归）。
+            // [2026-08-06 修复①] 单条消息左滑引用/快速回复手势（SwipeAction/QuickReply）：
+            // 不应被压制，而要让 panG 让步于它——左滑引用时它独占，右滑返回时它不 begin → panG 照常驱动返回。
+            if ([self _isQQQuotePan:g]) {
+                @try { [globalPan requireGestureRecognizerToFail:g]; } @catch (NSException *e) {}
+                return;
+            }
+            // scrollView 按「能否横向滚动」分流：
+            //  · 可横向滚动（图片查看器/横向分页）：panG 让步于 scroll（横滑翻图交还 App，不误判为返回）；
+            //  · 仅纵向滚动（聊天列表等）：scroll 让步于 panG，横滑由 panG 驱动返回，
+            //    纵向滑动由 panG 在 handleGlobalPan 判定非横向后自取消→scroll 接管（不返回）。
             BOOL isScroll = (scrollPanCls && [g isKindOfClass:scrollPanCls]);
             @try {
-                if (isScroll) [globalPan requireGestureRecognizerToFail:g];
-                else          [g requireGestureRecognizerToFail:globalPan];
+                if (isScroll) {
+                    UIScrollView *sv = (UIScrollView *)g.view;
+                    BOOL horiz = (sv && (sv.pagingEnabled || sv.zoomEnabled ||
+                                         sv.contentSize.width > sv.bounds.size.width + 1.0));
+                    if (horiz) [globalPan requireGestureRecognizerToFail:g];    // 图片查看器：panG 让步
+                    else        [g requireGestureRecognizerToFail:globalPan];   // 聊天列表：scroll 让步，panG 驱动返回
+                } else {
+                    [g requireGestureRecognizerToFail:globalPan];               // 其余 QQ 全屏返回手势失败于 panG
+                }
             } @catch (NSException *e) {}
         }];
     }
@@ -875,6 +901,7 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
         [self _enumeratePansInView:w depth:0 block:^(UIPanGestureRecognizer *g){
             if (g.delegate == self) return;                       // 跳过 Oback 自己的 pan
             if (scrollPanCls && [g isKindOfClass:scrollPanCls]) return;  // 跳过 scrollView 的 pan
+            if ([self _isQQQuotePan:g]) return;                   // 左滑引用/快速回复手势：禁用会破坏引用，放行
             NSString *cls = NSStringFromClass([g class]);
             // 命中条件①：类名含 PushPop（QQ 原生 NTPushPopLib 系列手势，跨 window 也抓得到）
             BOOL isQQPop = [cls rangeOfString:@"PushPop" options:NSCaseInsensitiveSearch].location != NSNotFound;
