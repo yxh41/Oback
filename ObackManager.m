@@ -1054,6 +1054,34 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
 
 // 全屏 pan 的 shouldBegin：仅「左热区起滑 + 有 nav 可 pop」才允许识别。是否真正接管 nav pop
 // 由 handleGlobalPan 的横向速度判定决定（避免误吞 App 内横向滚动）。不访问 pan.edges（普通 pan 无此属性）。
+// [2026-08-06 修复 QQ/TIM 全局返回瞬返] 递归解析窗口内「顶层可见 UINavigationController」，
+// 用于全局返回开启、nav.view 边缘 pan 未挂载（不携带 kObackNavKey）时，给全屏 pan 兜底解析 nav 栈深。
+// 兼容 QQ/TIM 自定义容器：topMost 拿不到 nav.navigationController 时，直接搜 VC 树里的 UINavigationController。
+- (UINavigationController *)_topNavControllerInWindow:(UIWindow *)win {
+    return [self _topNavFromVC:win.rootViewController depth:0];
+}
+- (UINavigationController *)_topNavFromVC:(UIViewController *)vc depth:(NSUInteger)depth {
+    if (!vc || depth > 24) return nil;
+    if ([vc isKindOfClass:[UINavigationController class]]) {
+        UINavigationController *nav = (UINavigationController *)vc;
+        UIViewController *top = nav.visibleViewController ?: nav.topViewController;
+        if (top && top != vc) {
+            UINavigationController *deeper = [self _topNavFromVC:top depth:depth + 1];
+            if (deeper) return deeper;   // 优先返回更深（被 push / present）的 nav
+        }
+        return nav.viewControllers.count > 0 ? nav : nil;
+    }
+    if ([vc isKindOfClass:[UITabBarController class]])
+        return [self _topNavFromVC:((UITabBarController *)vc).selectedViewController depth:depth + 1];
+    if (vc.presentedViewController)
+        return [self _topNavFromVC:vc.presentedViewController depth:depth + 1];
+    for (UIViewController *child in vc.childViewControllers) {
+        UINavigationController *n = [self _topNavFromVC:child depth:depth + 1];
+        if (n) return n;
+    }
+    return nil;
+}
+
 - (BOOL)_globalPanShouldBegin:(UIPanGestureRecognizer *)pan {
     if (self.interacting) { OBLog(@"globalShouldBegin=NO (已在交互中)"); return NO; }
     if (![ObackPreferences isAllowed]) return NO;
@@ -1098,9 +1126,13 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
             UINavigationController *n = objc_getAssociatedObject(g, kObackNavKey);
             if (n && n.viewControllers.count > 0) { nav = n; }
         }];
+        // [2026-08-06 修复] 全局返回开启时 _attachNavPanToNav 跳过 nav.view 边缘 pan（ObackManager.m:526），
+        // 上方「借边缘 pan 的 kObackNavKey」落空 → nav 永远 nil → panG 不 begin → QQ 原生瞬返。
+        // 兜底：递归窗口 VC 树解析顶层 UINavigationController（QQ/TIM 自定义容器 topMost 拿不到 nav）。
+        if (!nav) nav = [self _topNavControllerInWindow:win];
         if (nav) {
             objc_setAssociatedObject(pan, kObackNavKey, nav, OBJC_ASSOCIATION_ASSIGN);  // 写回，供 handleGlobalPan 取 nav 驱动 pop
-            OBLog(@"global QQ/TIM: 借用 Oback 边缘 pan nav=%@ count=%lu",
+            OBLog(@"global QQ/TIM: 解析 nav=%@ count=%lu",
                   NSStringFromClass([nav class]), (unsigned long)nav.viewControllers.count);
         }
     }
