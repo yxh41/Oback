@@ -1087,6 +1087,23 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
         nav = top.navigationController;
         if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
     }
+    // [2026-08-06 QQ/TIM 全屏返回根治] QQ 聊天 VC 常嵌自定义容器，top.navigationController 为 nil
+    // （topMost 解析不到 nav）→ shouldBegin 一直 NO → panG 不 begin → QQ 原生全屏手势瞬返。
+    // 边缘手势因 swizzle 时已用 kObackNavKey 关联 QQNavigationController 而跟手；此处兜底借用同 window 上
+    // Oback 边缘 pan 已关联的 nav，使全屏 pan 也能解析到当前 nav 栈深（列表=1 不接管、聊天=2 接管）。
+    if (!nav && [self _navPopShouldUseObackAnimator:nil]) {
+        [self _enumeratePansInView:win depth:0 block:^(UIPanGestureRecognizer *g){
+            if (g == pan) return;
+            if (g.delegate != self) return;
+            UINavigationController *n = objc_getAssociatedObject(g, kObackNavKey);
+            if (n && n.viewControllers.count > 0) { nav = n; }
+        }];
+        if (nav) {
+            objc_setAssociatedObject(pan, kObackNavKey, nav, OBJC_ASSOCIATION_ASSIGN);  // 写回，供 handleGlobalPan 取 nav 驱动 pop
+            OBLog(@"global QQ/TIM: 借用 Oback 边缘 pan nav=%@ count=%lu",
+                  NSStringFromClass([nav class]), (unsigned long)nav.viewControllers.count);
+        }
+    }
     if (!top) return NO;
     if ([self _isExcludedViewController:top]) return NO;
     if (nav && nav.viewControllers.count > 1) {
