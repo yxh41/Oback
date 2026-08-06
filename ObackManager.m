@@ -755,7 +755,24 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     // （interacting=0 → ObackNavDelegate 返回 nil → 走 NTPushPopLib 瞬返）。改为枚举所有可见 window 的
     // pan 一并压制（跨 window 的 requireToFail 依赖对 UIKit 有效）。
     NSArray *windows = nil;
-    @try { windows = [[UIApplication sharedApplication] windows]; } @catch (NSException *e) { windows = nil; }
+    @try {
+        if (@available(iOS 13.0, *)) {
+            NSMutableArray *arr = [NSMutableArray array];
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]]) {
+                    [arr addObjectsFromArray:((UIWindowScene *)scene).windows];
+                }
+            }
+            windows = arr;
+        }
+        if (!windows || windows.count == 0) {
+            // 兜底：connectedScenes 为空时的旧 API（弃用，仅作安全网，用 pragma 压掉 -Werror 告警）
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            windows = [[UIApplication sharedApplication] windows];
+            #pragma clang diagnostic pop
+        }
+    } @catch (NSException *e) { windows = nil; }
     if (!windows || windows.count == 0) windows = @[win];
     for (UIWindow *w in windows) {
         if (!w) continue;
