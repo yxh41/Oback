@@ -1314,9 +1314,11 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
         // 让浮耳自身拖拽手势处理关闭；否则 Oback 接管并禁用其 pan 会导致总结滑不出（见 oback_debug(20).log）。
         Class ybCls = NSClassFromString(@"NTAISummaryFloatEar");
         if (ybCls) {
-            // [2026-08-06 修复 元宝检测漏窗] 浮耳常挂 overlay window，仅查 keyWindow 永远找不到 →
-            // return NO 从不触发、Oback 照常接管并挤掉浮耳拖拽 → 总结界面滑不出（见 oback_debug(21) 无"触摸落在元宝"）。
-            // 改为枚举所有可见 window，把触摸点直接转换到浮耳本地坐标做命中测试。
+            // [2026-08-07 修复 元宝检测坐标错位] 浮耳挂 overlay window，原 [yb convertPoint:loc fromView:win]
+            // 一步式跨 window 转换对 QQ 的 overlay window 算错（oback_debug(21) 无"触摸落在元宝"实锤）；
+            // 且 bounds 命中测试不处理 z 序/透明覆盖。改为经屏幕坐标两步桥接 + hitTest 命中浮耳，
+            // 跨任意 window 都准；bounds 命中作兜底。
+            CGPoint sp = [win convertPoint:loc toView:nil];   // nil=屏幕坐标系，跨 window 桥接基准
             NSArray *ywins = nil;
             @try {
                 if (@available(iOS 13.0, *)) {
@@ -1337,14 +1339,38 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
             if (!ywins || ywins.count == 0) ywins = @[win];
             for (UIWindow *yw in ywins) {
                 if (!yw) continue;
+                CGPoint p = [yw convertPoint:sp fromView:nil];   // 屏幕→该 window 本地坐标
+                // 主：hitTest 命中浮耳（正确处理 overlay window 坐标空间 + z 序覆盖）
+                UIView *hit = nil;
+                @try { hit = [yw hitTest:p withEvent:nil]; } @catch (NSException *e) { hit = nil; }
+                UIView *v = hit;
+                while (v) {
+                    if ([v isKindOfClass:ybCls]) {
+                        OBLog(@"globalShouldBegin=NO (触摸落在元宝AI总结浮层, 交还浮耳拖拽关闭)");
+                        return NO;
+                    }
+                    v = v.superview;
+                }
+                // 兜底：直接枚举浮耳 view 做 bounds 命中（部分 overlay 不响应 hitTest 时）；
+                // 注意必须把 p 转到浮耳本地坐标再比对（yb.bounds 是本地坐标，p 是 window 坐标）
                 UIView *yb = [self _yuanbaoSummaryViewIn:yw cls:ybCls];
                 if (yb) {
-                    CGPoint p = [yb convertPoint:loc fromView:win];
-                    if (CGRectContainsPoint(yb.bounds, p)) {
+                    CGPoint lp = [yb convertPoint:p fromView:yw];
+                    if (CGRectContainsPoint(yb.bounds, lp)) {
                         OBLog(@"globalShouldBegin=NO (触摸落在元宝AI总结浮层, 交还浮耳拖拽关闭)");
                         return NO;
                     }
                 }
+            }
+            // [2026-08-07 诊断] 若上面未 return NO，说明本次触摸未命中浮耳——记录是否找到浮耳及关键坐标，
+            // 便于确认是「没找到浮耳」还是「坐标算错」(定位用，稳定后可删)
+            if ([ObackPreferences doubleReturnDiagEnabled]) {
+                BOOL foundAny = NO;
+                for (UIWindow *yw in ywins) {
+                    if (!yw) continue;
+                    if ([self _yuanbaoSummaryViewIn:yw cls:ybCls]) { foundAny = YES; break; }
+                }
+                OBLog(@"[元宝诊断] loc=(%.1f,%.1f) 浮耳found=%@ → 未命中(交还 Oback 接管)", loc.x, loc.y, foundAny ? @"YES" : @"NO");
             }
         }
     } else {
