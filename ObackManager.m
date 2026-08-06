@@ -830,6 +830,15 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
                 @try { [globalPan requireGestureRecognizerToFail:g]; } @catch (NSException *e) {}
                 return;
             }
+            // [2026-08-07 修复 元宝AI总结浮耳滑不出] 浮耳(NTAISummaryFloatEar)是独立拖拽手势：
+            // 不能让它失败于 Oback（否则 Oback 接管时浮耳被强制 fail → 拖不动总结），改为让 Oback 全屏 pan
+            // 失败于浮耳——用户滑浮耳时浮耳独占拖拽、Oback 让出（与引用手势同模式，单向无死锁）。
+            // 配合 _suppressQQNativePopForNav: 已排除禁用浮耳，浮耳可正常工作。
+            Class ybCls = NSClassFromString(@"NTAISummaryFloatEar");
+            if (ybCls && g.view && [g.view isKindOfClass:ybCls]) {
+                @try { [globalPan requireGestureRecognizerToFail:g]; } @catch (NSException *e) {}
+                return;
+            }
             // [2026-08-06 修复③ 纵滚死 + 快滑瞬闪] 不再用 requireToFail 让 scroll 与全屏 pan 二选一：
             // 二选一会让纵滑时 scroll 被压制（panG 抢首发 touch，判纵向取消后 scroll 也救不回 → 聊天不能上下滑）；
             // 且横滑聊天需「多帧确认横向占优」才接管，快滑在确认前松手 → QQ 原生 NTPushPopLib 抢 pop → 瞬闪。
@@ -1396,8 +1405,12 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
         return NO;
     }
     if (nav && nav.viewControllers.count > 1) {
-        // 有 nav pop 可接管：允许识别；系统 interactivePop 的禁用推迟到「确认横向意图」(handleGlobalPan)，
-        // 避免纵向滑动被取消后仍禁用系统边缘返回。
+        // 有 nav pop 可接管：允许识别。
+        // [2026-08-07 根治无震动瞬返] 提前到 shouldBegin 即禁用 QQ 原生 pan（含 overlay window 上的 NTPushPopLib），
+        // 消除「shouldBegin 已返回 YES、但 handleGlobalPan Began 才禁用」之间的间隙——该间隙里跨 window 原生 pan
+        // 抢先 pop 即表现为「无震动瞬返」（见 :879 requireToFail 跨 window 不可靠）。handleGlobalPan Began 的
+        // 压制保留为冗余安全网。
+        if ([self _navPopShouldUseObackAnimator:nil]) [self _suppressQQNativePopForNav:nav];
         OBLog(@"globalShouldBegin=YES (loc.x=%.1f 有nav pop=%lu, QQ/TIM=%d)", loc.x,
               (unsigned long)nav.viewControllers.count, [self _navPopShouldUseObackAnimator:nil]);
         return YES;
