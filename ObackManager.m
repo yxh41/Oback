@@ -513,6 +513,17 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
         [self _enumeratePansInView:sub depth:depth + 1 block:block];
 }
 
+- (UIView *)_yuanbaoSummaryViewIn:(UIView *)view cls:(Class)ybCls {
+    // [2026-08-06 辅助] 递归查找元宝AI总结浮层(NTAISummaryFloatEar)的可见 view；找不到返回 nil。
+    if (!view || !ybCls) return nil;
+    if ([view isKindOfClass:ybCls]) return view;
+    for (UIView *sub in view.subviews) {
+        UIView *r = [self _yuanbaoSummaryViewIn:sub cls:ybCls];
+        if (r) return r;
+    }
+    return nil;
+}
+
 // 从 pan 解析出真正的 UIWindow：nav pop 的边缘 pan 挂在 nav.view 上（pan.view 是 UIView 非 window），
 // 其 window 需从 pan.view.window 取；window modal pan 的 pan.view 本身是 UIWindow。
 - (UIWindow *)_windowForPan:(UIPanGestureRecognizer *)pan {
@@ -906,6 +917,8 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
             if (g.delegate == self) return;                       // 跳过 Oback 自己的 pan
             if (scrollPanCls && [g isKindOfClass:scrollPanCls]) return;  // 跳过 scrollView 的 pan
             if ([self _isQQQuotePan:g]) return;                   // 左滑引用/快速回复手势：禁用会破坏引用，放行
+            Class ybCls = NSClassFromString(@"NTAISummaryFloatEar");
+            if (ybCls && g.view && [g.view isKindOfClass:ybCls]) return;  // 元宝AI总结浮耳：禁用会破坏拖拽关闭，放行
             NSString *cls = NSStringFromClass([g class]);
             // 命中条件①：类名含 PushPop（QQ 原生 NTPushPopLib 系列手势，跨 window 也抓得到）
             BOOL isQQPop = [cls rangeOfString:@"PushPop" options:NSCaseInsensitiveSearch].location != NSNotFound;
@@ -953,6 +966,17 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
     }
     [suppressed removeAllObjects];
     OBLog(@"[QQ 原生 pop 压制] 已恢复 %lu 个手势", (unsigned long)n);
+}
+
+- (void)_restoreQQNativePopDeferred {
+    // [2026-08-06 修复 瞬闪] Oback 取消/结束时延后恢复 QQ 原生 pan：QQ/TIM 下 cancelsTouchesInView=NO
+    // 使原生同步接收 touch，若立即恢复原生会基于已收到的 touch 历史瞬间判定 pop → 顺闪。
+    // 延后一帧并确认 Oback 未再次接管(interacting)后才恢复，避免原生抢回本次手势会话。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (self.interacting) return;   // Oback 又接管（新一次滑动），不恢复，保持原生禁用让 Oback 独占
+        [self _restoreQQNativePop];
+    });
 }
 
 // 全屏懒补链：仅当近期未做过全屏链接（2s 节流）时才扫描对手 pan（治 QQ 聊天「进会话后懒加载」的晚到全屏手势）。
@@ -1277,6 +1301,19 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
         // 否则中间/右侧滑不在左热区→Oback 不 begin→QQ 原生全屏手势抢接管→瞬返。
         OBLog(@"globalShouldBegin: QQ/TIM 全屏 pan 不限热区（任意位置允许）");
         [self _obLinkFullScreenOpponentPansInWindow:win];   // QQ/TIM 全屏对手压制：枚举所有 window 的对手 pan（含 overlay window 上的 QQ 全屏返回手势）建立 requireToFail
+        // [2026-08-06 修复 元宝AI总结浮层滑不出] 触摸落在元宝总结浮耳(NTAISummaryFloatEar)上时交还，
+        // 让浮耳自身拖拽手势处理关闭；否则 Oback 接管并禁用其 pan 会导致总结滑不出（见 oback_debug(20).log）。
+        Class ybCls = NSClassFromString(@"NTAISummaryFloatEar");
+        if (ybCls) {
+            UIView *yb = [self _yuanbaoSummaryViewIn:win cls:ybCls];
+            if (yb) {
+                CGPoint p = [win convertPoint:loc toView:yb];
+                if (CGRectContainsPoint(yb.bounds, p)) {
+                    OBLog(@"globalShouldBegin=NO (触摸落在元宝AI总结浮层, 交还浮耳拖拽关闭)");
+                    return NO;
+                }
+            }
+        }
     } else {
         // 仅 QQ/TIM 外保留窄热区（全局返回默认左 1/3 / 右 1/4 薄热区），避免误吞 App 内横向手势。
         if (rightSide) {
@@ -1431,7 +1468,7 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
         case UIGestureRecognizerStateEnded:
         case UIGestureRecognizerStateCancelled:
         case UIGestureRecognizerStateFailed: {
-            [self _restoreQQNativePop];   // 恢复被禁用的 QQ 原生 pan（本轮 Oback 独占结束）
+            [self _restoreQQNativePopDeferred];   // 延后恢复 QQ 原生 pan（防本轮取消后原生抢回致瞬闪）
             if (_globalDriven) {
                 [self endTransition:pan];
             } else {
@@ -1452,7 +1489,7 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
 
 - (void)_cancelGlobalPan:(UIPanGestureRecognizer *)pan {
     // 非横向意图（向左/纵向）：取消本次识别交还 App，避免与 App 滚动/手势双触发；下次触摸可重新识别。
-    [self _restoreQQNativePop];   // 恢复被禁用的 QQ 原生 pan（本轮未接管返回）
+    [self _restoreQQNativePopDeferred];   // 延后恢复 QQ 原生 pan（防本轮取消后原生抢回致瞬闪）
     self.interacting = NO;
     _globalDriven = NO;
     [self dismissIndicatorSafety];
