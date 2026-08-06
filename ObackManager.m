@@ -811,6 +811,85 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     }
 }
 
+// —— [2026-08-06 根治 QQ/TIM 原生 NTPushPopLib 抢先 pop 致瞬返] ——
+// requireToFail 跨 window 对 QQ 原生全屏返回手势不可靠（原生 pan 挂独立 overlay window 且抢跑，
+// Oback panG Began 后 QQ 原生仍抢先 popViewControllerAnimated:，Oback 因竞争 self-cancel 致 interacting=0 走原生瞬返）。
+// 故改为：Oback panG Began 接管时直接禁用 QQ 原生全屏返回 pan，使其收不到本轮触摸，Oback 独占驱动 pop；
+// 手势结束/取消时 _restoreQQNativePop 恢复。仅对 QQ/TIM 生效（其他 App 不调此方法），零回归。
+static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
+
+- (void)_suppressQQNativePopForNav:(UINavigationController *)nav {
+    if (![self _navPopShouldUseObackAnimator:nav]) return;
+    if (!nav || nav.viewControllers.count <= 1) return;
+    NSMutableSet *suppressed = objc_getAssociatedObject(self, kSuppressedQQPansKey);
+    if (!suppressed) {
+        suppressed = [NSMutableSet set];
+        objc_setAssociatedObject(self, kSuppressedQQPansKey, suppressed, OBJC_ASSOCIATION_RETAIN);
+    }
+    Class scrollPanCls = NSClassFromString(@"UIScrollViewPanGestureRecognizer");
+    // 枚举所有可见 window 的 pan（含 overlay window 上的 QQ 原生 pan）
+    NSArray *windows = nil;
+    @try {
+        if (@available(iOS 13.0, *)) {
+            NSMutableArray *arr = [NSMutableArray array];
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]])
+                    [arr addObjectsFromArray:((UIWindowScene *)scene).windows];
+            }
+            windows = arr;
+        }
+        if (!windows || windows.count == 0) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            windows = [[UIApplication sharedApplication] windows];
+            #pragma clang diagnostic pop
+        }
+    } @catch (NSException *e) { windows = nil; }
+    if (!windows || windows.count == 0) windows = @[];
+    for (UIWindow *w in windows) {
+        if (!w) continue;
+        [self _enumeratePansInView:w depth:0 block:^(UIPanGestureRecognizer *g){
+            if (g.delegate == self) return;                       // 跳过 Oback 自己的 pan
+            if (scrollPanCls && [g isKindOfClass:scrollPanCls]) return;  // 跳过 scrollView 的 pan
+            NSString *cls = NSStringFromClass([g class]);
+            // 命中条件①：类名含 PushPop（QQ 原生 NTPushPopLib 系列手势，跨 window 也抓得到）
+            BOOL isQQPop = [cls rangeOfString:@"PushPop" options:NSCaseInsensitiveSearch].location != NSNotFound;
+            // 命中条件②：贴在 nav.view 树上、非 scroll 非 Oback 的全屏 pan（QQ 原生 pop 通常挂 nav.view）
+            BOOL onNav = (g.view && [g.view isDescendantOfView:nav.view]);
+            if (!isQQPop && !onNav) return;
+            if (!g.enabled) return;
+            g.enabled = NO;
+            [suppressed addObject:[NSValue valueWithNonretainedObject:g]];
+            OBLog(@"[QQ 原生 pop 压制] 禁用 %@ (view=%@)", cls, NSStringFromClass([g.view class]));
+        }];
+    }
+    // 诊断：列出所有「非 Oback 非 scroll」pan 候选（类名+view），便于万一未命中时精准定位 QQ 原生 pan 真实身份
+    if ([ObackPreferences doubleReturnDiagEnabled]) {
+        NSMutableArray *cand = [NSMutableArray array];
+        for (UIWindow *w in windows) {
+            if (!w) continue;
+            [self _enumeratePansInView:w depth:0 block:^(UIPanGestureRecognizer *g){
+                if (g.delegate == self) return;
+                if (scrollPanCls && [g isKindOfClass:scrollPanCls]) return;
+                [cand addObject:[NSString stringWithFormat:@"%@@%@", NSStringFromClass([g class]), NSStringFromClass([g.view class])]];
+            }];
+        }
+        OBLog(@"diag[QQ pop 候选] 非 Oback 非 scroll pan → %@", cand);
+    }
+}
+
+- (void)_restoreQQNativePop {
+    NSMutableSet *suppressed = objc_getAssociatedObject(self, kSuppressedQQPansKey);
+    if (!suppressed || suppressed.count == 0) return;
+    NSUInteger n = suppressed.count;
+    for (NSValue *v in suppressed) {
+        UIPanGestureRecognizer *g = [v nonretainedObjectValue];
+        if (g) g.enabled = YES;
+    }
+    [suppressed removeAllObjects];
+    OBLog(@"[QQ 原生 pop 压制] 已恢复 %lu 个手势", (unsigned long)n);
+}
+
 // 全屏懒补链：仅当近期未做过全屏链接（2s 节流）时才扫描对手 pan（治 QQ 聊天「进会话后懒加载」的晚到全屏手势）。
 - (void)_obLinkFullScreenOpponentPansIfStale:(UIWindow *)win {
     static NSTimeInterval __lastFullLinkTS = 0;
@@ -1203,6 +1282,13 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
             _globalDriven = NO;
             pan.cancelsTouchesInView = NO;   // 每轮手势开始确定性重置：纵向滑动时 touch 需正常派发给列表（否则 QQ/TIM 全屏 pan 任意位置 begin 会吞 touch 致聊天列表无法上下滑）
             self.interacting = YES;   // 占住，防其他 pan 同时在 shouldBegin 被放行
+            // [2026-08-06 根治 QQ 原生 NTPushPopLib 抢先 pop] Began 即禁用 QQ 原生全屏返回 pan，
+            // 使其收不到本轮触摸，Oback 独占驱动（不再依赖不可靠的跨 window requireToFail）；
+            // 手势结束/取消时 _restoreQQNativePop 恢复。仅 QQ/TIM 且有可 pop 的 nav 时生效。
+            if ([self _navPopShouldUseObackAnimator:nil]) {
+                UINavigationController *nav = objc_getAssociatedObject(pan, kObackNavKey);
+                if (nav && nav.viewControllers.count > 1) [self _suppressQQNativePopForNav:nav];
+            }
             OBLog(@"handleGlobalPan Began (panView=%@, QQ/TIM=%d)", NSStringFromClass([[pan view] class]),
                   [self _navPopShouldUseObackAnimator:nil]);
             break;                     // 不立即驱动 nav pop、不显示胶囊（方向未定）
@@ -1258,6 +1344,7 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
         case UIGestureRecognizerStateEnded:
         case UIGestureRecognizerStateCancelled:
         case UIGestureRecognizerStateFailed: {
+            [self _restoreQQNativePop];   // 恢复被禁用的 QQ 原生 pan（本轮 Oback 独占结束）
             if (_globalDriven) {
                 [self endTransition:pan];
             } else {
@@ -1273,6 +1360,7 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
 
 - (void)_cancelGlobalPan:(UIPanGestureRecognizer *)pan {
     // 非横向意图（向左/纵向）：取消本次识别交还 App，避免与 App 滚动/手势双触发；下次触摸可重新识别。
+    [self _restoreQQNativePop];   // 恢复被禁用的 QQ 原生 pan（本轮未接管返回）
     self.interacting = NO;
     _globalDriven = NO;
     [self dismissIndicatorSafety];
