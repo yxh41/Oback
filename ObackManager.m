@@ -751,10 +751,17 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     Class scrollPanCls = NSClassFromString(@"UIScrollViewPanGestureRecognizer");
     [self _enumeratePansInView:win depth:0 block:^(UIPanGestureRecognizer *g){
         if (g.delegate == self) return;            // 跳过 Oback 自己的 pan（避免自引用）
-        // [2026-08-05 修复] 不再跳过 scroll 类 pan：QQ 聊天全屏返回手势常挂在聊天 scroll
-        // (UIScrollViewPanGestureRecognizer) 上，跳过它反而让 QQ 手势抢先→瞬返。panG 只在横向占优时
-        // 才 begin（纵向不 begin），scroll 该滚照滚，无副作用。
-        @try { [g requireGestureRecognizerToFail:globalPan]; } @catch (NSException *e) {}
+        // [2026-08-06 修复 聊天框纵滚/图片查看器横滑] QQ/TIM 全屏 pan 任意位置 begin（无方向限制），
+        // 旧逻辑让 scrollView pan 失败于 panG → 纵向滚动被压制、图片查看器横滑被抢→误触返回。
+        // 正确：scrollView 优先——panG 失败于 scrollView pan（纵向滚 scrollView 不失败→panG 不 begin；
+        // 横向滚如图片查看器 scrollView 不失败→panG 不接管→不误触返回）；非 scrollView 的 QQ 全屏返回
+        // 手势(NTPushPopLib 等)仍失败于 panG（Oback 独占返回，瞬返不回归）。
+        Class scrollPanCls = NSClassFromString(@"UIScrollViewPanGestureRecognizer");
+        BOOL isScroll = (scrollPanCls && [g isKindOfClass:scrollPanCls]);
+        @try {
+            if (isScroll) [globalPan requireGestureRecognizerToFail:g];
+            else          [g requireGestureRecognizerToFail:globalPan];
+        } @catch (NSException *e) {}
     }];
     if ([ObackPreferences doubleReturnDiagEnabled]) {
         NSMutableArray *all = [NSMutableArray array];
@@ -1138,6 +1145,12 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     }
     if (!top) return NO;
     if ([self _isExcludedViewController:top]) return NO;
+    // [2026-08-06 修复 图片查看器横滑误触返回] 触摸点下若是横向可滚 scrollView（图片查看器 paging），
+    // 让 App 原生横滑优先，全屏 pan 不接管返回；不影响纵向滚动（纵向 scrollView 由下方 scrollView 优先处理）。
+    if ([self _scrollViewIsHorizontallyScrollableAtPoint:loc inWindow:win]) {
+        OBLog(@"globalShouldBegin=NO (横向可滚 scrollView, 交还图片查看器/横向分页横滑)");
+        return NO;
+    }
     if (nav && nav.viewControllers.count > 1) {
         // 有 nav pop 可接管：允许识别；系统 interactivePop 的禁用推迟到「确认横向意图」(handleGlobalPan)，
         // 避免纵向滑动被取消后仍禁用系统边缘返回。
@@ -2154,6 +2167,15 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         hit = hit.superview;
     }
     return nil;
+}
+
+// 触摸点下的 scrollView 是否横向可滚（图片查看器/横向分页容器）。用于全屏 pan 避让，避免横滑误触返回。
+- (BOOL)_scrollViewIsHorizontallyScrollableAtPoint:(CGPoint)point inWindow:(UIWindow *)win {
+    UIScrollView *sv = [self scrollViewAtPoint:point inView:win];
+    if (!sv) return NO;
+    if (!sv.scrollEnabled) return NO;
+    // 内容宽明显大于可视宽 → 横向可滚（图片查看器 paging：contentSize.width = count * width）
+    return (sv.contentSize.width > sv.bounds.size.width * 1.2);
 }
 
 @end
