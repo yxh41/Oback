@@ -749,35 +749,44 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     if (!globalPan) return;
     // UIScrollViewPanGestureRecognizer 是 UIKit 私有类，公共 SDK 头未声明 → 用 NSClassFromString 运行时取，避免编译失败
     Class scrollPanCls = NSClassFromString(@"UIScrollViewPanGestureRecognizer");
-    [self _enumeratePansInView:win depth:0 block:^(UIPanGestureRecognizer *g){
-        if (g.delegate == self) return;            // 跳过 Oback 自己的 pan（避免自引用）
-        // [2026-08-06 修复 聊天框纵滚/图片查看器横滑] QQ/TIM 全屏 pan 任意位置 begin（无方向限制），
-        // 旧逻辑让 scrollView pan 失败于 panG → 纵向滚动被压制、图片查看器横滑被抢→误触返回。
-        // 正确：scrollView 优先——panG 失败于 scrollView pan（纵向滚 scrollView 不失败→panG 不 begin；
-        // 横向滚如图片查看器 scrollView 不失败→panG 不接管→不误触返回）；非 scrollView 的 QQ 全屏返回
-        // 手势(NTPushPopLib 等)仍失败于 panG（Oback 独占返回，瞬返不回归）。
-        Class scrollPanCls = NSClassFromString(@"UIScrollViewPanGestureRecognizer");
-        BOOL isScroll = (scrollPanCls && [g isKindOfClass:scrollPanCls]);
-        @try {
-            if (isScroll) [globalPan requireGestureRecognizerToFail:g];
-            else          [g requireGestureRecognizerToFail:globalPan];
-        } @catch (NSException *e) {}
-    }];
+    // [2026-08-06 修复 QQ 原生全屏返回抢先 pop 致瞬返] QQ 的 NTPushPopLib 全屏返回手势可能挂在
+    // 与 Oback panG 不同的 UIWindow（overlay window）上，原仅枚举 globalPan 所在 window 的 subview 树
+    // 会漏掉它 → 从未被 requireToFail 压制 → Oback Began 后 QQ 原生不 fail、抢先吞 touch 并 pop
+    // （interacting=0 → ObackNavDelegate 返回 nil → 走 NTPushPopLib 瞬返）。改为枚举所有可见 window 的
+    // pan 一并压制（跨 window 的 requireToFail 依赖对 UIKit 有效）。
+    NSArray *windows = nil;
+    @try { windows = [[UIApplication sharedApplication] windows]; } @catch (NSException *e) { windows = nil; }
+    if (!windows || windows.count == 0) windows = @[win];
+    for (UIWindow *w in windows) {
+        if (!w) continue;
+        [self _enumeratePansInView:w depth:0 block:^(UIPanGestureRecognizer *g){
+            if (g.delegate == self) return;            // 跳过 Oback 自己的 pan（避免自引用）
+            // scrollView 优先——panG 失败于 scrollView pan（纵向滚/图片查看器横滑交还 App）；
+            // 非 scrollView 的 QQ 全屏返回手势(NTPushPopLib 等)失败于 panG（Oback 独占返回，瞬返不回归）。
+            BOOL isScroll = (scrollPanCls && [g isKindOfClass:scrollPanCls]);
+            @try {
+                if (isScroll) [globalPan requireGestureRecognizerToFail:g];
+                else          [g requireGestureRecognizerToFail:globalPan];
+            } @catch (NSException *e) {}
+        }];
+    }
     if ([ObackPreferences doubleReturnDiagEnabled]) {
         NSMutableArray *all = [NSMutableArray array];
         NSMutableArray *opp = [NSMutableArray array];
-        [self _enumeratePansInView:win depth:0 block:^(UIPanGestureRecognizer *g){
-            BOOL isSelf = (g.delegate == self);
-            BOOL isScroll = (scrollPanCls && [g isKindOfClass:scrollPanCls]);
-            [all addObject:[NSString stringWithFormat:@"%@@%@%@%@",
-                            NSStringFromClass([g class]), NSStringFromClass([g.view class]),
-                            isSelf ? @"[Oback]" : @"", isScroll ? @"★scroll" : @""]];
-            if (isSelf) return;                 // 跳过 Oback 自己的 pan
-            // scroll 类不再跳过：一并 requireToFail panG（panG 纵向不 begin → 滚动无碍）
-            [opp addObject:[NSString stringWithFormat:@"%@@%@%@",
-                            NSStringFromClass([g class]), NSStringFromClass([g.view class]),
-                            isScroll ? @"★scroll" : @""]];
-        }];
+        for (UIWindow *w in windows) {
+            if (!w) continue;
+            [self _enumeratePansInView:w depth:0 block:^(UIPanGestureRecognizer *g){
+                BOOL isSelf = (g.delegate == self);
+                BOOL isScroll = (scrollPanCls && [g isKindOfClass:scrollPanCls]);
+                [all addObject:[NSString stringWithFormat:@"%@@%@%@%@",
+                                NSStringFromClass([g class]), NSStringFromClass([g.view class]),
+                                isSelf ? @"[Oback]" : @"", isScroll ? @"★scroll" : @""]];
+                if (isSelf) return;                 // 跳过 Oback 自己的 pan
+                [opp addObject:[NSString stringWithFormat:@"%@@%@%@",
+                                NSStringFromClass([g class]), NSStringFromClass([g.view class]),
+                                isScroll ? @"★scroll" : @""]];
+            }];
+        }
         OBLog(@"diag[全屏链接] panG=%@ 命中；全窗口 pan 共 %lu → %@",
               NSStringFromClass([globalPan.view class]), (unsigned long)all.count, all);
         OBLog(@"diag[全屏链接] 其中「非 Oback 非 scroll」对手 pan 共 %lu → %@",
@@ -1105,7 +1114,7 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
         // QQ/TIM 内取消热区限制，任意位置起滑都允许识别；是否真正接管由 handleGlobalPan 横向判定决定。
         // 否则中间/右侧滑不在左热区→Oback 不 begin→QQ 原生全屏手势抢接管→瞬返。
         OBLog(@"globalShouldBegin: QQ/TIM 全屏 pan 不限热区（任意位置允许）");
-        [self _obLinkFullScreenOpponentPansIfStale:win];   // QQ/TIM 全屏对手压制：无条件懒补链（治晚到全屏手势），与右缘对称
+        [self _obLinkFullScreenOpponentPansInWindow:win];   // QQ/TIM 全屏对手压制：枚举所有 window 的对手 pan（含 overlay window 上的 QQ 全屏返回手势）建立 requireToFail
     } else {
         // 仅 QQ/TIM 外保留窄热区（全局返回默认左 1/3 / 右 1/4 薄热区），避免误吞 App 内横向手势。
         if (rightSide) {
