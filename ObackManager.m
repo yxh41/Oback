@@ -1294,10 +1294,14 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
 // 关键修复：此前在 beginTransition(手势 Began) 就立即 popViewControllerAnimated:，
 // 一旦用户只是点按/纵向滑动即取消，交互转场易被卡在"进行中"态导致界面冻结。
 - (void)triggerTransitionInWindow:(UIWindow *)win withPan:(UIPanGestureRecognizer *)pan {
-    // nav 类 pan 直接读所属 nav（swizzle 已绑定），绕过 topMost 枚举——朋友圈等自定义容器不在标准链上
-    UINavigationController *nav = nil;
+    // 优先用 shouldBegin 阶段已解析并写入 pan 的 kObackNavKey（QQ/TIM 全屏 pan 等 window pan 也在此写入，
+    // 绕过 topMost 枚举——QQ 抽屉/聊天自定义容器下 topMost 只拿到 DrawerViewController 导致 nav=nil 不 pop）。
+    UINavigationController *nav = objc_getAssociatedObject(pan, kObackNavKey);
     UIViewController *top = nil;
-    if ([objc_getAssociatedObject(pan, kPanKindKey) isEqualToString:@"nav"]) {
+    if (nav) {
+        top = nav.topViewController;
+    } else if ([objc_getAssociatedObject(pan, kPanKindKey) isEqualToString:@"nav"]) {
+        // 兼容旧路径：nav 类 pan 直接读所属 nav
         nav = objc_getAssociatedObject(pan, kObackNavKey);
         top = nav.topViewController;
     }
