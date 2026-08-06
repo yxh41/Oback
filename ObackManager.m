@@ -1151,10 +1151,10 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
         OBLog(@"globalShouldBegin=NO (横向可滚 scrollView, 交还图片查看器/横向分页横滑)");
         return NO;
     }
-    // [2026-08-06 修复 QQ 侧边栏/抽屉关不掉] QQ 抽屉浮层打开时，用户横滑关抽屉被全屏 pan 抢走
-    // （其关闭手势被 requireToFail panG 压制），只能点按钮关。检测抽屉浮层→交还 QQ 原生关闭手势。
-    if ([self _qqDrawerOpenInWindow:win]) {
-        OBLog(@"globalShouldBegin=NO (QQ 侧边栏抽屉打开, 交还关闭手势)");
+    // [2026-08-06 修正] QQ 抽屉浮层打开时交还关闭手势，但必须双签名（全屏半透明遮罩 + 贴左半屏面板）
+    // 且触摸点在左 0.7 屏内，否则不拦截——避免聊天界面常驻的全屏半透明视图被误判为抽屉遮罩而让返回失效。
+    if ([self _qqDrawerOpenInWindow:win] && loc.x < w * 0.7) {
+        OBLog(@"globalShouldBegin=NO (QQ 侧边栏抽屉打开且触摸在左侧, 交还关闭手势)");
         return NO;
     }
     if (nav && nav.viewControllers.count > 1) {
@@ -2184,26 +2184,29 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     return (sv.contentSize.width > sv.bounds.size.width * 1.2);
 }
 
-// 检测 QQ 左侧抽屉/侧边栏是否处于打开（浮层遮罩 + 左滑半屏面板）。打开时全屏 pan 不接管返回，
-// 让抽屉自身关闭手势生效（否则用户横滑关抽屉被我们的返回抢走，只能点按钮关）。
+// 检测 QQ 左侧抽屉/侧边栏是否处于打开。打开时全屏 pan 不接管返回，让抽屉自身关闭手势生效
+// （否则用户横滑关抽屉被我们的返回抢走，只能点按钮关）。
+// [2026-08-06 修正] 必须用「全屏半透明遮罩」+「贴左半屏面板」双签名，否则 QQ 聊天界面常驻的
+// 全屏半透明视图（背景/输入区遮罩）会被单遮罩条件误判为抽屉→返回被禁→QQ 原生瞬返。
 - (BOOL)_qqDrawerOpenInWindow:(UIWindow *)win {
     if (!win) return NO;
     CGFloat w = win.bounds.size.width, h = win.bounds.size.height;
     if (w <= 0 || h <= 0) return NO;
-    return [self _scanDrawerMask:win width:w height:h];
+    BOOL mask = NO, panel = NO;
+    [self _scanDrawer:win width:w height:h mask:&mask panel:&panel];
+    return (mask && panel);
 }
-- (BOOL)_scanDrawerMask:(UIView *)v width:(CGFloat)w height:(CGFloat)h {
+- (void)_scanDrawer:(UIView *)v width:(CGFloat)w height:(CGFloat)h mask:(BOOL *)mask panel:(BOOL *)panel {
     for (UIView *sub in v.subviews) {
         CGRect f = sub.frame;
-        // 全屏半透明遮罩（抽屉关闭层）：捕获点击/滑动关闭，alpha<1 且覆盖全屏
+        // 全屏半透明遮罩（抽屉关闭层）：alpha<1 且覆盖全屏
         if (sub.userInteractionEnabled && sub.alpha < 0.98 &&
-            f.size.width >= w * 0.95 && f.size.height >= h * 0.95) return YES;
-        // 左滑半屏面板：贴左、宽度明显小于屏宽（QQ 抽屉菜单约 0.7 屏宽）
+            f.size.width >= w * 0.95 && f.size.height >= h * 0.95) *mask = YES;
+        // 贴左半屏面板（QQ 抽屉菜单约 0.7 屏宽，排除全屏主界面 w*0.98）
         if (sub.userInteractionEnabled && f.origin.x <= 2 &&
-            f.size.width < w * 0.9 && f.size.width > 0) return YES;
-        if ([self _scanDrawerMask:sub width:w height:h]) return YES;
+            f.size.width < w * 0.98 && f.size.width > 0) *panel = YES;
+        [self _scanDrawer:sub width:w height:h mask:mask panel:panel];
     }
-    return NO;
 }
 
 @end
