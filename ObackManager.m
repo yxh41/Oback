@@ -1305,12 +1305,36 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
         // 让浮耳自身拖拽手势处理关闭；否则 Oback 接管并禁用其 pan 会导致总结滑不出（见 oback_debug(20).log）。
         Class ybCls = NSClassFromString(@"NTAISummaryFloatEar");
         if (ybCls) {
-            UIView *yb = [self _yuanbaoSummaryViewIn:win cls:ybCls];
-            if (yb) {
-                CGPoint p = [win convertPoint:loc toView:yb];
-                if (CGRectContainsPoint(yb.bounds, p)) {
-                    OBLog(@"globalShouldBegin=NO (触摸落在元宝AI总结浮层, 交还浮耳拖拽关闭)");
-                    return NO;
+            // [2026-08-06 修复 元宝检测漏窗] 浮耳常挂 overlay window，仅查 keyWindow 永远找不到 →
+            // return NO 从不触发、Oback 照常接管并挤掉浮耳拖拽 → 总结界面滑不出（见 oback_debug(21) 无"触摸落在元宝"）。
+            // 改为枚举所有可见 window，把触摸点直接转换到浮耳本地坐标做命中测试。
+            NSArray *ywins = nil;
+            @try {
+                if (@available(iOS 13.0, *)) {
+                    NSMutableArray *arr = [NSMutableArray array];
+                    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                        if ([scene isKindOfClass:[UIWindowScene class]])
+                            [arr addObjectsFromArray:((UIWindowScene *)scene).windows];
+                    }
+                    ywins = arr;
+                }
+                if (!ywins || ywins.count == 0) {
+                    #pragma clang diagnostic push
+                    #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                    ywins = [[UIApplication sharedApplication] windows];
+                    #pragma clang diagnostic pop
+                }
+            } @catch (NSException *e) { ywins = nil; }
+            if (!ywins || ywins.count == 0) ywins = @[win];
+            for (UIWindow *yw in ywins) {
+                if (!yw) continue;
+                UIView *yb = [self _yuanbaoSummaryViewIn:yw cls:ybCls];
+                if (yb) {
+                    CGPoint p = [yb convertPoint:loc fromView:win];
+                    if (CGRectContainsPoint(yb.bounds, p)) {
+                        OBLog(@"globalShouldBegin=NO (触摸落在元宝AI总结浮层, 交还浮耳拖拽关闭)");
+                        return NO;
+                    }
                 }
             }
         }
@@ -1915,7 +1939,15 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 
     ObackParams *p = [ObackPreferences params];
     // 提交判定：① 实际/投影位移过阈值(含惯性)；② 纯高速甩动(即便几乎没拖动)
-    BOOL commit = (effective > p.commitRatio) || (vel > p.commitVelocity);
+    // [2026-08-06 修复 QQ/TIM 轻滑即返] QQ/TIM 全屏任意位置接管，commitVelocity=400 太低 → 轻快划即返回。
+    // 仅对 navPopUseObackAnimator(QQ/TIM 自定义转场)路径收紧门槛，不动 modal dismiss / 普通 App nav pop 手感。
+    CGFloat commitRatio = p.commitRatio;
+    CGFloat commitVelocity = p.commitVelocity;
+    if (self.navPopUseObackAnimator) {
+        commitRatio = MAX(commitRatio, 0.35);
+        commitVelocity = MAX(commitVelocity, 650.0);
+    }
+    BOOL commit = (effective > commitRatio) || (vel > commitVelocity);
     OBLog(@"endTransition (percent=%.2f vel=%.0f projected=%.2f commit=%d triggered=%d)",
           _currentPercent, vel, projected, commit, _transitionTriggered);
     if (_indicator) [self dismissIndicatorCommitted:commit params:p window:win];
