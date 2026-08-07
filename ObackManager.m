@@ -895,9 +895,13 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
 - (void)_suppressQQNativePopForNav:(UINavigationController *)nav {
     if (![self _navPopShouldUseObackAnimator:nav]) return;
     if (!nav || nav.viewControllers.count <= 1) return;
-    NSMutableSet *suppressed = objc_getAssociatedObject(self, kSuppressedQQPansKey);
+    NSHashTable *suppressed = objc_getAssociatedObject(self, kSuppressedQQPansKey);
     if (!suppressed) {
-        suppressed = [NSMutableSet set];
+        // [2026-08-07 修复 悬垂指针崩溃] 原 NSMutableSet 装 NSValue(nonretainedObjectValue:)，
+        // pan 释放后 nonretainedObjectValue 不归零，0.12s 后 dispatch_after 回调里 g.enabled
+        // 向野指针发消息 → EXC_BAD_ACCESS(QQ/TIM 专属)。改用弱引用表：pan 一 dealloc 条目自动
+        // 抹除，恢复循环再也见不到死对象。MRC 下由 NSHashTable 托管弱引用，不引入新泄漏。
+        suppressed = [NSHashTable weakObjectsHashTable];
         objc_setAssociatedObject(self, kSuppressedQQPansKey, suppressed, OBJC_ASSOCIATION_RETAIN);
     }
     Class scrollPanCls = NSClassFromString(@"UIScrollViewPanGestureRecognizer");
@@ -936,7 +940,7 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
             if (!isQQPop && !onNav) return;
             if (!g.enabled) return;
             g.enabled = NO;
-            [suppressed addObject:[NSValue valueWithNonretainedObject:g]];
+            [suppressed addObject:g];
             OBLog(@"[QQ 原生 pop 压制] 禁用 %@ (view=%@)", cls, NSStringFromClass([g.view class]));
         }];
     }
@@ -947,7 +951,7 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
     UIGestureRecognizer *sysPop = nav.interactivePopGestureRecognizer;
     if (sysPop && [sysPop isKindOfClass:[UIPanGestureRecognizer class]] && sysPop.enabled) {
         sysPop.enabled = NO;
-        [suppressed addObject:[NSValue valueWithNonretainedObject:sysPop]];
+        [suppressed addObject:sysPop];
         OBLog(@"[QQ 原生 pop 压制] 禁用 %@ (view=%@)", NSStringFromClass([sysPop class]), NSStringFromClass([sysPop.view class]));
     }
     // 诊断：列出所有「非 Oback 非 scroll」pan 候选（类名+view），便于万一未命中时精准定位 QQ 原生 pan 真实身份
@@ -966,11 +970,11 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
 }
 
 - (void)_restoreQQNativePop {
-    NSMutableSet *suppressed = objc_getAssociatedObject(self, kSuppressedQQPansKey);
+    NSHashTable *suppressed = objc_getAssociatedObject(self, kSuppressedQQPansKey);
     if (!suppressed || suppressed.count == 0) return;
     NSUInteger n = suppressed.count;
-    for (NSValue *v in suppressed) {
-        UIPanGestureRecognizer *g = [v nonretainedObjectValue];
+    for (UIPanGestureRecognizer *g in suppressed) {
+        // 弱引用表已自动剔除 dealloc 的 pan；此处 g 必为存活对象，安全启用
         if (g) g.enabled = YES;
     }
     [suppressed removeAllObjects];
