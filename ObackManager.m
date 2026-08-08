@@ -1857,6 +1857,18 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
             UIGestureRecognizer *global = gIsGlobal ? g : other;
             UIGestureRecognizer *theOther = (global == g) ? other : g;
             if (theOther.delegate != self && scrollPanClsSim && [theOther isKindOfClass:scrollPanClsSim]) return YES;
+            // [临时诊断 3740854+] 打印全局 pan 与「选择类」对手是否进入 simultaneous 仲裁及本方法返回值(ret=NO)。
+            {
+                NSString *oName = NSStringFromClass([theOther class]);
+                BOOL diagSel = [oName containsString:@"DragHandle"] || [oName containsString:@"Select"] ||
+                              [oName containsString:@"Flick"] || [oName containsString:@"Handle"] ||
+                              (theOther.view && ([theOther.view isKindOfClass:[UITextView class]] ||
+                                                 [theOther.view isKindOfClass:[UITextField class]]));
+                if (diagSel) {
+                    OBLog(@"[diag-simul] shouldRecognizeSimultaneouslyWith: global=%@ other=%@ view=%@ ret=NO",
+                          NSStringFromClass([global class]), oName, NSStringFromClass([theOther.view class]));
+                }
+            }
             // [2026-08-09→修复 文本选择手柄] 严禁对文本选择/光标/元宝/消息左滑返回 simultaneous YES。
             // 原逻辑(2026-08-09)对它们 return YES(同时识别)→ 在 UIKit 仲裁中 simultaneous 优先级
             // 高于 shouldBeRequiredToFailBy 的失败依赖 → 失败依赖被绕过 → 全屏 pan 仍 begin → 与手柄
@@ -1902,6 +1914,20 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         BOOL gIsGlobal = (g.delegate == self && [g.view isKindOfClass:[UIWindow class]] &&
                           ![g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]);
         if (gIsGlobal) {
+            // [临时诊断 3740854+] 打印与全局 pan 竞争的「选择类」对手，确认 _UIDragHandleGestureRecognizer
+            // 是否进入仲裁、是否被 _isQQYieldPan 命中。仅对手柄/选择类手势打，避免刷屏。
+            {
+                NSString *oName = NSStringFromClass([other class]);
+                BOOL diagSel = [oName containsString:@"DragHandle"] || [oName containsString:@"Select"] ||
+                              [oName containsString:@"Flick"] || [oName containsString:@"Handle"] ||
+                              (other.view && ([other.view isKindOfClass:[UITextView class]] ||
+                                              [other.view isKindOfClass:[UITextField class]]));
+                if (diagSel) {
+                    OBLog(@"[diag-yield] shouldBeRequiredToFailBy: g=panG other=%@ view=%@ isQQYieldPan=%d",
+                          oName, NSStringFromClass([other.view class]),
+                          [self _isQQYieldPan:(UIPanGestureRecognizer *)other]);
+                }
+            }
             // [2026-08-09→修复 文本选择手柄] 层级拆分：先处理「必须无条件让路」的精确局部交互，
             // 再处理「返回热区内优先返回」的宽区交互。关键修复见下方注释。
             // [2026-08-09→修复] 多选范围拖拽(multiselect)覆盖整个聊天区含返回热区，Oback 必须赢它，
