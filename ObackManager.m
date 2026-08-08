@@ -71,7 +71,9 @@ void *kPanKey = &kPanKey;                  // 暴露给 Tweak.xm：window 上挂
 static void *kPanKindKey = &kPanKindKey;    // 标记 pan 种类：@"nav"(挂在 nav.view 驱动 nav pop) / @"modal"(挂在 window 驱动 modal dismiss)
 static void *kNavPansKey = &kNavPansKey;    // 挂在某个 UINavigationController 上的 Oback 边缘 pan（NSArray），用于幂等去重
 static void *kObackNavKey = &kObackNavKey;   // 把 pan 所属的 UINavigationController 绑到 pan 上（swizzle 时写入），gesture 判定/驱动 pop 时直接读，绕过容器枚举
-static void *kYieldActiveKey = &kYieldActiveKey;  // [2026-08-09 回归修复] 仅当蓝色选择手柄手势(_UIDragHandleGestureRecognizer)真实处于拖拽态(Began/Changed)时由 handleGlobalPan 置 YES，令其短路(不驱动返回、交还 QQ 原生)。注：判定基于手势真实 state 而非类名——手柄类名常驻于文本视图，按类名置位会误杀全局返回。
+// [2026-08-09] kYieldActiveKey 机制已移除——在 shouldRecognizeSimultaneouslyWith 按类名置位误杀全局返回(手柄类常驻文本视图)，
+// 改按 state 置位有时序问题(panG Began 早于手柄 Began)。文本选择让路改由 shouldBeRequiredToFailBy 动态仲裁。保留声明不删避免其他引用编译错误。
+static void *kYieldActiveKey = &kYieldActiveKey __attribute__((unused));
 static void *kDiagLastLogKey = &kDiagLastLogKey;  // 双返回诊断：同一 window 日志节流（每 2s 最多打一次手势清单）
 static void *kGlobalPanKey = &kGlobalPanKey;        // 全屏 pan 引用（绑到 window，gestureRecognizerShouldBegin 识别用）
 static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指移动的距离 (pt)
@@ -1363,8 +1365,7 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
 }
 
 - (BOOL)_globalPanShouldBegin:(UIPanGestureRecognizer *)pan {
-    // [2026-08-09] 新一轮识别开始，先清掉上一轮的「选择手势同时识别」标志，避免残留导致返回被误短路
-    objc_setAssociatedObject(self, kYieldActiveKey, @(NO), OBJC_ASSOCIATION_RETAIN);
+    // [2026-08-09] kYieldActiveKey 机制已移除（多次引发回归），不再需要每轮复位
     if (self.interacting) { OBLog(@"globalShouldBegin=NO (已在交互中)"); return NO; }
     [self _restoreQQNativePop];   // 清扫上一轮可能残留的禁用（保险；正常路径已在 End/Cancel 恢复，空集合时无日志）
     if (![ObackPreferences isAllowed]) return NO;
@@ -1382,15 +1383,11 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
         // 否则中间/右侧滑不在左热区→Oback 不 begin→QQ 原生全屏手势抢接管→瞬返。
         OBLog(@"globalShouldBegin: QQ/TIM 全屏 pan 不限热区（任意位置允许）");
         [self _obLinkFullScreenOpponentPansInWindow:win];   // QQ/TIM 全屏对手压制：枚举所有 window 的对手 pan（含 overlay window 上的 QQ 全屏返回手势）建立 requireToFail
-        // [2026-08-08 修复 文本选择蓝色手柄拖不动] Oback 全屏 pan 在 QQ/TIM 内任意触摸都 begin，即使
-        // shouldBeRequiredToFailBy 让路，与文本选择蓝色手柄拖拽手势抢识别仍导致手柄拖不动。治本：检测到
-        // 当前有「活动文本选择」(蓝手柄/放大镜视图存在 或 文本视图有非空选中范围)时直接不让 Oback 全屏
-        // pan begin——彻底不进入识别/仲裁，把选择拖拽手势让出来。选择态是瞬态(点别处即消失)，不会长期禁用
-        // 全局返回；非选择态下元宝浮耳拖拽不受影响。
-        if ([self _activeTextSelectionInWindow:win]) {
-            OBLog(@"globalShouldBegin=NO (文本选择/光标激活中, 交还选择拖拽)");
-            return NO;
-        }
+        // [2026-08-09 回归修复] 移除 _activeTextSelectionInWindow: 闸门——该检测过于宽泛(匹配 _UIDragHandleGestureRecognizer
+        // 类存在 或类名含"Handle"的视图)，手柄手势类可能常驻于文本视图(未选中时 state=Possible/Failed)，
+        // 导致 _activeTextSelectionInWindow: 永远返回 YES → shouldBegin 永远 return NO → 全局返回彻底失效。
+        // 文本选择/手柄拖拽改由 shouldBeRequiredToFailBy + shouldRecognizeSimultaneouslyWith 系统级仲裁处理：
+        // 返回热区(40pt)内 Oback 优先(保返回)；热区外让路(手柄/光标/文本/元宝/消息左滑独占拖拽)。
         // [2026-08-06 修复 元宝AI总结浮层滑不出] 触摸落在元宝总结浮耳(NTAISummaryFloatEar)上时交还，
         // 让浮耳自身拖拽手势处理关闭；否则 Oback 接管并禁用其 pan 会导致总结滑不出（见 oback_debug(20).log）。
         Class ybCls = NSClassFromString(@"NTAISummaryFloatEar");
@@ -1535,30 +1532,10 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
 // 向右且横向占优 → 确认接管 nav pop（交给已验证的 beginTransition/updateTransition/endTransition）；
 // 向左/纵向 → 取消交还 App（防误吞滚动）。单一手势源，与左右缘 edge pan 完全隔离，杜绝双返回。
 - (void)handleGlobalPan:(UIPanGestureRecognizer *)pan {
-    // [2026-08-09 回归修复] 是否让路于「蓝色选择手柄拖拽」：基于手柄手势真实 state(Began/Changed) 判定，
-    // 而非仅凭类名——手柄手势类常驻于文本视图(未拖拽时 state=Possible/Failed)，若按类名让路会误杀全局返回
-    // (聊天消息即文本视图，任意滑返回都会被误判成"在拖手柄")。仅当手柄真在拖拽时才令 Oback 让路：
-    // 不驱动返回转场，并恢复 globalShouldBegin 已压制的 QQ 原生 pop，把拖拽交还 QQ 原生处理选择/光标。
-    if ([self _navPopShouldUseObackAnimator:nil] && [self _activeHandleDragInWindow:[self _windowForPan:pan]]) {
-        objc_setAssociatedObject(self, kYieldActiveKey, @(YES), OBJC_ASSOCIATION_RETAIN);
-    }
-    if ([objc_getAssociatedObject(self, kYieldActiveKey) boolValue]) {
-        UIGestureRecognizerState st = pan.state;
-        if (st == UIGestureRecognizerStateEnded || st == UIGestureRecognizerStateCancelled ||
-            st == UIGestureRecognizerStateFailed) {
-            objc_setAssociatedObject(self, kYieldActiveKey, @(NO), OBJC_ASSOCIATION_RETAIN);
-            // 让路结束：清扫本轮交互状态(镜像正常 End 收尾)，避免 interacting 残留挡住后续手势
-            self.interacting = NO;
-            _globalDriven = NO;
-            [self dismissIndicatorSafety];
-            if (objc_getAssociatedObject(pan, kGlobalPanKey)) {
-                objc_setAssociatedObject(pan, kObackNavKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            }
-        }
-        // 让路：交还 QQ 原生处理选择/光标，恢复(若已)被压制的 QQ 原生 pop，避免其一直禁用
-        if ([self _navPopShouldUseObackAnimator:nil]) [self _restoreQQNativePopDeferred];
-        return;
-    }
+    // [2026-08-09 回归修复] 移除 kYieldActiveKey 短路机制——该机制在 shouldRecognizeSimultaneouslyWith 中
+    // 按类名置位(手柄类常驻文本视图→误杀全局返回)，后改为按 state 置位(时序问题：panG Began 早于手柄 Began)，
+    // 均引发回归。文本选择/手柄拖拽让路改由 shouldBeRequiredToFailBy 动态仲裁(返回热区内 Oback 优先、
+    // 热区外让路)，handleGlobalPan 不再做额外短路，照常驱动返回转场。
     switch (pan.state) {
         case UIGestureRecognizerStateBegan: {
             _globalStart = [pan locationInView:[self _windowForPan:pan]];
