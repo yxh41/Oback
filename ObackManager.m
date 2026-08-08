@@ -1857,24 +1857,14 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
             UIGestureRecognizer *global = gIsGlobal ? g : other;
             UIGestureRecognizer *theOther = (global == g) ? other : g;
             if (theOther.delegate != self && scrollPanClsSim && [theOther isKindOfClass:scrollPanClsSim]) return YES;
-            // [2026-08-09 回归修复] 允许文本选择/光标/元宝/消息左滑与全屏 pan 同时识别(互不取消)。
-            // 注意：不再在此处按"对手类名是手柄"无条件置 kYieldActiveKey —— 手柄手势类常驻于文本视图
-            // (未拖拽时 state=Possible/Failed)，按类名让路会误杀全局返回(聊天消息即文本视图)。
-            // 是否让路改由 handleGlobalPan 基于手柄手势真实 state(Began/Changed) 动态判定。
-            if (theOther.delegate != self) {
-                Class dragHandleCls = NSClassFromString(@"_UIDragHandleGestureRecognizer");
-                BOOL isHandle = (dragHandleCls && [theOther isKindOfClass:dragHandleCls]);
-                if (!isHandle) {
-                    NSString *ocls = NSStringFromClass([theOther class]);
-                    if ([ocls containsString:@"DragHandle"]) isHandle = YES;
-                }
-                if (isHandle) {
-                    OBLog(@"simultaneously: 全屏 panG 与 %@ 同时识别(手柄；是否让路由 handleGlobalPan 按 state 判定)",
-                          NSStringFromClass([theOther class]));
-                    return YES;
-                }
-                if ([self _isQQYieldPan:(UIPanGestureRecognizer *)theOther]) return YES;
-            }
+            // [2026-08-09→修复 文本选择手柄] 严禁对文本选择/光标/元宝/消息左滑返回 simultaneous YES。
+            // 原逻辑(2026-08-09)对它们 return YES(同时识别)→ 在 UIKit 仲裁中 simultaneous 优先级
+            // 高于 shouldBeRequiredToFailBy 的失败依赖 → 失败依赖被绕过 → 全屏 pan 仍 begin → 与手柄
+            // 抢 touch → 手柄拖不动。现改由 shouldBeRequiredToFailBy(本文件上方)建立「pan 必须失败于
+            // 手柄/光标」的失败依赖：按手柄即手柄独占、按边缘即 pan 返回，互不干扰。故此处对它们
+            // 一律 return NO(走下方默认 + 上方失败依赖)，不再 simultaneous。
+            // 仅 UIScrollView 的纵向滚动保留 simultaneous(与 2026-08-06 纵滚修复一致)，其余局部手势
+            // 均交由失败依赖仲裁。
         }
     }
     if (other.delegate == self) return NO;   // 自身另一个 pan(左/右/modal): 不与之同时识别, 更不记录为对手(否则 beginTransition 会误取消自身 → 右缘被取消 abort)
@@ -1912,15 +1902,43 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         BOOL gIsGlobal = (g.delegate == self && [g.view isKindOfClass:[UIWindow class]] &&
                           ![g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]);
         if (gIsGlobal) {
-            // [2026-08-09] 多选范围拖拽(multiselect)覆盖整个聊天区含返回热区，Oback 必须赢它，
+            // [2026-08-09→修复 文本选择手柄] 层级拆分：先处理「必须无条件让路」的精确局部交互，
+            // 再处理「返回热区内优先返回」的宽区交互。关键修复见下方注释。
+            // [2026-08-09→修复] 多选范围拖拽(multiselect)覆盖整个聊天区含返回热区，Oback 必须赢它，
             // 不让路(否则与下方强制失败分支互锁→返回从任意位置失效)。让路仅限局部交互手势。
             if ([self _isQQMultiselectPan:(UIPanGestureRecognizer *)other]) {
                 OBLog(@"shouldBeRequiredToFailBy: 全屏 panG 不让路于 multiselect(保返回从任意位置), 对手=%@", NSStringFromClass([other class]));
                 return NO;
             }
+            // [2026-08-09→修复 核心] 文本选择蓝色手柄(_UIDragHandleGestureRecognizer)、光标/loupe
+            // (_UIPanOrFlickGestureRecognizer)、以及文本视图(UITextView/UITextField)上的选择手势：
+            // **无条件让路**，不受返回热区(40pt)限制。原因：左对齐文本的蓝色选择手柄常落在左缘 40pt
+            // 返回热区内(见 oback_debug(26) 根因)，若按热区护栏让路→手柄拖不动。选字/移光标是
+            // 比边缘返回更精确的局部交互，即便在屏幕边缘也应优先手柄。对应同时识别分支已在
+            // shouldRecognizeSimultaneouslyWith 移除(return NO)→ 失败依赖(本方法 YES)生效→
+            // 手柄独占拖拽，Oback pan 不 begin。
+            Class dragHandleCls = NSClassFromString(@"_UIDragHandleGestureRecognizer");
+            Class flickCls = NSClassFromString(@"_UIPanOrFlickGestureRecognizer");
+            BOOL isHandle = (dragHandleCls && [other isKindOfClass:dragHandleCls]);
+            if (!isHandle) {
+                NSString *ocls = NSStringFromClass([other class]);
+                if ([ocls containsString:@"DragHandle"]) isHandle = YES;
+            }
+            BOOL isFlick = (flickCls && [other isKindOfClass:flickCls]);
+            if (isHandle || isFlick) {
+                OBLog(@"shouldBeRequiredToFailBy: 全屏 panG 无条件让路于 %@ (文本选择手柄/光标, 保拖拽)",
+                      NSStringFromClass([other class]));
+                return YES;
+            }
+            if (other.view && ([other.view isKindOfClass:[UITextView class]] ||
+                               [other.view isKindOfClass:[UITextField class]])) {
+                OBLog(@"shouldBeRequiredToFailBy: 全屏 panG 无条件让路于文本视图手势 %@",
+                      NSStringFromClass([other class]));
+                return YES;
+            }
+            // 元宝浮耳拖拽 / 消息左滑：宽区交互，返回热区(对应侧边缘 40pt)内优先返回、不让路；
+            // 热区外(真正在气泡上左滑)才让路。与上面手柄/光标不同，这里边缘返回优先更合理。
             if ([self _isQQYieldPan:(UIPanGestureRecognizer *)other]) {
-                // [2026-08-08 优化 文本选择/全局返回共存] 触摸落在全局返回热区(对应侧边缘 trig pt 内)时优先返回、不让路；
-                // 其余位置(真正在文字上选字/移光标)才让路给文本选择/光标/元宝/消息左滑。
                 BOOL rightSide = [ObackPreferences isGlobalBackRightSide];
                 CGPoint p = [g locationInView:nil];
                 CGFloat W = [UIScreen mainScreen].bounds.size.width;
@@ -1930,7 +1948,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
                     OBLog(@"shouldBeRequiredToFailBy: 全屏 panG 在返回热区内不让路(保全局返回), 对手=%@", NSStringFromClass([other class]));
                     return NO;
                 }
-                OBLog(@"shouldBeRequiredToFailBy: 全屏 panG 让路于 %@ (文本选择/光标/元宝/消息左滑)",
+                OBLog(@"shouldBeRequiredToFailBy: 全屏 panG 让路于 %@ (元宝/消息左滑)",
                       NSStringFromClass([other class]));
                 return YES;
             }
