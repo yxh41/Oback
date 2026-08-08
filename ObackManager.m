@@ -71,7 +71,7 @@ void *kPanKey = &kPanKey;                  // 暴露给 Tweak.xm：window 上挂
 static void *kPanKindKey = &kPanKindKey;    // 标记 pan 种类：@"nav"(挂在 nav.view 驱动 nav pop) / @"modal"(挂在 window 驱动 modal dismiss)
 static void *kNavPansKey = &kNavPansKey;    // 挂在某个 UINavigationController 上的 Oback 边缘 pan（NSArray），用于幂等去重
 static void *kObackNavKey = &kObackNavKey;   // 把 pan 所属的 UINavigationController 绑到 pan 上（swizzle 时写入），gesture 判定/驱动 pop 时直接读，绕过容器枚举
-static void *kYieldActiveKey = &kYieldActiveKey;  // [2026-08-09] 文本选择/光标/元宝/消息左滑手势正与全屏 pan 同时识别时置 YES，令 handleGlobalPan 短路(不驱动返回/不压制)
+static void *kYieldActiveKey = &kYieldActiveKey;  // [2026-08-09 回归修复] 仅当蓝色选择手柄手势(_UIDragHandleGestureRecognizer)真实处于拖拽态(Began/Changed)时由 handleGlobalPan 置 YES，令其短路(不驱动返回、交还 QQ 原生)。注：判定基于手势真实 state 而非类名——手柄类名常驻于文本视图，按类名置位会误杀全局返回。
 static void *kDiagLastLogKey = &kDiagLastLogKey;  // 双返回诊断：同一 window 日志节流（每 2s 最多打一次手势清单）
 static void *kGlobalPanKey = &kGlobalPanKey;        // 全屏 pan 引用（绑到 window，gestureRecognizerShouldBegin 识别用）
 static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指移动的距离 (pt)
@@ -1535,25 +1535,28 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
 // 向右且横向占优 → 确认接管 nav pop（交给已验证的 beginTransition/updateTransition/endTransition）；
 // 向左/纵向 → 取消交还 App（防误吞滚动）。单一手势源，与左右缘 edge pan 完全隔离，杜绝双返回。
 - (void)handleGlobalPan:(UIPanGestureRecognizer *)pan {
-    // [2026-08-09 修复 文本选择/光标/元宝/消息左滑] 若本轮全屏 pan 正与「蓝色选择手柄拖拽」同时识别(kYieldActiveKey 置位)，
-    // 不驱动 Oback 返回转场，把拖拽完全让给手柄。但仍须压制 QQ 原生 nav pop(防 NTPushPopLib 抢 pop 致瞬返)——
-    // [2026-08-09 回归修复] 上一版在此直接 return 未压制，导致部分场景(标志误置)瞬返；现补回压制。
+    // [2026-08-09 回归修复] 是否让路于「蓝色选择手柄拖拽」：基于手柄手势真实 state(Began/Changed) 判定，
+    // 而非仅凭类名——手柄手势类常驻于文本视图(未拖拽时 state=Possible/Failed)，若按类名让路会误杀全局返回
+    // (聊天消息即文本视图，任意滑返回都会被误判成"在拖手柄")。仅当手柄真在拖拽时才令 Oback 让路：
+    // 不驱动返回转场，并恢复 globalShouldBegin 已压制的 QQ 原生 pop，把拖拽交还 QQ 原生处理选择/光标。
+    if ([self _navPopShouldUseObackAnimator:nil] && [self _activeHandleDragInWindow:[self _windowForPan:pan]]) {
+        objc_setAssociatedObject(self, kYieldActiveKey, @(YES), OBJC_ASSOCIATION_RETAIN);
+    }
     if ([objc_getAssociatedObject(self, kYieldActiveKey) boolValue]) {
         UIGestureRecognizerState st = pan.state;
         if (st == UIGestureRecognizerStateEnded || st == UIGestureRecognizerStateCancelled ||
             st == UIGestureRecognizerStateFailed) {
             objc_setAssociatedObject(self, kYieldActiveKey, @(NO), OBJC_ASSOCIATION_RETAIN);
-        }
-        if ([self _navPopShouldUseObackAnimator:nil]) {
-            UINavigationController *nav = objc_getAssociatedObject(pan, kObackNavKey);
-            if (!nav) {
-                UIWindow *win = [self _windowForPan:pan];
-                UIViewController *top = [self topMost:win.rootViewController];
-                nav = top.navigationController;
-                if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
+            // 让路结束：清扫本轮交互状态(镜像正常 End 收尾)，避免 interacting 残留挡住后续手势
+            self.interacting = NO;
+            _globalDriven = NO;
+            [self dismissIndicatorSafety];
+            if (objc_getAssociatedObject(pan, kGlobalPanKey)) {
+                objc_setAssociatedObject(pan, kObackNavKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             }
-            if (nav && nav.viewControllers.count > 1) [self _suppressQQNativePopForNav:nav];
         }
+        // 让路：交还 QQ 原生处理选择/光标，恢复(若已)被压制的 QQ 原生 pop，避免其一直禁用
+        if ([self _navPopShouldUseObackAnimator:nil]) [self _restoreQQNativePopDeferred];
         return;
     }
     switch (pan.state) {
@@ -1879,10 +1882,10 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
             UIGestureRecognizer *global = gIsGlobal ? g : other;
             UIGestureRecognizer *theOther = (global == g) ? other : g;
             if (theOther.delegate != self && scrollPanClsSim && [theOther isKindOfClass:scrollPanClsSim]) return YES;
-            // [2026-08-09 修复 文本选择/光标/元宝/消息左滑] 允许与全屏 pan 同时识别，把拖拽让给选择类手势。
-            // 仅当对手是「蓝色选择手柄拖拽」(_UIDragHandleGestureRecognizer)才置 kYieldActiveKey 令 handleGlobalPan
-            // 短路(不驱动返回)；其余 yield 手势(多选范围拖拽等覆盖全屏者)不置标志，否则从左缘返回时 multiselect
-            // 同时识别会误置标志致 Oback 短路、返回失效/瞬返回归。优先级由 shouldBeRequiredToFailBy 动态仲裁。
+            // [2026-08-09 回归修复] 允许文本选择/光标/元宝/消息左滑与全屏 pan 同时识别(互不取消)。
+            // 注意：不再在此处按"对手类名是手柄"无条件置 kYieldActiveKey —— 手柄手势类常驻于文本视图
+            // (未拖拽时 state=Possible/Failed)，按类名让路会误杀全局返回(聊天消息即文本视图)。
+            // 是否让路改由 handleGlobalPan 基于手柄手势真实 state(Began/Changed) 动态判定。
             if (theOther.delegate != self) {
                 Class dragHandleCls = NSClassFromString(@"_UIDragHandleGestureRecognizer");
                 BOOL isHandle = (dragHandleCls && [theOther isKindOfClass:dragHandleCls]);
@@ -1891,8 +1894,8 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
                     if ([ocls containsString:@"DragHandle"]) isHandle = YES;
                 }
                 if (isHandle) {
-                    objc_setAssociatedObject(self, kYieldActiveKey, @(YES), OBJC_ASSOCIATION_RETAIN);
-                    OBLog(@"simultaneously: 全屏 panG 与 %@ 同时识别(令 Oback 不驱动返回/不压制)", NSStringFromClass([theOther class]));
+                    OBLog(@"simultaneously: 全屏 panG 与 %@ 同时识别(手柄；是否让路由 handleGlobalPan 按 state 判定)",
+                          NSStringFromClass([theOther class]));
                     return YES;
                 }
                 if ([self _isQQYieldPan:(UIPanGestureRecognizer *)theOther]) return YES;
@@ -2749,6 +2752,50 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     } @catch (NSException *e) { wins = nil; }
     for (UIWindow *w in wins) {
         if (w && w != win && [self _activeTextSelectionInView:w]) return YES;
+    }
+    return NO;
+}
+
+// [2026-08-09 回归修复] 判定「蓝色选择手柄」是否正在被拖拽：仅当手柄手势(_UIDragHandleGestureRecognizer)
+// 真实处于 Began/Changed 才视为拖拽中。手柄手势类常驻于文本视图(未拖拽时为 Possible/Failed)，
+// 不能仅凭类名/视图存在判断——否则聊天里任意滑返回都会被误判为"在拖手柄"而让路、全局返回失效。
+// 与 _activeTextSelectionInWindow: 区分：后者判"是否有选择"(含静止选中态)，本方法判"是否正在拖拽手柄"。
+- (BOOL)_activeHandleDragInWindow:(UIWindow *)win {
+    if (!win) return NO;
+    Class dragHandleCls = NSClassFromString(@"_UIDragHandleGestureRecognizer");
+    if (!dragHandleCls) return NO;
+    __block BOOL found = NO;
+    __block void (^checkView)(UIView *);
+    checkView = ^(UIView *v) {
+        if (found || !v) return;
+        for (UIGestureRecognizer *gr in v.gestureRecognizers) {
+            if ([gr isKindOfClass:dragHandleCls]) {
+                UIGestureRecognizerState s = gr.state;
+                if (s == UIGestureRecognizerStateBegan || s == UIGestureRecognizerStateChanged) { found = YES; return; }
+            }
+        }
+        for (UIView *sub in v.subviews) checkView(sub);
+    };
+    checkView(win);
+    if (found) return YES;
+    // 补充 overlay window（QQ 选择/放大镜视图可能放在别的 window）
+    NSArray *wins = nil;
+    @try {
+        if (@available(iOS 13.0, *)) {
+            NSMutableArray *arr = [NSMutableArray array];
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]]) [arr addObjectsFromArray:((UIWindowScene *)scene).windows];
+            }
+            wins = arr;
+        } else {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            wins = [[UIApplication sharedApplication] windows];
+            #pragma clang diagnostic pop
+        }
+    } @catch (NSException *e) { wins = nil; }
+    for (UIWindow *w in wins) {
+        if (w && w != win) { checkView(w); if (found) return YES; }
     }
     return NO;
 }
