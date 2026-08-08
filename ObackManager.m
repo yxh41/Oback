@@ -2633,10 +2633,14 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     }
     if ([v isKindOfClass:[UITextView class]] || [v isKindOfClass:[UITextField class]]) {
         @try {
-            id range = [v selectedTextRange];
-            if (range) {
-                UITextRange *tr = (UITextRange *)range;
-                if (![tr isEmpty]) return YES;
+            // [2026-08-08 编译修复] v 静态类型为 UIView*，直接发 selectedTextRange 在 -Werror 下报错；
+            // 用 respondsToSelector + performSelector(返回 id) 绕开未知方法警告，行为与原逻辑一致。
+            if ([v respondsToSelector:@selector(selectedTextRange)]) {
+                id range = [v performSelector:@selector(selectedTextRange)];
+                if (range) {
+                    UITextRange *tr = (UITextRange *)range;
+                    if (![tr isEmpty]) return YES;
+                }
             }
         } @catch (NSException *e) {}
     }
