@@ -785,6 +785,18 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     return NO;
 }
 
+// [2026-08-08 修复 文本选择/光标] 识别 QQ 聊天里文本选择(_UIMultiSelectOneFingerPanGesture)、
+// 光标/loupe(_UIPanOrFlickGestureRecognizer) 及文本视图(UITextView/UITextField)上的 pan：
+// 这些手势被 Oback 一锅端压制会导致「选字后无法移动光标/复制」。返回 YES 时 Oback 应放行（不压制、让其独占）。
+- (BOOL)_isQQTextOrSelectionPan:(UIPanGestureRecognizer *)g {
+    Class multiSelCls = NSClassFromString(@"_UIMultiSelectOneFingerPanGesture");
+    Class flickCls = NSClassFromString(@"_UIPanOrFlickGestureRecognizer");
+    if ((multiSelCls && [g isKindOfClass:multiSelCls]) ||
+        (flickCls && [g isKindOfClass:flickCls])) return YES;
+    if (g.view && ([g.view isKindOfClass:[UITextView class]] || [g.view isKindOfClass:[UITextField class]])) return YES;
+    return NO;
+}
+
 - (void)_obLinkFullScreenOpponentPansInWindow:(UIWindow *)win {
     UIPanGestureRecognizer *globalPan = nil;
     for (UIGestureRecognizer *g in win.gestureRecognizers) {
@@ -836,6 +848,21 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
             // 配合 _suppressQQNativePopForNav: 已排除禁用浮耳，浮耳可正常工作。
             Class ybCls = NSClassFromString(@"NTAISummaryFloatEar");
             if (ybCls && g.view && [g.view isKindOfClass:ybCls]) {
+                @try { [globalPan requireGestureRecognizerToFail:g]; } @catch (NSException *e) {}
+                return;
+            }
+            // [2026-08-08 修复 文本选择/光标] 文本选择(_UIMultiSelectOneFingerPanGesture)、光标/loupe
+            // (_UIPanOrFlickGestureRecognizer) 及文本视图上的 pan：Oback 让步（失败于它们），不在压制里
+            // 禁用，否则聊天里选字/移动光标被吞（见 oback_debug(22).log 压制禁用上述手势）。
+            if ([self _isQQTextOrSelectionPan:g]) {
+                @try { [globalPan requireGestureRecognizerToFail:g]; } @catch (NSException *e) {}
+                return;
+            }
+            // [2026-08-08 修复 元宝总结左滑] 消息左滑手势(NTDiffableListKit.NTSwipeSpringAnimationContainerView)
+            // 用于触发引用/回复/元宝总结等；左滑永非全局返回（全局返回是右滑），Oback 一律让步（失败于它），
+            // 让其独占拖拽，解决「元宝总结滑不出」（见用户反馈）。
+            Class swipeCls = NSClassFromString(@"NTDiffableListKit.NTSwipeSpringAnimationContainerView");
+            if (swipeCls && g.view && [g.view isKindOfClass:swipeCls]) {
                 @try { [globalPan requireGestureRecognizerToFail:g]; } @catch (NSException *e) {}
                 return;
             }
@@ -932,6 +959,11 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
             if ([self _isQQQuotePan:g]) return;                   // 左滑引用/快速回复手势：禁用会破坏引用，放行
             Class ybCls = NSClassFromString(@"NTAISummaryFloatEar");
             if (ybCls && g.view && [g.view isKindOfClass:ybCls]) return;  // 元宝AI总结浮耳：禁用会破坏拖拽关闭，放行
+            // [2026-08-08 修复 文本选择/光标] 文本选择/光标/loupe 及文本视图 pan：放行，不压制（否则选字后无法移动光标）
+            if ([self _isQQTextOrSelectionPan:g]) return;
+            // [2026-08-08 修复 元宝总结左滑] 消息左滑手势容器：放行，不压制（让左滑触发引用/回复/元宝总结）
+            Class swipeCls = NSClassFromString(@"NTDiffableListKit.NTSwipeSpringAnimationContainerView");
+            if (swipeCls && g.view && [g.view isKindOfClass:swipeCls]) return;
             NSString *cls = NSStringFromClass([g class]);
             // 命中条件①：类名含 PushPop（QQ 原生 NTPushPopLib 系列手势，跨 window 也抓得到）
             BOOL isQQPop = [cls rangeOfString:@"PushPop" options:NSCaseInsensitiveSearch].location != NSNotFound;
@@ -1484,7 +1516,7 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
             BOOL qqMode = [self _navPopShouldUseObackAnimator:nil];   // QQ/TIM 全屏：放宽纵向抖动容忍，防误杀返回手势致瞬返
             // 左手侧(默认)：从左侧热区起滑、向右滑(dx>0)=返回；右手侧：从右侧薄热区起滑、向左滑(dx<0)=返回。
             // currentEdge 随之设左/右缘，转场 dir 自动镜像（见 updateTransition/endTransition 的 dir 取值）。
-            CGFloat backThresh = rightSide ? -6.0 : 6.0;
+            CGFloat backThresh = rightSide ? -12.0 : 12.0;
             BOOL movingBack  = rightSide ? (dx < backThresh) : (dx > backThresh);
             BOOL movingAway  = rightSide ? (dx > 6.0)      : (dx < -6.0);
             if (movingBack) {
