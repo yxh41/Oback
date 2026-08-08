@@ -862,10 +862,15 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
                 @try { [globalPan requireGestureRecognizerToFail:g]; } @catch (NSException *e) {}
                 return;
             }
-            // [2026-08-08 修复 文本选择/光标] 文本选择(_UIMultiSelectOneFingerPanGesture)、光标/loupe
-            // (_UIPanOrFlickGestureRecognizer) 及文本视图上的 pan：Oback 让步（失败于它们），不在压制里
-            // 禁用，否则聊天里选字/移动光标被吞（见 oback_debug(22).log 压制禁用上述手势）。
-            if ([self _isQQTextOrSelectionPan:g]) {
+            // [2026-08-08 修复 文本选择/光标] 光标/loupe(_UIPanOrFlickGestureRecognizer) 及文本视图上的 pan：
+            // Oback 让步（失败于它们），不在压制里禁用，否则聊天里选字/移动光标被吞。
+            // 注：消息列表的 _UIMultiSelectOneFingerPanGesture 不在此设静态 requireToFail——它铺满整个
+            // 聊天区(含左缘返回热区)，静态让路会在「从左缘起滑返回」时误让路给选择手势导致返回偶尔失效；
+            // 改由 gestureRecognizer:shouldBeRequiredToFailBy 动态仲裁(返回热区内不让路，保全局返回)。
+            Class flickCls = NSClassFromString(@"_UIPanOrFlickGestureRecognizer");
+            BOOL isLoupe = (flickCls && [g isKindOfClass:flickCls]);
+            BOOL isText = (g.view && ([g.view isKindOfClass:[UITextView class]] || [g.view isKindOfClass:[UITextField class]]));
+            if (isLoupe || isText) {
                 @try { [globalPan requireGestureRecognizerToFail:g]; } @catch (NSException *e) {}
                 return;
             }
@@ -1387,26 +1392,43 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
             BOOL hitEar = NO;
             NSMutableString *diag = nil;
             if ([ObackPreferences doubleReturnDiagEnabled]) diag = [NSMutableString string];
+            // [2026-08-08 修复 元宝检测坐标错位(三次)] 收拢态浮耳 frame 宽度=0 且贴右缘(x=screenW)，
+            // 上版用 [yb convertRect:bounds toView:nil] 做 CGRectContainsPoint 对零宽 rect 恒失败
+            // (oback_debug(23): ear frame=(390,210,0,36)，真实触摸 x≤389 永远落在外侧)。
+            // 改：以浮耳中心为锚点扩展「可握持热区」(右缘收拢态锚定 x=screenW 向左扩展)，
+            // 另加「右缘 100pt 内直接让路」兜底层——浮耳在右缘、全局返回在左缘互不冲突，
+            // 右缘交给 QQ 原生手势(浮耳拖拽/消息左滑)处理绝不影响返回。
+            CGFloat W = [UIScreen mainScreen].bounds.size.width;
+            CGFloat rightBandX = W - 100.0;
+            BOOL earExists = NO;
             for (UIWindow *yw in ywins) {
                 if (!yw) continue;
                 UIView *yb = [self _yuanbaoSummaryViewIn:yw cls:ybCls];
                 if (!yb) continue;
-                // 主：浮耳屏幕帧包含触摸点（最稳，跨 window/transform 均准）
+                earExists = YES;
                 CGRect earScreen = CGRectZero;
                 @try { earScreen = [yb convertRect:yb.bounds toView:nil]; } @catch (NSException *e) { earScreen = CGRectZero; }
-                if (CGRectContainsPoint(earScreen, sp)) { hitEar = YES; break; }
-                if (diag) [diag appendFormat:@" ear@%@ frame=(%.0f,%.0f,%.0f,%.0f) sp=(%.1f,%.1f);",
+                CGFloat cx = CGRectGetMidX(earScreen);
+                CGFloat cy = CGRectGetMidY(earScreen);
+                if (earScreen.size.width < 8.0) cx = W;            // 收拢态：锚定右缘
+                CGFloat halfW = 64.0, halfH = 120.0;              // 可握持热区(覆盖拇指够到的范围)
+                CGRect hit = CGRectMake(cx - halfW, cy - halfH, halfW*2, halfH*2);
+                if (CGRectContainsPoint(hit, sp)) { hitEar = YES; }
+                if (diag) [diag appendFormat:@" ear@%@ frame=(%.0f,%.0f,%.0f,%.0f) center=(%.0f,%.0f) sp=(%.1f,%.1f) rightBandX=%.0f;",
                                    NSStringFromClass([yw class]), earScreen.origin.x, earScreen.origin.y,
-                                   earScreen.size.width, earScreen.size.height, sp.x, sp.y];
+                                   earScreen.size.width, earScreen.size.height, cx, cy, sp.x, sp.y, rightBandX];
+                if (hitEar) break;
             }
+            // 兜底层：窗口存在浮耳且触摸落右缘 100pt 内，一律让路(覆盖浮耳被拖到非锚定纵向位置的情形)
+            if (!hitEar && earExists && !rightSide && sp.x > rightBandX) hitEar = YES;
             if (hitEar) {
                 OBLog(@"globalShouldBegin=NO (触摸落在元宝AI总结浮层, 交还浮耳拖拽关闭)");
                 return NO;
             }
             // [2026-08-08 诊断] 未命中时记录浮耳屏幕帧与触摸点，确认坐标换算是否已纠正
             if ([ObackPreferences doubleReturnDiagEnabled]) {
-                OBLog(@"[元宝诊断] loc=(%.1f,%.1f) sp屏幕=(%.1f,%.1f) 未命中;%@",
-                      loc.x, loc.y, sp.x, sp.y, diag ? diag : @"");
+                OBLog(@"[元宝诊断] loc=(%.1f,%.1f) sp屏幕=(%.1f,%.1f) 未命中(earExists=%@);%@",
+                      loc.x, loc.y, sp.x, sp.y, earExists ? @"YES" : @"NO", diag ? diag : @"");
             }
         }
     } else {
@@ -1844,6 +1866,19 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         BOOL gIsGlobal = (g.delegate == self && [g.view isKindOfClass:[UIWindow class]] &&
                           ![g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]);
         if (gIsGlobal && [self _isQQYieldPan:(UIPanGestureRecognizer *)other]) {
+            // [2026-08-08 优化 文本选择/全局返回共存] 消息列表的 _UIMultiSelectOneFingerPanGesture
+            // 铺满整个聊天区(含左缘返回热区)，此前无条件让路会在「从左缘起滑返回」时误让路给选择手势，
+            // 导致全局返回偶尔失效。改为：触摸落在全局返回热区(对应侧边缘 trig pt 内)时优先返回、不让路；
+            // 其余位置(真正在文字上选字/移光标)才让路给文本选择/光标/元宝/消息左滑。
+            BOOL rightSide = [ObackPreferences isGlobalBackRightSide];
+            CGPoint p = [g locationInView:nil];
+            CGFloat W = [UIScreen mainScreen].bounds.size.width;
+            CGFloat trig = 40.0;   // 全局返回边缘热区(与 triggerWidth 默认一致)
+            BOOL inBackZone = rightSide ? (p.x > W - trig) : (p.x < trig);
+            if (inBackZone) {
+                OBLog(@"shouldBeRequiredToFailBy: 全屏 panG 在返回热区内不让路(保全局返回), 对手=%@", NSStringFromClass([other class]));
+                return NO;
+            }
             OBLog(@"shouldBeRequiredToFailBy: 全屏 panG 让路于 %@ (文本选择/光标/元宝/消息左滑)",
                   NSStringFromClass([other class]));
             return YES;
