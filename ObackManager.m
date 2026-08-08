@@ -797,6 +797,17 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     return NO;
 }
 
+// [2026-08-08 修复 文本选择/光标/元宝总结左滑] 这些手势被 Oback 全屏 pan 抢识别会破坏对应交互；
+// 返回 YES 时让 panG 在 shouldBeRequiredToFailBy 中单向让路（不压制、不接管）。
+- (BOOL)_isQQYieldPan:(UIPanGestureRecognizer *)g {
+    if ([self _isQQTextOrSelectionPan:g]) return YES;            // 文本选择/光标/loupe/文本视图
+    Class ybCls = NSClassFromString(@"NTAISummaryFloatEar");
+    if (ybCls && g.view && [g.view isKindOfClass:ybCls]) return YES;          // 元宝浮耳拖拽
+    Class swipeCls = NSClassFromString(@"NTDiffableListKit.NTSwipeSpringAnimationContainerView");
+    if (swipeCls && g.view && [g.view isKindOfClass:swipeCls]) return YES;    // 消息左滑(引用/回复/元宝总结)
+    return NO;
+}
+
 - (void)_obLinkFullScreenOpponentPansInWindow:(UIWindow *)win {
     UIPanGestureRecognizer *globalPan = nil;
     for (UIGestureRecognizer *g in win.gestureRecognizers) {
@@ -1350,10 +1361,10 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
         // 让浮耳自身拖拽手势处理关闭；否则 Oback 接管并禁用其 pan 会导致总结滑不出（见 oback_debug(20).log）。
         Class ybCls = NSClassFromString(@"NTAISummaryFloatEar");
         if (ybCls) {
-            // [2026-08-07 修复 元宝检测坐标错位] 浮耳挂 overlay window，原 [yb convertPoint:loc fromView:win]
-            // 一步式跨 window 转换对 QQ 的 overlay window 算错（oback_debug(21) 无"触摸落在元宝"实锤）；
-            // 且 bounds 命中测试不处理 z 序/透明覆盖。改为经屏幕坐标两步桥接 + hitTest 命中浮耳，
-            // 跨任意 window 都准；bounds 命中作兜底。
+            // [2026-08-08 修复 元宝检测坐标错位(二次)] 上版用 hitTest + yb.bounds 由 window 本地坐标换算，
+            // 对 QQ overlay window 仍算错(oback_debug(22): 浮耳found=YES→未命中)。改用「浮耳自身屏幕帧」
+            // [yb convertRect:yb.bounds toView:nil] 比对屏幕触摸点 sp：convertRect:toView:nil 经完整视图层级
+            // 转绝对屏幕坐标，跨任意 window/transform 都准，且不受透明覆盖层拦截 hitTest 影响。
             CGPoint sp = [win convertPoint:loc toView:nil];   // nil=屏幕坐标系，跨 window 桥接基准
             NSArray *ywins = nil;
             @try {
@@ -1373,40 +1384,29 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
                 }
             } @catch (NSException *e) { ywins = nil; }
             if (!ywins || ywins.count == 0) ywins = @[win];
+            BOOL hitEar = NO;
+            NSMutableString *diag = nil;
+            if ([ObackPreferences doubleReturnDiagEnabled]) diag = [NSMutableString string];
             for (UIWindow *yw in ywins) {
                 if (!yw) continue;
-                CGPoint p = [yw convertPoint:sp fromView:nil];   // 屏幕→该 window 本地坐标
-                // 主：hitTest 命中浮耳（正确处理 overlay window 坐标空间 + z 序覆盖）
-                UIView *hit = nil;
-                @try { hit = [yw hitTest:p withEvent:nil]; } @catch (NSException *e) { hit = nil; }
-                UIView *v = hit;
-                while (v) {
-                    if ([v isKindOfClass:ybCls]) {
-                        OBLog(@"globalShouldBegin=NO (触摸落在元宝AI总结浮层, 交还浮耳拖拽关闭)");
-                        return NO;
-                    }
-                    v = v.superview;
-                }
-                // 兜底：直接枚举浮耳 view 做 bounds 命中（部分 overlay 不响应 hitTest 时）；
-                // 注意必须把 p 转到浮耳本地坐标再比对（yb.bounds 是本地坐标，p 是 window 坐标）
                 UIView *yb = [self _yuanbaoSummaryViewIn:yw cls:ybCls];
-                if (yb) {
-                    CGPoint lp = [yb convertPoint:p fromView:yw];
-                    if (CGRectContainsPoint(yb.bounds, lp)) {
-                        OBLog(@"globalShouldBegin=NO (触摸落在元宝AI总结浮层, 交还浮耳拖拽关闭)");
-                        return NO;
-                    }
-                }
+                if (!yb) continue;
+                // 主：浮耳屏幕帧包含触摸点（最稳，跨 window/transform 均准）
+                CGRect earScreen = CGRectZero;
+                @try { earScreen = [yb convertRect:yb.bounds toView:nil]; } @catch (NSException *e) { earScreen = CGRectZero; }
+                if (CGRectContainsPoint(earScreen, sp)) { hitEar = YES; break; }
+                if (diag) [diag appendFormat:@" ear@%@ frame=(%.0f,%.0f,%.0f,%.0f) sp=(%.1f,%.1f);",
+                                   NSStringFromClass([yw class]), earScreen.origin.x, earScreen.origin.y,
+                                   earScreen.size.width, earScreen.size.height, sp.x, sp.y];
             }
-            // [2026-08-07 诊断] 若上面未 return NO，说明本次触摸未命中浮耳——记录是否找到浮耳及关键坐标，
-            // 便于确认是「没找到浮耳」还是「坐标算错」(定位用，稳定后可删)
+            if (hitEar) {
+                OBLog(@"globalShouldBegin=NO (触摸落在元宝AI总结浮层, 交还浮耳拖拽关闭)");
+                return NO;
+            }
+            // [2026-08-08 诊断] 未命中时记录浮耳屏幕帧与触摸点，确认坐标换算是否已纠正
             if ([ObackPreferences doubleReturnDiagEnabled]) {
-                BOOL foundAny = NO;
-                for (UIWindow *yw in ywins) {
-                    if (!yw) continue;
-                    if ([self _yuanbaoSummaryViewIn:yw cls:ybCls]) { foundAny = YES; break; }
-                }
-                OBLog(@"[元宝诊断] loc=(%.1f,%.1f) 浮耳found=%@ → 未命中(交还 Oback 接管)", loc.x, loc.y, foundAny ? @"YES" : @"NO");
+                OBLog(@"[元宝诊断] loc=(%.1f,%.1f) sp屏幕=(%.1f,%.1f) 未命中;%@",
+                      loc.x, loc.y, sp.x, sp.y, diag ? diag : @"");
             }
         }
     } else {
@@ -1516,15 +1516,19 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
             BOOL qqMode = [self _navPopShouldUseObackAnimator:nil];   // QQ/TIM 全屏：放宽纵向抖动容忍，防误杀返回手势致瞬返
             // 左手侧(默认)：从左侧热区起滑、向右滑(dx>0)=返回；右手侧：从右侧薄热区起滑、向左滑(dx<0)=返回。
             // currentEdge 随之设左/右缘，转场 dir 自动镜像（见 updateTransition/endTransition 的 dir 取值）。
-            CGFloat backThresh = rightSide ? -12.0 : 12.0;
+            CGFloat backThresh = rightSide ? -30.0 : 30.0;   // [2026-08-08] 触发距离加长：防单手快滑聊天记录时误触返回
             BOOL movingBack  = rightSide ? (dx < backThresh) : (dx > backThresh);
             BOOL movingAway  = rightSide ? (dx > 6.0)      : (dx < -6.0);
             if (movingBack) {
                 if (qqMode) {
+                    // [2026-08-08] 仅当横向位移明显占优(水平>垂直)才接管：纯纵滑(看聊天记录)不会误触返回；
+                    // 真实右滑返回本就横向占优，不影响跟手，也不回退瞬返修复(快滑在 dx>阈值且横向占优时即接管)。
+                    if (fabs(dx) > fabs(dy)) {
                     // [2026-08-06 修复快滑瞬闪·仅 QQ/TIM] 一旦向返回方向移动(dx 超阈值)即接管，不等 velocity 横向占优——
                     // QQ 原生 NTPushPopLib 会抢 pop，快滑在确认占优前就松手/结束 → Oback 未接管 → QQ 原生抢 pop → 瞬闪。
                     // 纵滑因 dx 小不进此分支，由下方明显纵向 cancel 交还（scroll 经 simultaneous 继续滚，不卡死）。
                     _globalDriven = YES;
+                    }
                 } else {
                     // 其他 App：保持原 velocity 横向占优判定（1.69x），零回归
                     CGFloat vx = v.x;
@@ -1832,6 +1836,19 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
 shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     if (g == other || other == nil) return NO;
     if (other.delegate == self) return NO;   // 自身另一个 pan：不互相要求失败(防死锁/互消)
+    // [2026-08-08 修复 文本选择/光标/元宝总结左滑] 全屏 panG 在 QQ/TIM 内任意触摸都 begin，
+    // shouldBegin 阶段才设 requireToFail 对已开始的本轮识别太晚兜不住、文本选择/元宝拖拽被吞。
+    // 改用系统级仲裁：对手是文本选择/光标loupe/元宝浮耳拖拽/消息左滑时，panG 必须失败于它们 →
+    // 这些手势独占拖拽，Oback 让路（单向无死锁：对手 delegate 非 self，不会反向要求 panG 失败）。
+    if ([self _navPopShouldUseObackAnimator:nil]) {
+        BOOL gIsGlobal = (g.delegate == self && [g.view isKindOfClass:[UIWindow class]] &&
+                          ![g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]);
+        if (gIsGlobal && [self _isQQYieldPan:(UIPanGestureRecognizer *)other]) {
+            OBLog(@"shouldBeRequiredToFailBy: 全屏 panG 让路于 %@ (文本选择/光标/元宝/消息左滑)",
+                  NSStringFromClass([other class]));
+            return YES;
+        }
+    }
     if (![g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return NO;
     UIScreenEdgePanGestureRecognizer *mg = (UIScreenEdgePanGestureRecognizer *)g;
     if (!(mg.edges & UIRectEdgeLeft)) return NO;            // 仅左缘接管型需要
