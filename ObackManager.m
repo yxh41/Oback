@@ -71,6 +71,7 @@ void *kPanKey = &kPanKey;                  // 暴露给 Tweak.xm：window 上挂
 static void *kPanKindKey = &kPanKindKey;    // 标记 pan 种类：@"nav"(挂在 nav.view 驱动 nav pop) / @"modal"(挂在 window 驱动 modal dismiss)
 static void *kNavPansKey = &kNavPansKey;    // 挂在某个 UINavigationController 上的 Oback 边缘 pan（NSArray），用于幂等去重
 static void *kObackNavKey = &kObackNavKey;   // 把 pan 所属的 UINavigationController 绑到 pan 上（swizzle 时写入），gesture 判定/驱动 pop 时直接读，绕过容器枚举
+static void *kYieldActiveKey = &kYieldActiveKey;  // [2026-08-09] 文本选择/光标/元宝/消息左滑手势正与全屏 pan 同时识别时置 YES，令 handleGlobalPan 短路(不驱动返回/不压制)
 static void *kDiagLastLogKey = &kDiagLastLogKey;  // 双返回诊断：同一 window 日志节流（每 2s 最多打一次手势清单）
 static void *kGlobalPanKey = &kGlobalPanKey;        // 全屏 pan 引用（绑到 window，gestureRecognizerShouldBegin 识别用）
 static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指移动的距离 (pt)
@@ -1349,6 +1350,8 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
 }
 
 - (BOOL)_globalPanShouldBegin:(UIPanGestureRecognizer *)pan {
+    // [2026-08-09] 新一轮识别开始，先清掉上一轮的「选择手势同时识别」标志，避免残留导致返回被误短路
+    objc_setAssociatedObject(self, kYieldActiveKey, @(NO), OBJC_ASSOCIATION_RETAIN);
     if (self.interacting) { OBLog(@"globalShouldBegin=NO (已在交互中)"); return NO; }
     [self _restoreQQNativePop];   // 清扫上一轮可能残留的禁用（保险；正常路径已在 End/Cancel 恢复，空集合时无日志）
     if (![ObackPreferences isAllowed]) return NO;
@@ -1519,6 +1522,17 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
 // 向右且横向占优 → 确认接管 nav pop（交给已验证的 beginTransition/updateTransition/endTransition）；
 // 向左/纵向 → 取消交还 App（防误吞滚动）。单一手势源，与左右缘 edge pan 完全隔离，杜绝双返回。
 - (void)handleGlobalPan:(UIPanGestureRecognizer *)pan {
+    // [2026-08-09 修复 文本选择/光标/元宝/消息左滑] 若本轮全屏 pan 正与文本选择/光标/元宝/消息左滑手势同时识别，
+    // 直接短路：不驱动返回转场、不调用 _suppressQQNativePopForNav 禁用任何原生手势，把拖拽完全让给选择手势。
+    // 选择手势结束(Oback pan 终态)即清标志。返回滑动不会激活这些手势→不置标志→照常驱动返回，零回归。
+    if ([objc_getAssociatedObject(self, kYieldActiveKey) boolValue]) {
+        UIGestureRecognizerState st = pan.state;
+        if (st == UIGestureRecognizerStateEnded || st == UIGestureRecognizerStateCancelled ||
+            st == UIGestureRecognizerStateFailed) {
+            objc_setAssociatedObject(self, kYieldActiveKey, @(NO), OBJC_ASSOCIATION_RETAIN);
+        }
+        return;
+    }
     switch (pan.state) {
         case UIGestureRecognizerStateBegan: {
             _globalStart = [pan locationInView:[self _windowForPan:pan]];
@@ -1842,6 +1856,15 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
             UIGestureRecognizer *global = gIsGlobal ? g : other;
             UIGestureRecognizer *theOther = (global == g) ? other : g;
             if (theOther.delegate != self && scrollPanClsSim && [theOther isKindOfClass:scrollPanClsSim]) return YES;
+            // [2026-08-09 修复 文本选择/光标/元宝/消息左滑] 当对手是文本选择/光标loupe/元宝浮耳/消息左滑手势时，
+            // 允许与全屏 pan 同时识别：置 kYieldActiveKey，令 handleGlobalPan 短路(不驱动返回、不压制/禁用任何手势)，
+            // 把拖拽完全让给选择手势，从根消除「Oback 抢识别导致蓝色手柄/光标拖不动」。返回滑动不会激活这些手势，
+            // 故不触发短路，全局返回不受影响。单向无死锁：对手 delegate≠self，不会反向要求 panG 失败。
+            if (theOther.delegate != self && [self _isQQYieldPan:(UIPanGestureRecognizer *)theOther]) {
+                objc_setAssociatedObject(self, kYieldActiveKey, @(YES), OBJC_ASSOCIATION_RETAIN);
+                OBLog(@"simultaneously: 全屏 panG 与 %@ 同时识别(令 Oback 不驱动返回/不压制)", NSStringFromClass([theOther class]));
+                return YES;
+            }
         }
     }
     if (other.delegate == self) return NO;   // 自身另一个 pan(左/右/modal): 不与之同时识别, 更不记录为对手(否则 beginTransition 会误取消自身 → 右缘被取消 abort)
