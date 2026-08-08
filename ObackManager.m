@@ -801,6 +801,10 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
 // 返回 YES 时让 panG 在 shouldBeRequiredToFailBy 中单向让路（不压制、不接管）。
 - (BOOL)_isQQYieldPan:(UIPanGestureRecognizer *)g {
     if ([self _isQQTextOrSelectionPan:g]) return YES;            // 文本选择/光标/loupe/文本视图
+    // [2026-08-08 修复 文本选择蓝色手柄] UIKit 文本选择蓝色手柄拖拽手势(_UIDragHandleGestureRecognizer)：
+    // 不被 _isQQTextOrSelectionPan 覆盖(类是私有 pan 而非 loupe/multiselect)，单独放行让路。
+    Class dragHandleCls = NSClassFromString(@"_UIDragHandleGestureRecognizer");
+    if (dragHandleCls && [g isKindOfClass:dragHandleCls]) return YES;
     Class ybCls = NSClassFromString(@"NTAISummaryFloatEar");
     if (ybCls && g.view && [g.view isKindOfClass:ybCls]) return YES;          // 元宝浮耳拖拽
     Class swipeCls = NSClassFromString(@"NTDiffableListKit.NTSwipeSpringAnimationContainerView");
@@ -1362,6 +1366,15 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
         // 否则中间/右侧滑不在左热区→Oback 不 begin→QQ 原生全屏手势抢接管→瞬返。
         OBLog(@"globalShouldBegin: QQ/TIM 全屏 pan 不限热区（任意位置允许）");
         [self _obLinkFullScreenOpponentPansInWindow:win];   // QQ/TIM 全屏对手压制：枚举所有 window 的对手 pan（含 overlay window 上的 QQ 全屏返回手势）建立 requireToFail
+        // [2026-08-08 修复 文本选择蓝色手柄拖不动] Oback 全屏 pan 在 QQ/TIM 内任意触摸都 begin，即使
+        // shouldBeRequiredToFailBy 让路，与文本选择蓝色手柄拖拽手势抢识别仍导致手柄拖不动。治本：检测到
+        // 当前有「活动文本选择」(蓝手柄/放大镜视图存在 或 文本视图有非空选中范围)时直接不让 Oback 全屏
+        // pan begin——彻底不进入识别/仲裁，把选择拖拽手势让出来。选择态是瞬态(点别处即消失)，不会长期禁用
+        // 全局返回；非选择态下元宝浮耳拖拽不受影响。
+        if ([self _activeTextSelectionInWindow:win]) {
+            OBLog(@"globalShouldBegin=NO (文本选择/光标激活中, 交还选择拖拽)");
+            return NO;
+        }
         // [2026-08-06 修复 元宝AI总结浮层滑不出] 触摸落在元宝总结浮耳(NTAISummaryFloatEar)上时交还，
         // 让浮耳自身拖拽手势处理关闭；否则 Oback 接管并禁用其 pan 会导致总结滑不出（见 oback_debug(20).log）。
         Class ybCls = NSClassFromString(@"NTAISummaryFloatEar");
@@ -2603,6 +2616,60 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     if (!sv.scrollEnabled) return NO;
     // 内容宽明显大于可视宽 → 横向可滚（图片查看器 paging：contentSize.width = count * width）
     return (sv.contentSize.width > sv.bounds.size.width * 1.2);
+}
+
+// [2026-08-08 修复 文本选择蓝色手柄] 检测当前是否存在「活动文本选择」：
+// 文本选择激活时系统会显示蓝色选择手柄 + 放大镜(loupe)视图，且底层 UITextView/UITextField 的
+// selectedTextRange 非空。命中任一项即认为处于选择态，Oback 全屏 pan 应让路(不 begin)。
+// 私有类名用 containsString 模糊匹配(避免不同 iOS 版本类名微调)，文本视图用 selectedTextRange 精确判定。
+- (BOOL)_activeTextSelectionInView:(UIView *)v {
+    if (!v) return NO;
+    NSString *cls = NSStringFromClass([v class]);
+    if ([cls containsString:@"TextSelection"] || [cls containsString:@"SelectionView"] ||
+        [cls containsString:@"Loupe"] || [cls containsString:@"Magnifier"] ||
+        [cls containsString:@"DragHandle"] || [cls containsString:@"Caret"] ||
+        [cls containsString:@"SelectionHandle"] || [cls containsString:@"Magnif"]) {
+        return YES;
+    }
+    if ([v isKindOfClass:[UITextView class]] || [v isKindOfClass:[UITextField class]]) {
+        @try {
+            id range = [v selectedTextRange];
+            if (range) {
+                UITextRange *tr = (UITextRange *)range;
+                if (![tr isEmpty]) return YES;
+            }
+        } @catch (NSException *e) {}
+    }
+    for (UIView *sub in v.subviews) {
+        if ([self _activeTextSelectionInView:sub]) return YES;
+    }
+    return NO;
+}
+
+- (BOOL)_activeTextSelectionInWindow:(UIWindow *)win {
+    if (!win) return NO;
+    if ([self _activeTextSelectionInView:win]) return YES;
+    // QQ 等可能把选择/放大镜视图放到 overlay window，补充枚举其余 window
+    NSArray *wins = nil;
+    @try {
+        if (@available(iOS 13.0, *)) {
+            NSMutableArray *arr = [NSMutableArray array];
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]])
+                    [arr addObjectsFromArray:((UIWindowScene *)scene).windows];
+            }
+            wins = arr;
+        } else {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            wins = [[UIApplication sharedApplication] windows];
+            #pragma clang diagnostic pop
+        }
+    } @catch (NSException *e) { wins = nil; }
+    for (UIWindow *w in wins) {
+        if (w && w != win && [self _activeTextSelectionInView:w]) return YES;
+    }
+    return NO;
 }
 
 // 检测 QQ 左侧抽屉/侧边栏是否处于打开。打开时全屏 pan 不接管返回，让抽屉自身关闭手势生效
