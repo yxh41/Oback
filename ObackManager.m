@@ -71,9 +71,7 @@ void *kPanKey = &kPanKey;                  // 暴露给 Tweak.xm：window 上挂
 static void *kPanKindKey = &kPanKindKey;    // 标记 pan 种类：@"nav"(挂在 nav.view 驱动 nav pop) / @"modal"(挂在 window 驱动 modal dismiss)
 static void *kNavPansKey = &kNavPansKey;    // 挂在某个 UINavigationController 上的 Oback 边缘 pan（NSArray），用于幂等去重
 static void *kObackNavKey = &kObackNavKey;   // 把 pan 所属的 UINavigationController 绑到 pan 上（swizzle 时写入），gesture 判定/驱动 pop 时直接读，绕过容器枚举
-// [2026-08-09] kYieldActiveKey 机制已移除——在 shouldRecognizeSimultaneouslyWith 按类名置位误杀全局返回(手柄类常驻文本视图)，
-// 改按 state 置位有时序问题(panG Began 早于手柄 Began)。文本选择让路改由 shouldBeRequiredToFailBy 动态仲裁。保留声明不删避免其他引用编译错误。
-static void *kYieldActiveKey = &kYieldActiveKey __attribute__((unused));
+// [2026-08-09] kYieldActiveKey 机制已彻底移除（多次引发回归），声明一并删除——无任何引用。
 static void *kDiagLastLogKey = &kDiagLastLogKey;  // 双返回诊断：同一 window 日志节流（每 2s 最多打一次手势清单）
 static void *kGlobalPanKey = &kGlobalPanKey;        // 全屏 pan 引用（绑到 window，gestureRecognizerShouldBegin 识别用）
 static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指移动的距离 (pt)
