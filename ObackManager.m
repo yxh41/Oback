@@ -17,7 +17,7 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"FIX-handle-v12e"
+#define OBACK_BUILD_TAG @"FIX-handle-v12f"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -3127,6 +3127,8 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     __block NSString *minCls = nil;
     __block BOOL anyHandlePresent = NO;
     __block CGRect hsRect = CGRectZero;   // 最近手柄屏幕 rect（诊断用）
+    __block int sHandleViews = 0;         // [v12f] 命中手柄类视图计数(诊断：漏判时看是否根本没扫到)
+    __block int sHandleWinNil = 0;        // [v12f] 手柄视图 window==nil 计数(overlay window 瞬时脱离→坐标算歪根因)
     __block NSMutableSet *panCands = (leftZone ? [NSMutableSet set] : nil);  // 左缘：收集非 Oback 的 pan 候选(找 QQ 左缘自定义手势)
     // (A) [2026-08-09 v12] 公开 API 选择几何：UITextView 有活动选择时，用 caretRectForPosition 算出起止手柄
     // 真实屏幕坐标→判断触摸是否落在手柄上。不依赖私有手柄类名/所在 window——QQ 手柄怎么实现都能精确命中。
@@ -3182,14 +3184,14 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         __block CGRect acc = CGRectZero;
         __block void (^walk)(UIView *, int) = nil;
         walk = ^(UIView *v, int depth){
-            if (!v || depth > 2) return;
+            if (!v || depth > 3) return;   // [v12f] 深度 2→3：手柄球可能嵌在 3 层子视图内(实测漏判根因之一)
             for (UIView *s in v.subviews) {
                 CGRect sr = CGRectZero;
                 @try { sr = [s convertRect:s.bounds toView:nil]; } @catch (NSException *e) { sr = CGRectZero; }
                 if (!CGRectIsEmpty(sr) && sr.size.width < 140.0 && sr.size.height < 140.0) {
                     acc = CGRectIsEmpty(acc) ? sr : CGRectUnion(acc, sr);
                 }
-                if (depth < 2) walk(s, depth + 1);
+                if (depth < 3) walk(s, depth + 1);
             }
         };
         walk(hv, 0);
@@ -3203,6 +3205,8 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         if (kind == 0 && dragHandleCls && [v isKindOfClass:dragHandleCls]) kind = 2;
         if (kind > 0) {
             anyHandlePresent = YES;
+            sHandleViews++;                              // [v12f] 诊断计数
+            if (v.window == nil) sHandleWinNil++;        // [v12f] overlay window 瞬时脱离→坐标算歪根因计数
             // [v12d 根治] QQ 选择手柄在独立 overlay window 内；之前用 v.frame/v.center 算屏幕坐标，
             // 因 scale 动画帧未稳 + v.window 在扫描时刻为 nil → 坐标算成(0,0)/CGFLOAT_MAX → 永不命中。
             // 现改为：在手柄所属 window(ownerWin) 上对触摸点 sp 做 hitTest，若命中视图是 v 或其后代/
@@ -3228,11 +3232,14 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
             if (!CGRectIsEmpty(sf)) {
                 c = CGPointMake(CGRectGetMidX(sf), CGRectGetMidY(sf)); haveRect = YES;
             } else {
+                // [v12f] 兜底：v.window 可能为 nil(overlay window 瞬时)→ 用扫描时的 ownerWin 做坐标基准，
+                // 否则 convertPoint:toView:v.window 拿到 nil window → 坐标算成(0,0)/CGFLOAT_MAX → 漏判。
                 @try {
-                    UIView *base = v.superview ?: v.window;
-                    if (base && v.window) {
-                        CGPoint inWin = [base convertPoint:v.center toView:v.window];
-                        CGRect wf = v.window.frame;
+                    UIView *base = v.superview ?: (v.window ?: ownerWin);
+                    UIView *refWin = v.window ?: ownerWin;
+                    if (base && refWin) {
+                        CGPoint inWin = [base convertPoint:v.center toView:refWin];
+                        CGRect wf = refWin.frame;
                         c = CGPointMake(wf.origin.x + inWin.x, wf.origin.y + inWin.y);
                         haveRect = YES;   // 有中心即可判距（矩形尺寸未知，按点距算）
                     }
@@ -3251,11 +3258,19 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
                 if (d < minDist) { minDist = d; minCls = cls; }
                 if (!hit) {
                     BOOL small = (kind == 2) ? YES : (haveRect && !CGRectIsEmpty(sf) ? (sf.size.width < 140.0 && sf.size.height < 140.0) : NO);
-                    // [v9] 半区约束 side：左柄管左半、右柄管右半；居中柄(≈W/2) side 恒真；极近(d<=45)兜底不限侧
-                    BOOL side = (c.x < screenW * 0.5f) ? (sp.x < screenW * 0.5f) : (sp.x >= screenW * 0.5f);
                     BOOL near = (d <= hitR);
                     BOOL veryNear = (d <= 45.0f);
-                    if (small && ((near && side) || veryNear)) { hit = YES; hitCls = cls; hitReason = @"dist"; }
+                    if (kind == 2) {
+                        // [v12f] 确证手柄(kind==2)：取消半区 side 约束。居中柄(≈W/2)与"手柄在触摸对侧"时
+                        // 原 side 判定会误杀真实命中(只靠 veryNear 兜底)，是 v12e 多数抓取漏判的根因。
+                        // kind==2 类(DragHandle/SelectionHandle/Caret/Loupe/DragAnimation…)均为选择/光标相关，
+                        // 命中即让路不会误伤全局返回。
+                        if (near || veryNear) { hit = YES; hitCls = cls; hitReason = @"dist"; }
+                    } else {
+                        // [v9] 半区约束 side：左柄管左半、右柄管右半；居中柄(≈W/2) side 恒真；极近(d<=45)兜底不限侧
+                        BOOL side = (c.x < screenW * 0.5f) ? (sp.x < screenW * 0.5f) : (sp.x >= screenW * 0.5f);
+                        if (small && ((near && side) || veryNear)) { hit = YES; hitCls = cls; hitReason = @"dist"; }
+                    }
                 }
             }
         }
@@ -3282,9 +3297,10 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     }
     if (anyHandlePresent && minDist > hitR && minDist < 260.0 && sNearCount < 25) {
         sNearCount++;
-        OBLog(@"[diag-near] 选择激活但触摸未命中手柄: 触摸x=%.0f 最近=%@ 距离=%.0f rect=(%.0f,%.0f,%.0f,%.0f) 候选pan=%@",
+        OBLog(@"[diag-near] 选择激活但触摸未命中手柄: 触摸x=%.0f 最近=%@ 距离=%.0f rect=(%.0f,%.0f,%.0f,%.0f) 手柄视图数=%d winNil=%d geom=%d 候选pan=%@",
               sp.x, minCls ? minCls : @"?", (minDist==CGFLOAT_MAX?0:minDist),
               hsRect.origin.x, hsRect.origin.y, hsRect.size.width, hsRect.size.height,
+              sHandleViews, sHandleWinNil, (int)geomFound,
               (panCands ? [panCands allObjects] : @[]));
     }
     return anyHandlePresent ? 1 : 0;
