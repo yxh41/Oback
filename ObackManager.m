@@ -1797,6 +1797,32 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)g
  shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)other {
     if (g == other || other == nil) return NO;
+    // [2026-08-09→修复 文本选择手柄/光标] 关键修复：Oback 全屏 pan 必须等「文本选择手柄/光标」失败
+    // 再 begin。之前只在 shouldBeRequiredToFailBy 让路，但日志实证(oback_debug 28)：手柄手势
+    // 从未进入我们的仲裁(全程无 DragHandle 进入 shouldBeRequiredToFailBy)，导致 pan 照常 begin
+    // 并以 cancelsTouchesInView 抢走 touch → 手柄拖不动("多数时候不行，偶尔能")。
+    // 改从 Oback 一侧主动声明依赖(Apple "Preferring one gesture over another" 官方姿势)，强制 UIKit
+    // 建立"pan 失败于手柄"边，手柄才能独占拖拽。手柄空闲(无选字)时处于 Failed 态→pan 立即 proceed→返回正常。
+    BOOL gIsGlobal = (g.delegate == self && [[g view] isKindOfClass:[UIWindow class]] &&
+                      ![g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]);
+    if (gIsGlobal) {
+        Class dragHandleCls = NSClassFromString(@"_UIDragHandleGestureRecognizer");
+        BOOL isHandle = (dragHandleCls && [other isKindOfClass:dragHandleCls]);
+        if (!isHandle) {
+            NSString *ocls = NSStringFromClass([other class]);
+            if ([ocls containsString:@"DragHandle"] || [ocls containsString:@"Handle"]) isHandle = YES;
+        }
+        Class flickCls = NSClassFromString(@"_UIPanOrFlickGestureRecognizer");
+        BOOL isCaret = (flickCls && [other isKindOfClass:flickCls] &&
+                        other.view && ([other.view isKindOfClass:[UITextView class]] ||
+                                       [other.view isKindOfClass:[UITextField class]]));
+        if (isHandle || isCaret) {
+            OBLog(@"[diag-reqfail] shouldRequireFailureOf: 全屏 panG 要求 %@ 先判定(让路文本选择手柄/光标)",
+                  NSStringFromClass([other class]));
+            return YES;
+        }
+        // 其余手势不在此声明依赖，落回下方边缘 pan 原有决策
+    }
     if (![g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return NO;  // 仅我们的边缘 pan 参与决策
     if (other.delegate == self) {
         // 同为我们的 pan：仅让 nav pan 单向对 window pan 让步（无死锁），杜绝同边双开火 → 双返回。
