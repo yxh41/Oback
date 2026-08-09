@@ -4,7 +4,7 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"FIX-handle-v9"
+#define OBACK_BUILD_TAG @"FIX-handle-v10"
 
 #pragma mark - 诊断日志（落地文件 + syslog，便于真机定位手势为何不触发）
 
@@ -2968,27 +2968,35 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     };
     __block void (^scan)(UIView *);
     scan = ^(UIView *v) {
-        if (!v || v.hidden || v.alpha < 0.01 || CGRectIsEmpty(v.frame)) return;
+        if (!v || v.hidden) return;  // [v10] 去掉 alpha<0.01/frame空跳过：QQ 手柄出现是 alpha/scale 动画，帧未稳时这些为真→漏检(根因)
         NSString *cls = NSStringFromClass([v class]);
         NSInteger kind = handleKind(cls);
         if (kind == 0 && dragHandleCls && [v isKindOfClass:dragHandleCls]) kind = 2;
         if (kind > 0) {
             anyHandlePresent = YES;
+            // [v10] 坐标尽力取三重兜底：convertRect→superview convertRect→center，杜绝「动画帧未稳/跨window」坐标取空导致漏检
             CGRect sf = CGRectZero;
             @try { sf = [v convertRect:v.bounds toView:nil]; } @catch (NSException *e) { sf = CGRectZero; }
-            if (!CGRectIsEmpty(sf)) {
-                CGPoint c = CGPointMake(CGRectGetMidX(sf), CGRectGetMidY(sf));
-                // [v9] 改用「到手柄矩形最近点距离」(dRect)：按在手柄边缘外侧也能命中，比到中心距离更准
-                CGFloat nx = MAX(sf.origin.x, MIN(sp.x, sf.origin.x + sf.size.width));
-                CGFloat ny = MAX(sf.origin.y, MIN(sp.y, sf.origin.y + sf.size.height));
-                CGFloat d = (CGFloat)hypot(sp.x - nx, sp.y - ny);
+            if (CGRectIsEmpty(sf)) { @try { sf = [v.superview convertRect:v.frame toView:nil]; } @catch (NSException *e) { sf = CGRectZero; } }
+            CGPoint c = CGPointZero; BOOL haveRect = NO;
+            if (!CGRectIsEmpty(sf)) { c = CGPointMake(CGRectGetMidX(sf), CGRectGetMidY(sf)); haveRect = YES; }
+            else { @try { c = [v.superview convertPoint:v.center toView:nil]; } @catch (NSException *e) { c = CGPointZero; } }
+            if (c.x != 0 || c.y != 0) {
+                CGFloat d;
+                if (haveRect) {
+                    // [v9] 到手柄矩形最近点距离(dRect)：按在手柄边缘外侧也能命中，比到中心距离更准
+                    CGFloat nx = MAX(sf.origin.x, MIN(sp.x, sf.origin.x + sf.size.width));
+                    CGFloat ny = MAX(sf.origin.y, MIN(sp.y, sf.origin.y + sf.size.height));
+                    d = (CGFloat)hypot(sp.x - nx, sp.y - ny);
+                } else {
+                    d = (CGFloat)hypot(sp.x - c.x, sp.y - c.y);
+                }
                 if (d < minDist) { minDist = d; minCls = cls; }
-                BOOL small = (kind == 2) ? YES : (sf.size.width < 140.0 && sf.size.height < 140.0);
-                // [v9] 半区约束 side：手柄中心与触摸点在同一半屏才放宽让路，避免 v7「选择激活+任意处≤110」
-                // 把全屏返回起滑误判为让路(全局返回回归)。左柄只管左半、右柄只管右半；居中柄(≈W/2) side 恒真。
+                BOOL small = (kind == 2) ? YES : (haveRect ? (sf.size.width < 140.0 && sf.size.height < 140.0) : NO);
+                // [v9] 半区约束 side：左柄管左半、右柄管右半；居中柄(≈W/2) side 恒真；极近(d<=45)兜底不限侧
                 BOOL side = (c.x < screenW * 0.5f) ? (sp.x < screenW * 0.5f) : (sp.x >= screenW * 0.5f);
                 BOOL near = (d <= hitR);
-                BOOL veryNear = (d <= 45.0f);   // 极近兜底：不限侧，范围小不影响返回
+                BOOL veryNear = (d <= 45.0f);
                 if (small && ((near && side) || veryNear)) { hit = YES; hitCls = cls; }
             }
         }
