@@ -298,6 +298,23 @@ static NSSet *_obPlanBKeys(void) {
     [self performSelector:@selector(_obShowDiagFile) withObject:nil afterDelay:1.0];
 }
 
+#pragma mark - [v11] 显示调试日志（App 内弹窗，绕开沙盒文件隔离）
+
+// 广播 showLog 通知：后台的 Oback App 收到后注册「回到前台」监听，用户切回该 App 时自动弹出内存日志。
+- (void)showDebugLog {
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.zlhkf.oback.showLog"),
+                                         NULL, NULL, TRUE);
+    UIAlertController *a = [UIAlertController
+        alertControllerWithTitle:@"调试日志"
+                         message:@"已请求各 App 显示内存中的调试日志。请切回目标 App（如 QQ/TIM），它回到前台时会自动弹出日志窗口；长按文本框全选复制，发我即可定位文本选择等问题。"
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"好"
+                                          style:UIAlertActionStyleDefault
+                                        handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
 // 读本地诊断文件并在手机上以文本框展示（无 Mac 也能看）；空文件给排查提示
 - (void)_obShowDiagFile {
     NSString *path = @"/var/mobile/oback_diag.log";

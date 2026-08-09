@@ -10,6 +10,7 @@
 + (BOOL)isGlobalBackRightSide; // 全局返回触发侧：开=右侧薄热区+左滑返回(右手单握)，关=左侧热区+右滑返回(左手单握，默认)
 + (BOOL)isNavPopFallback; // 无动画修复列表：命中 App 左缘/全局返回强制走 rightSimplePop 非交互标准滑出（系统交互转场不渲染的自定义 nav，如酷安），默认关、≠ 黑名单/左缘排除
 + (BOOL)debugLogEnabled;  // 调试日志总开关（设置面板「调试日志」），默认关（批次A 改为关 + 缓存 + 30min 自动过期）
++ (BOOL)debugLogEnabledLive;  // [v11] 实时读调试日志开关（去缓存，开关即生效）
 + (BOOL)doubleReturnDiagEnabled;  // 双返回诊断（设置面板「双返回诊断」），默认关
 + (BOOL)diagBannerEnabled;  // 诊断横幅独立隐藏开关（key=diagBanner），默认关；开→每次注入打印 [Oback-diag] 横幅，关→完全静默
 + (NSInteger)capsuleEffect;        // 胶囊特效（设置面板「胶囊风格」key=capsuleEffect），0=经典，1=发光，2=霓虹，3=流光，4=毛玻璃，5=呼吸

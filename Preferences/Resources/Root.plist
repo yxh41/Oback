@@ -451,6 +451,14 @@
 			<string>立即打印诊断</string>
 		</dict>
 		<dict>
+			<key>action</key>
+			<string>showDebugLog</string>
+			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>label</key>
+			<string>显示调试日志</string>
+		</dict>
+		<dict>
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>

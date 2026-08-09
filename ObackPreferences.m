@@ -186,6 +186,15 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     return v ? [v boolValue] : NO;   // 未设置 → 默认关
 }
 
+// [v11] 实时读 debugLog（绕过 _mergedPrefs 的 2s TTL 缓存），确保设置面板开关翻转后下次手势即生效，
+// 消除「开着没日志 / 时灵时不灵」。仅此低频开关实时读，不增加高频调用负担。
++ (BOOL)debugLogEnabledLive {
+    NSDictionary *g = [NSDictionary dictionaryWithContentsOfFile:kGlobalPlistPath];
+    if (!g) return NO;
+    id v = [g objectForKey:@"debugLog"];
+    return v ? [v boolValue] : NO;
+}
+
 
 // 双返回诊断开关：设置面板「双返回诊断」(key=doubleReturnDiag)，默认关。
 // 开启后，每次边缘起滑补链时把本 window 所有边缘返回手势的精确类名打进日志，

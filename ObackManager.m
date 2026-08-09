@@ -4,7 +4,19 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"FIX-handle-v10"
+#define OBACK_BUILD_TAG @"FIX-log-v11"
+
+// [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
+// （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
+static NSMutableArray *__obLogBuf = nil;
+static const NSUInteger kOBLogBufMax = 600;
+static BOOL __obShowLogArmed = NO;
+
+static void obShowLogCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    @autoreleasepool {
+        [(ObackManager *)observer _armShowLogOnForeground];
+    }
+}
 
 #pragma mark - 诊断日志（落地文件 + syslog，便于真机定位手势为何不触发）
 
@@ -21,7 +33,7 @@ static NSString *OBLogPath(void) {
 static BOOL _obLogWasOn = NO;   // 跟踪上次开关状态，用于「关→开」翻转时打分隔标记（明确日志起点边界）
 
 void OBLog(NSString *fmt, ...) {
-    BOOL enabled = [ObackPreferences debugLogEnabled];
+    BOOL enabled = [ObackPreferences debugLogEnabledLive];   // [v11] 实时读，去 2s TTL 缓存，开关翻转下次手势即生效
     if (!enabled) {
         // 开→关翻转：追加「关闭」分隔标记，明确日志边界，消除「关了还有日志」的困惑
         // （那其实是旧文件累积；有边界标记就能一眼看出哪段是有效日志、哪段是历史）。仅打一次，不持续写。
@@ -59,6 +71,10 @@ void OBLog(NSString *fmt, ...) {
     } else {
         [line writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }
+    // [v11] 同步写内存 ring buffer（App 内弹窗显示用，绕开沙盒文件隔离）
+    if (!__obLogBuf) __obLogBuf = [[NSMutableArray alloc] initWithCapacity:kOBLogBufMax];
+    [__obLogBuf addObject:line];
+    if (__obLogBuf.count > kOBLogBufMax) [__obLogBuf removeObjectAtIndex:0];
     // 同时进 syslog（可用 syslog 工具实时看）
     NSLog(@"%@", line);
     [msg release];
@@ -295,6 +311,11 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
                                         (void *)m, obDiagNowCallback,
                                         CFSTR("com.zlhkf.oback.diagNow"), NULL,
                                         CFNotificationSuspensionBehaviorDeliverImmediately);
+        // [v11]「显示调试日志」通知：设置面板广播 → 本 App 注册「回到前台」监听 → 切回 App 自动弹窗显示内存日志
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                        (void *)m, obShowLogCallback,
+                                        CFSTR("com.zlhkf.oback.showLog"), NULL,
+                                        CFNotificationSuspensionBehaviorDeliverImmediately);
     });
     return m;
 }
@@ -326,6 +347,74 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     } else {
         [out writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }
+}
+
+#pragma mark - [v11] App 内显示调试日志（绕开沙盒文件隔离）
+
+// 收到 showLog 通知：仅注册「回到前台」监听（armed 防重），等用户切回 App 时弹窗。
+// 后台 App 直接 present 弹窗不可见，故延迟到前台再弹。
+- (void)_armShowLogOnForeground {
+    if (__obShowLogArmed) return;
+    __obShowLogArmed = YES;
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(_obShowLogNow)
+                                                 name:UIApplicationWillEnterForegroundNotification
+                                               object:nil];
+}
+
+- (void)_obShowLogNow {
+    __obShowLogArmed = NO;
+    [[NSNotificationCenter defaultCenter] removeObserver:self
+                                                    name:UIApplicationWillEnterForegroundNotification
+                                                  object:nil];
+    NSUInteger n = __obLogBuf ? __obLogBuf.count : 0;
+    NSMutableString *s = [NSMutableString stringWithFormat:@"[Oback 调试日志 build=%@ 共%lu条，复制发我即可]\n", OBACK_BUILD_TAG, (unsigned long)n];
+    if (n == 0) {
+        [s appendString:@"(暂无日志：请先在设置里开「调试日志」，回到本 App 做几次手势/长按选字后再点「显示调试日志」)\n"];
+    } else {
+        for (NSString *l in __obLogBuf) [s appendFormat:@"%@\n", l];
+    }
+    NSString *text = [NSString stringWithString:s];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self _obPresentLogVC:text];
+    });
+}
+
+- (void)_obPresentLogVC:(NSString *)text {
+    UIViewController *rvc = nil;
+    NSArray *wins = [UIApplication sharedApplication].windows;
+    for (UIWindow *w in wins) { if (w.isKeyWindow) { rvc = w.rootViewController; break; } }
+    if (!rvc) rvc = [UIApplication sharedApplication].keyWindow.rootViewController;
+    if (!rvc) return;
+    UIViewController *vc = [[UIViewController alloc] init];
+    vc.title = [NSString stringWithFormat:@"Oback 日志(%@)", OBACK_BUILD_TAG];
+    UITextView *tv = [[UITextView alloc] initWithFrame:vc.view.bounds];
+    tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    UIFont *f = [UIFont fontWithName:@"Menlo" size:10];
+    if (f) tv.font = f; else tv.font = [UIFont systemFontOfSize:10];
+    tv.text = text;
+    tv.editable = NO;
+    [vc.view addSubview:tv];
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+    UIBarButtonItem *done = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
+                                                                          target:self
+                                                                          action:@selector(_obDismissLogVC)];
+    vc.navigationItem.rightBarButtonItem = done;
+    [rvc presentViewController:nav animated:YES completion:nil];
+    // MRC：present 内部 retain nav；我们 alloc 的 nav/vc/tv/done 交由父视图/容器持有，这里释放自身引用防泄漏
+    [done release];
+    [tv release];
+    [vc release];
+    [nav release];
+}
+
+- (void)_obDismissLogVC {
+    UIViewController *rvc = nil;
+    NSArray *wins = [UIApplication sharedApplication].windows;
+    for (UIWindow *w in wins) { if (w.isKeyWindow) { rvc = w.rootViewController; break; } }
+    if (!rvc) rvc = [UIApplication sharedApplication].keyWindow.rootViewController;
+    if (!rvc) return;
+    if (rvc.presentedViewController) [rvc dismissViewControllerAnimated:YES completion:nil];
 }
 
 #pragma mark - 启动与挂载
