@@ -17,7 +17,7 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"FIX-handle-v12b"
+#define OBACK_BUILD_TAG @"FIX-handle-v12c"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -3181,15 +3181,29 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         if (kind > 0) {
             anyHandlePresent = YES;
             // [v10] 坐标尽力取三重兜底：convertRect→superview convertRect→center，杜绝「动画帧未稳/跨window」坐标取空导致漏检
+            // [v12c] 坐标兜底增强：QQ 手柄入场常处 scale 动画(frame/bounds=0)，前两种兜底拿空 rect；
+            // 而 v.center 在 scale 动画下仍是手柄"目标中心"，用 window 坐标换到屏幕即可精确定位
+            // （旧逻辑 superview=nil 时 center 兜底得(0,0)→漏检→选择激活却永不命中→全屏 pan 抢走 touch）。
             CGRect sf = CGRectZero;
             @try { sf = [v convertRect:v.bounds toView:nil]; } @catch (NSException *e) { sf = CGRectZero; }
             if (CGRectIsEmpty(sf)) { @try { sf = [v.superview convertRect:v.frame toView:nil]; } @catch (NSException *e) { sf = CGRectZero; } }
             CGPoint c = CGPointZero; BOOL haveRect = NO;
-            if (!CGRectIsEmpty(sf)) { c = CGPointMake(CGRectGetMidX(sf), CGRectGetMidY(sf)); haveRect = YES; }
-            else { @try { c = [v.superview convertPoint:v.center toView:nil]; } @catch (NSException *e) { c = CGPointZero; } }
+            if (!CGRectIsEmpty(sf)) {
+                c = CGPointMake(CGRectGetMidX(sf), CGRectGetMidY(sf)); haveRect = YES;
+            } else {
+                @try {
+                    UIView *base = v.superview ?: v.window;
+                    if (base && v.window) {
+                        CGPoint inWin = [base convertPoint:v.center toView:v.window];
+                        CGRect wf = v.window.frame;
+                        c = CGPointMake(wf.origin.x + inWin.x, wf.origin.y + inWin.y);
+                        haveRect = YES;   // 有中心即可判距（矩形尺寸未知，按点距算）
+                    }
+                } @catch (NSException *e) {}
+            }
             if (c.x != 0 || c.y != 0) {
                 CGFloat d;
-                if (haveRect) {
+                if (haveRect && !CGRectIsEmpty(sf)) {
                     // [v9] 到手柄矩形最近点距离(dRect)：按在手柄边缘外侧也能命中，比到中心距离更准
                     CGFloat nx = MAX(sf.origin.x, MIN(sp.x, sf.origin.x + sf.size.width));
                     CGFloat ny = MAX(sf.origin.y, MIN(sp.y, sf.origin.y + sf.size.height));
@@ -3198,7 +3212,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
                     d = (CGFloat)hypot(sp.x - c.x, sp.y - c.y);
                 }
                 if (d < minDist) { minDist = d; minCls = cls; }
-                BOOL small = (kind == 2) ? YES : (haveRect ? (sf.size.width < 140.0 && sf.size.height < 140.0) : NO);
+                BOOL small = (kind == 2) ? YES : (haveRect && !CGRectIsEmpty(sf) ? (sf.size.width < 140.0 && sf.size.height < 140.0) : NO);
                 // [v9] 半区约束 side：左柄管左半、右柄管右半；居中柄(≈W/2) side 恒真；极近(d<=45)兜底不限侧
                 BOOL side = (c.x < screenW * 0.5f) ? (sp.x < screenW * 0.5f) : (sp.x >= screenW * 0.5f);
                 BOOL near = (d <= hitR);
@@ -3224,7 +3238,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     if (outActive) *outActive = anyHandlePresent;
     if (outMinDist) *outMinDist = (minDist == CGFLOAT_MAX ? 0 : minDist);
     if (hit) {
-        OBLog(@"[diag-handle] 命中活动选择手柄(%@)，shouldBegin 让路 (触摸x=%.0f)", hitCls ? hitCls : @"?", sp.x);
+        OBLog(@"[diag-handle] 命中活动选择手柄(%@)，距离=%.0f 触摸x=%.0f → shouldBegin 让路", hitCls ? hitCls : @"?", (minDist==CGFLOAT_MAX?0:minDist), sp.x);
         return 2;
     }
     if (anyHandlePresent && minDist > hitR && minDist < 260.0 && sNearCount < 25) {
