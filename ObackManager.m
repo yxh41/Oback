@@ -4,7 +4,7 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"FIX-handle-v7"
+#define OBACK_BUILD_TAG @"FIX-handle-v8"
 
 #pragma mark - 诊断日志（落地文件 + syslog，便于真机定位手势为何不触发）
 
@@ -1149,23 +1149,15 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
                 return NO;
             }
             if (selActive) {
-                // [2026-08-09 修复 v6→v7] 选择激活时让路手柄拖拽，覆盖左右缘/按偏两种失败：
-                // (a) 回退侧热区列内触摸让路(保持左缘已验证行为，覆盖「按在手柄附近文本上」)；
-                // (b) 任意侧手柄：触摸靠近最近手柄(容差110pt)即让路——对称覆盖右缘手柄/按偏，
-                //     不再只限左缘110pt列(日志36实证：右缘手柄无宽松让路→按偏即被全屏 pan 抢走→拖不动)。
-                // (a)(b) 均以「选择激活 + 触摸在手柄附近」为条件→选择结束后全局返回立刻恢复，不回归。
-                BOOL rightSide = [ObackPreferences isGlobalBackRightSide];
-                CGFloat W = gw.bounds.size.width;
-                CGFloat col = 110.0;   // 回退侧热区列宽(覆盖对方左文本列 x≈50~110)
-                BOOL inBackCol = rightSide ? (sp.x > W - col) : (sp.x < col);
-                if (inBackCol) {
-                    OBLog(@"shouldBegin=NO (选择激活+回退侧列内触摸x=%.0f, 让路手柄拖拽)", sp.x);
-                    return NO;
-                }
-                if (minDist <= 110.0) {
-                    // 触摸靠近某侧选择手柄(任意位置)→让路手柄独占拖拽，覆盖右缘手柄/按偏
-                    OBLog(@"shouldBegin=NO (选择激活+靠近选择手柄 x=%.0f 距离=%.0f, 让路手柄拖拽)", sp.x, minDist);
-                    return NO;
+                // [2026-08-09 v8 收窄回归修复] v7 的「选择激活+回退侧列/到手柄距离≤110」宽松让路，在
+                // 【选择激活且手柄常驻】时把大量全局返回触摸(全屏 pan 可在屏幕任意位置 begin)误判为"靠近手柄"
+                // → Oback 让路 → QQ 原生全屏手势(NTPushPopLib)接走 → 无震动顺返、全局返回变卡(用户反馈实证)。
+                // 现收窄：仅「精确命中手柄(hs==2, hitR≈70)」才让路(见下方 hs==2 分支)；选择激活但触摸不在手柄上
+                // → 不让路 → Oback 全局返回正常触发(用户常从非手柄处起滑)，恢复 P0 全局返回。
+                // 文本选择(按在手柄上)仍由 hs==2 精确命中接管，不受影响。
+                static int sBackOk = 0;
+                if (sBackOk < 15) { sBackOk++;
+                    OBLog(@"[diag-back-ok] 选择激活但触摸x=%.0f 不在手柄上(最近距离=%.0f) → Oback 全局返回 proceed", sp.x, minDist);
                 }
             }
         }
@@ -2950,7 +2942,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
             OBLog(@"[diag-hit] @(%.0f,%.0f) top=%@ chain=%@ grs=%@", sp.x, sp.y, NSStringFromClass([hv class]), chain, grs);
         }
     }
-    CGFloat hitR = 60.0;   // 手指容差半径（放宽：覆盖手柄动画帧未稳定/定位偏差）
+    CGFloat hitR = 70.0;   // 手指容差半径（覆盖手柄动画帧未稳定/定位偏差；同时是"精确命中手柄"的让路门槛）
     BOOL leftZone = (sp.x < 60.0);   // 左缘热区：失败多发的竞争区
     __block BOOL hit = NO;
     __block NSString *hitCls = nil;
