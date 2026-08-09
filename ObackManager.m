@@ -17,7 +17,7 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"FIX-log-v11c"
+#define OBACK_BUILD_TAG @"FIX-log-v11d"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -469,7 +469,7 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     self.logActivityVC = avc;   // MRC retain，避免活动视图控制器被提前释放(iOS 已知坑)
     UIViewController *presenter = [self _obKeyRootVC].presentedViewController;
     if (!presenter) presenter = [self _obKeyRootVC];
-    if (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad && sender) {
+    if ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad && sender) {
         avc.popoverPresentationController.barButtonItem = sender;
     }
     [presenter presentViewController:avc animated:YES completion:nil];
