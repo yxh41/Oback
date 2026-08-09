@@ -9,11 +9,15 @@
 - (void)_obPresentLogVC:(NSString *)text;
 - (void)_obDismissLogVC;
 - (UIViewController *)_obKeyRootVC;
+- (NSString *)_obBuildLogText;
+- (void)_obShareLog:(UIBarButtonItem *)sender;
+- (void)_obCopyLog;
+@property (nonatomic, retain) UIActivityViewController *logActivityVC;  // [v11c] retain 防活动视图控制器提前释放(MRC 陷阱)
 @end
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"FIX-log-v11b"
+#define OBACK_BUILD_TAG @"FIX-log-v11c"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -371,19 +375,23 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
                                                object:nil];
 }
 
-- (void)_obShowLogNow {
-    __obShowLogArmed = NO;
-    [[NSNotificationCenter defaultCenter] removeObserver:self
-                                                    name:UIApplicationWillEnterForegroundNotification
-                                                  object:nil];
+- (NSString *)_obBuildLogText {
     NSUInteger n = __obLogBuf ? __obLogBuf.count : 0;
-    NSMutableString *s = [NSMutableString stringWithFormat:@"[Oback 调试日志 build=%@ 共%lu条，复制发我即可]\n", OBACK_BUILD_TAG, (unsigned long)n];
+    NSMutableString *s = [NSMutableString stringWithFormat:@"[Oback 调试日志 build=%@ 共%lu条]\n", OBACK_BUILD_TAG, (unsigned long)n];
     if (n == 0) {
         [s appendString:@"(暂无日志：请先在设置里开「调试日志」，回到本 App 做几次手势/长按选字后再点「显示调试日志」)\n"];
     } else {
         for (NSString *l in __obLogBuf) [s appendFormat:@"%@\n", l];
     }
-    NSString *text = [NSString stringWithString:s];
+    return [NSString stringWithString:s];
+}
+
+- (void)_obShowLogNow {
+    __obShowLogArmed = NO;
+    [[NSNotificationCenter defaultCenter] removeObserver:self
+                                                    name:UIApplicationWillEnterForegroundNotification
+                                                  object:nil];
+    NSString *text = [self _obBuildLogText];
     dispatch_async(dispatch_get_main_queue(), ^{
         [self _obPresentLogVC:text];
     });
@@ -430,16 +438,61 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     tv.editable = NO;
     [vc.view addSubview:tv];
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+    // [v11c] 右上：分享(系统分享面板，可 AirDrop/微信/QQ/存文件/拷贝) + 复制(直接进剪贴板)，免去长按全选
+    UIBarButtonItem *share = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAction
+                                                                            target:self
+                                                                            action:@selector(_obShareLog:)];
+    UIBarButtonItem *copy = [[UIBarButtonItem alloc] initWithTitle:@"复制"
+                                                              style:UIBarButtonItemStylePlain
+                                                             target:self
+                                                             action:@selector(_obCopyLog)];
+    vc.navigationItem.rightBarButtonItems = @[share, copy];
     UIBarButtonItem *done = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
                                                                           target:self
                                                                           action:@selector(_obDismissLogVC)];
-    vc.navigationItem.rightBarButtonItem = done;
+    vc.navigationItem.leftBarButtonItem = done;
     [rvc presentViewController:nav animated:YES completion:nil];
-    // MRC：present 内部 retain nav；我们 alloc 的 nav/vc/tv/done 交由父视图/容器持有，这里释放自身引用防泄漏
+    // MRC：present 内部 retain nav；我们 alloc 的 nav/vc/tv/done/share/copy 交由父视图/容器持有，这里释放自身引用防泄漏
     [done release];
+    [share release];
+    [copy release];
     [tv release];
     [vc release];
     [nav release];
+}
+
+// [v11c] 系统分享面板：把整段日志作为活动项，可 AirDrop 到 Mac / 发微信QQ / 存到文件 / 拷到剪贴板
+- (void)_obShareLog:(UIBarButtonItem *)sender {
+    NSString *text = [self _obBuildLogText];
+    UIActivityViewController *avc = [[UIActivityViewController alloc] initWithActivityItems:@[text]
+                                                                      applicationActivities:nil];
+    self.logActivityVC = avc;   // MRC retain，避免活动视图控制器被提前释放(iOS 已知坑)
+    UIViewController *presenter = [self _obKeyRootVC].presentedViewController;
+    if (!presenter) presenter = [self _obKeyRootVC];
+    if (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad && sender) {
+        avc.popoverPresentationController.barButtonItem = sender;
+    }
+    [presenter presentViewController:avc animated:YES completion:nil];
+    avc.completionWithItemsHandler = ^(UIActivityType activityType, BOOL completed,
+                                        NSArray *returnedItems, NSError *activityError) {
+        self.logActivityVC = nil;   // 释放我们的 retain
+    };
+    [avc release];
+}
+
+// [v11c] 一键复制全部日志到剪贴板，并弹「已复制」提示
+- (void)_obCopyLog {
+    NSString *text = [self _obBuildLogText];
+    [UIPasteboard generalPasteboard].string = text;
+    UIViewController *presenter = [self _obKeyRootVC].presentedViewController;
+    if (!presenter) presenter = [self _obKeyRootVC];
+    NSString *msg = [NSString stringWithFormat:@"已复制全部日志(%lu 条)到剪贴板", (unsigned long)(__obLogBuf ? __obLogBuf.count : 0)];
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:nil
+                                                             message:msg
+                                                      preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [presenter presentViewController:a animated:YES completion:nil];
+    [a release];   // 弹窗由 presenter 持有，释放自身引用
 }
 
 - (void)_obDismissLogVC {
