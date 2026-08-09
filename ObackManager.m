@@ -2,6 +2,10 @@
 #import "ObackPreferences.h"
 #import <objc/runtime.h>
 
+// [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
+// （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
+#define OBACK_BUILD_TAG @"DIAG4-reqfail-sel"
+
 #pragma mark - 诊断日志（落地文件 + syslog，便于真机定位手势为何不触发）
 
 static NSString *OBLogPath(void) {
@@ -34,7 +38,7 @@ void OBLog(NSString *fmt, ...) {
     // 消除「这份日志到底是开关开还是关时写的」困惑（配合抓前删旧日志，分析更准）。
     if (!_obLogWasOn) {
         _obLogWasOn = YES;
-        NSString *sep = [NSString stringWithFormat:@"[%@] Oback: === 调试日志已开启（以下为开关生效后日志）===\n", [NSDate date]];
+        NSString *sep = [NSString stringWithFormat:@"[%@] Oback: === 调试日志已开启 [build=%@]（以下为开关生效后日志）===\n", [NSDate date], OBACK_BUILD_TAG];
         NSString *sp = OBLogPath();
         NSFileHandle *sfh = [NSFileHandle fileHandleForWritingAtPath:sp];
         if (sfh) { [sfh seekToEndOfFile]; [sfh writeData:[sep dataUsingEncoding:NSUTF8StringEncoding]]; [sfh closeFile]; }
@@ -1816,6 +1820,21 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
         BOOL isCaret = (flickCls && [other isKindOfClass:flickCls] &&
                         other.view && ([other.view isKindOfClass:[UITextView class]] ||
                                        [other.view isKindOfClass:[UITextField class]]));
+        // [DIAG4] 更宽的选类过滤日志：只要对手类名含 Handle/Drag/Flick/Select/Caret 或挂在文本视图，
+        // 就打一行（即便 isHandle/isCaret 没命中也打），用于确认 shouldRequireFailureOf 是否被 UIKit
+        // 用手柄调用过。若这行从不出现 → 手柄根本没进我们的仲裁(不同 window/独占)→ 需 hook 思路。
+        {
+            NSString *socls = NSStringFromClass([other class]);
+            BOOL selish = ([socls containsString:@"Handle"] || [socls containsString:@"Drag"] ||
+                           [socls containsString:@"Flick"] || [socls containsString:@"Select"] ||
+                           [socls containsString:@"Caret"] ||
+                           (other.view && ([other.view isKindOfClass:[UITextView class]] ||
+                                           [other.view isKindOfClass:[UITextField class]])));
+            if (selish) {
+                OBLog(@"[diag-reqfail-sel] shouldRequireFailureOf globalPan other=%@ view=%@ isHandle=%d isCaret=%d",
+                      socls, other.view ? NSStringFromClass([other.view class]) : @"nil", isHandle, isCaret);
+            }
+        }
         if (isHandle || isCaret) {
             OBLog(@"[diag-reqfail] shouldRequireFailureOf: 全屏 panG 要求 %@ 先判定(让路文本选择手柄/光标)",
                   NSStringFromClass([other class]));
