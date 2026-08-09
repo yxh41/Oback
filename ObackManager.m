@@ -4,7 +4,7 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"DIAG4-reqfail-sel"
+#define OBACK_BUILD_TAG @"FIX-handle-sb"
 
 #pragma mark - 诊断日志（落地文件 + syslog，便于真机定位手势为何不触发）
 
@@ -1130,6 +1130,22 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
 
 // 只在"落在边缘 + 可返回 + 不在黑名单"时，手势才接管，否则放行给 App 自身
 - (BOOL)gestureRecognizerShouldBegin:(UIScreenEdgePanGestureRecognizer *)pan {
+    // [2026-08-09 文本选择手柄修复 v3] 任何 Oback pan：触摸落在活动选择手柄(蓝柄)→不 begin，手柄独占拖拽。
+    // 根因见 oback_debug(30) 实证：手柄手势从不进入 shouldRequireFailureOf/shouldBeRequiredToFailBy
+    // （UIKit 不把手柄作为 other 递给我们）→ 之前在仲裁层的"让路"修复(3740854/e050477/e6c4f55)全是死代码。
+    // 此处在 shouldBegin 可控层直接拦截：我们直接决定 pan 是否开始，不依赖 UIKit 仲裁回调。
+    // 仅按"触摸是否落在手柄"判定→选择存在但触摸在别处仍允许返回→不回归全局返回。
+    {
+        UIWindow *gw = [self _windowForPan:pan];
+        if (gw) {
+            CGPoint gloc = [pan locationInView:gw];
+            CGPoint sp = [gw convertPoint:gloc toView:nil];   // 屏幕坐标，与手柄屏幕帧比对
+            if ([self _touchOnActiveTextSelectionHandle:sp]) {
+                OBLog(@"shouldBegin=NO (触摸落在文本选择手柄, 让路手柄拖拽)");
+                return NO;
+            }
+        }
+    }
     // 全局返回：全屏 pan 是普通 UIPanGestureRecognizer，无 edges，不能走下方 edge 判定（访问 pan.edges 会崩）。
     // 用关联对象标记 kGlobalPanKey 识别（替代单 ivar，多 window 不会被覆盖成孤儿 pan → 漏进边缘分支崩），
     // 命中即分流到 _globalPanShouldBegin:（其内仅做左热区 + nav pop 判定，不访问 edges）。
@@ -2864,7 +2880,62 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     return NO;
 }
 
-// 检测 QQ 左侧抽屉/侧边栏是否处于打开。打开时全屏 pan 不接管返回，让抽屉自身关闭手势生效
+// [2026-08-09 文本选择手柄修复 v3] 判定「屏幕坐标 sp 是否落在活动文本选择手柄(蓝柄)上/附近」。
+// 仅在 shouldBegin 可控层使用：触摸落在手柄→Oback pan 不 begin→手柄独占拖拽。
+// 为什么不用仲裁层(shouldRequireFailureOf/shouldBeRequiredToFailBy)：oback_debug(30) 实证手柄手势
+// 从不进入这两个方法(UIKit 不把手柄作为 other 递给我们)→ 在仲裁层让路是死代码。shouldBegin 是我们
+// 直接决定 pan 是否开始的层，不依赖 UIKit 回调，故必须在此拦截。
+// sp 为屏幕坐标([pan locationInView:win] 经 convertPoint:toView:nil 得到)，与各 window 手柄的屏幕帧比对。
+// 仅命中选择手柄类视图(系统私有类 _UIDragHandleGestureRecognizer 或其载体 _UIDragHandleView)，
+// 不靠模糊"Handle"匹配大视图→不会误杀全局返回。命中半径 44pt 容差手指。
+- (BOOL)_touchOnActiveTextSelectionHandle:(CGPoint)sp {
+    Class dragHandleCls = NSClassFromString(@"_UIDragHandleGestureRecognizer");
+    // 收集所有候选 window（含 QQ overlay window 上的选择视图）
+    NSMutableArray *wins = [NSMutableArray array];
+    @try {
+        if (@available(iOS 13.0, *)) {
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes)
+                if ([scene isKindOfClass:[UIWindowScene class]]) [wins addObjectsFromArray:((UIWindowScene *)scene).windows];
+        } else {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            [wins addObjectsFromArray:[[UIApplication sharedApplication] windows]];
+            #pragma clang diagnostic pop
+        }
+    } @catch (NSException *e) { wins = nil; }
+    if (!wins || wins.count == 0) return NO;
+    CGFloat hitR = 44.0;   // 手指容差半径
+    __block BOOL hit = NO;
+    __block NSString *hitCls = nil;
+    __block void (^scan)(UIView *);
+    scan = ^(UIView *v) {
+        if (hit || !v || v.hidden || v.alpha < 0.01 || CGRectIsEmpty(v.frame)) return;
+        // 1) 载体视图类名含 DragHandle（系统 _UIDragHandleView 等）
+        NSString *cls = NSStringFromClass([v class]);
+        BOOL isHandleView = ([cls containsString:@"DragHandle"] || [cls containsString:@"SelectionHandle"]);
+        // 2) 该视图挂有 _UIDragHandleGestureRecognizer（比类名更准，覆盖不同 iOS 版本命名）
+        BOOL hasHandleGR = NO;
+        if (dragHandleCls) {
+            for (UIGestureRecognizer *gr in v.gestureRecognizers) {
+                if ([gr isKindOfClass:dragHandleCls]) { hasHandleGR = YES; break; }
+            }
+        }
+        if (isHandleView || hasHandleGR) {
+            CGRect sf = CGRectZero;
+            @try { sf = [v convertRect:v.bounds toView:nil]; } @catch (NSException *e) { sf = CGRectZero; }
+            if (!CGRectIsEmpty(sf)) {
+                CGRect hitRect = CGRectInset(sf, -hitR, -hitR);
+                if (CGRectContainsPoint(hitRect, sp)) {
+                    hit = YES; hitCls = cls; return;
+                }
+            }
+        }
+        for (UIView *sub in v.subviews) scan(sub);
+    };
+    for (UIWindow *w in wins) { if (hit) break; if (w) scan(w); }
+    if (hit) OBLog(@"[diag-handle] 命中活动选择手柄(%@)，shouldBegin 让路", hitCls ? hitCls : @"?");
+    return hit;
+}
 // （否则用户横滑关抽屉被我们的返回抢走，只能点按钮关）。
 // [2026-08-06 修正] 必须用「全屏半透明遮罩」+「贴左半屏面板」双签名，否则 QQ 聊天界面常驻的
 // 全屏半透明视图（背景/输入区遮罩）会被单遮罩条件误判为抽屉→返回被禁→QQ 原生瞬返。
