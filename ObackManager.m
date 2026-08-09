@@ -17,7 +17,7 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"FIX-handle-v12"
+#define OBACK_BUILD_TAG @"FIX-handle-v12b"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -3133,11 +3133,11 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     void (^checkTV)(UITextView *) = ^(UITextView *tv){
         if (!tv) return;
         @try {
-            id selRange = tv.selectedTextRange;
-            if (!selRange || [selRange isEmpty]) return;
+            UITextRange *selRange = tv.selectedTextRange;
+            if (!selRange || selRange.isEmpty) return;
             CGRect rS = CGRectZero, rE = CGRectZero;
-            @try { rS = [tv convertRect:[tv caretRectForPosition:[selRange start]] toView:nil]; } @catch (NSException *e) {}
-            @try { rE = [tv convertRect:[tv caretRectForPosition:[selRange end]] toView:nil]; } @catch (NSException *e) {}
+            @try { rS = [tv convertRect:[tv caretRectForPosition:selRange.start] toView:nil]; } @catch (NSException *e) {}
+            @try { rE = [tv convertRect:[tv caretRectForPosition:selRange.end] toView:nil]; } @catch (NSException *e) {}
             CGFloat (^rd)(CGRect) = ^CGFloat(CGRect r){
                 if (CGRectIsEmpty(r)) return (CGFloat)CGFLOAT_MAX;
                 CGFloat nx = MAX(r.origin.x, MIN(sp.x, r.origin.x + r.size.width));
