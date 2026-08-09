@@ -4,7 +4,7 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"FIX-handle-v5"
+#define OBACK_BUILD_TAG @"FIX-handle-v6"
 
 #pragma mark - 诊断日志（落地文件 + syslog，便于真机定位手势为何不触发）
 
@@ -1140,9 +1140,26 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
         if (gw) {
             CGPoint gloc = [pan locationInView:gw];
             CGPoint sp = [gw convertPoint:gloc toView:nil];   // 屏幕坐标，与手柄屏幕帧比对
-            if ([self _touchOnActiveTextSelectionHandle:sp]) {
-                OBLog(@"shouldBegin=NO (触摸落在文本选择手柄, 让路手柄拖拽)");
+            BOOL selActive = NO;
+            NSInteger hs = [self _touchOnActiveTextSelectionHandle:sp selectionActive:&selActive];
+            if (hs == 2) {
+                // 精确命中手柄(含动画帧容差)：让路手柄独占拖拽
+                OBLog(@"shouldBegin=NO (触摸命中文本选择手柄, 让路手柄拖拽)");
                 return NO;
+            }
+            if (selActive) {
+                // [2026-08-09 修复 v6] 选择激活时，回退侧热区列内触摸让路手柄拖拽。
+                // 日志34实证：用户常按在 x=80~110 文本上(手柄在 x≈55)，未命中60pt→被全屏 pan 抢走→拖不动；
+                // 对方大字体手柄更大→更易命中→能拉。此处分层：精确命中(hs==2)或回退侧列内(选择激活)→均让路。
+                // 这样「按在手柄附近文本上」也照样让路，不再依赖精确命中(命中目标太小会漏判)。
+                BOOL rightSide = [ObackPreferences isGlobalBackRightSide];
+                CGFloat W = gw.bounds.size.width;
+                CGFloat col = 110.0;   // 回退侧热区列宽(覆盖对方左文本列 x≈50~110)
+                BOOL inBackCol = rightSide ? (sp.x > W - col) : (sp.x < col);
+                if (inBackCol) {
+                    OBLog(@"shouldBegin=NO (选择激活+回退侧列内触摸x=%.0f, 让路手柄拖拽)", sp.x);
+                    return NO;
+                }
             }
         }
     }
@@ -2888,7 +2905,8 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 // sp 为屏幕坐标([pan locationInView:win] 经 convertPoint:toView:nil 得到)，与各 window 手柄的屏幕帧比对。
 // 仅命中选择手柄类视图(系统私有类 _UIDragHandleGestureRecognizer 或其载体 _UIDragHandleView)，
 // 不靠模糊"Handle"匹配大视图→不会误杀全局返回。命中半径 44pt 容差手指。
-- (BOOL)_touchOnActiveTextSelectionHandle:(CGPoint)sp {
+- (NSInteger)_touchOnActiveTextSelectionHandle:(CGPoint)sp selectionActive:(BOOL *)outActive {
+    if (outActive) *outActive = NO;
     Class dragHandleCls = NSClassFromString(@"_UIDragHandleGestureRecognizer");
     // 收集所有候选 window（含 QQ overlay window 上的选择视图）
     NSMutableArray *wins = [NSMutableArray array];
@@ -2974,14 +2992,17 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     };
     for (UIWindow *w in wins) { if (w) scan(w); }
     static int sNearCount = 0;
+    if (outActive) *outActive = anyHandlePresent;
     if (hit) {
         OBLog(@"[diag-handle] 命中活动选择手柄(%@)，shouldBegin 让路 (触摸x=%.0f)", hitCls ? hitCls : @"?", sp.x);
-    } else if (leftZone && anyHandlePresent && minDist > hitR && sNearCount < 20) {
+        return 2;
+    }
+    if (leftZone && anyHandlePresent && minDist > hitR && sNearCount < 20) {
         sNearCount++;
         OBLog(@"[diag-near] 左缘选择激活但触摸未命中手柄: 最近=%@ 距离=%.0f 候选pan=%@",
               minCls ? minCls : @"?", minDist, (panCands ? [panCands allObjects] : @[]));
     }
-    return hit;
+    return anyHandlePresent ? 1 : 0;
 }
 // （否则用户横滑关抽屉被我们的返回抢走，只能点按钮关）。
 // [2026-08-06 修正] 必须用「全屏半透明遮罩」+「贴左半屏面板」双签名，否则 QQ 聊天界面常驻的
