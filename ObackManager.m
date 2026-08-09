@@ -4,7 +4,7 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"FIX-handle-hit"
+#define OBACK_BUILD_TAG @"FIX-handle-v5"
 
 #pragma mark - 诊断日志（落地文件 + syslog，便于真机定位手势为何不触发）
 
@@ -2925,48 +2925,62 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
             OBLog(@"[diag-hit] @(%.0f,%.0f) top=%@ chain=%@ grs=%@", sp.x, sp.y, NSStringFromClass([hv class]), chain, grs);
         }
     }
-    CGFloat hitR = 44.0;   // 手指容差半径
+    CGFloat hitR = 60.0;   // 手指容差半径（放宽：覆盖手柄动画帧未稳定/定位偏差）
+    BOOL leftZone = (sp.x < 60.0);   // 左缘热区：失败多发的竞争区
     __block BOOL hit = NO;
     __block NSString *hitCls = nil;
+    __block CGFloat minDist = CGFLOAT_MAX;
+    __block NSString *minCls = nil;
+    __block BOOL anyHandlePresent = NO;
+    __block NSMutableSet *panCands = (leftZone ? [NSMutableSet set] : nil);  // 左缘：收集非 Oback 的 pan 候选(找 QQ 左缘自定义手势)
+    // 手柄类名判定：2=论断式(QQ DragAnimation.* + UIKit 系统手柄/光标/放大镜)，1=泛匹配(需小视图排除大块选择高亮)
+    NSInteger (^handleKind)(NSString *) = ^NSInteger(NSString *cls){
+        if (!cls) return 0;
+        if ([cls hasPrefix:@"DragAnimation"]) return 2;
+        if ([cls containsString:@"DragHandle"] || [cls containsString:@"SelectionHandle"] ||
+            [cls containsString:@"Caret"] || [cls containsString:@"Loupe"] ||
+            [cls containsString:@"Magnifier"] || [cls containsString:@"SelectRange"] ||
+            [cls containsString:@"TextRange"]) return 2;
+        if ([cls containsString:@"Handle"] || [cls containsString:@"Select"] ||
+            [cls containsString:@"Range"] || [cls containsString:@"Drag"] ||
+            [cls containsString:@"Flick"]) return 1;
+        return 0;
+    };
     __block void (^scan)(UIView *);
     scan = ^(UIView *v) {
-        if (hit || !v || v.hidden || v.alpha < 0.01 || CGRectIsEmpty(v.frame)) return;
+        if (!v || v.hidden || v.alpha < 0.01 || CGRectIsEmpty(v.frame)) return;
         NSString *cls = NSStringFromClass([v class]);
-        // 手柄是小视图(通常 <100pt)；选择高亮是大视图，用尺寸排除避免误杀全局返回
-        BOOL small = (v.bounds.size.width < 100.0 && v.bounds.size.height < 100.0);
-        // 1) 类名特征：覆盖 UIKit(_UIDragHandle*/_UICaret*) 与 QQ 自定义(*Handle/*Caret/*Drag/*Select/*Range)
-        BOOL nameHit = NO;
-        if (cls) {
-            if ([cls containsString:@"Handle"] || [cls containsString:@"Caret"] ||
-                [cls containsString:@"Loupe"] || [cls containsString:@"Drag"] ||
-                [cls containsString:@"Select"] || [cls containsString:@"Range"] ||
-                [cls containsString:@"TextRange"] || [cls containsString:@"Selection"])
-                nameHit = YES;
-        }
-        // 2) 手势类名特征(覆盖 QQ 自定义 + UIKit _UIPanOrFlickGestureRecognizer 等)
-        BOOL grHit = NO;
-        for (UIGestureRecognizer *gr in v.gestureRecognizers) {
-            NSString *gcls = NSStringFromClass([gr class]);
-            if ([gcls containsString:@"Handle"] || [gcls containsString:@"Caret"] ||
-                [gcls containsString:@"Loupe"] || [gcls containsString:@"Flick"] ||
-                [gcls containsString:@"Drag"] || [gcls containsString:@"Select"])
-                { grHit = YES; break; }
-        }
-        if (dragHandleCls && [v isKindOfClass:dragHandleCls]) { nameHit = YES; grHit = YES; }
-        if ((nameHit || grHit) && small) {
+        NSInteger kind = handleKind(cls);
+        if (kind == 0 && dragHandleCls && [v isKindOfClass:dragHandleCls]) kind = 2;
+        if (kind > 0) {
+            anyHandlePresent = YES;
             CGRect sf = CGRectZero;
             @try { sf = [v convertRect:v.bounds toView:nil]; } @catch (NSException *e) { sf = CGRectZero; }
             if (!CGRectIsEmpty(sf)) {
-                CGRect hitRect = CGRectInset(sf, -hitR, -hitR);
-                if (CGRectContainsPoint(hitRect, sp)) {
-                    hit = YES; hitCls = cls; return;
-                }
+                CGPoint c = CGPointMake(CGRectGetMidX(sf), CGRectGetMidY(sf));
+                CGFloat d = (CGFloat)hypot(c.x - sp.x, c.y - sp.y);
+                if (d < minDist) { minDist = d; minCls = cls; }
+                BOOL small = (kind == 2) ? YES : (sf.size.width < 140.0 && sf.size.height < 140.0);
+                if (small && d <= hitR) { hit = YES; hitCls = cls; }
+            }
+        }
+        if (panCands) {
+            for (UIGestureRecognizer *gr in (v.gestureRecognizers ?: @[])) {
+                if ([gr isKindOfClass:[UIPanGestureRecognizer class]] && gr.delegate != self)
+                    [panCands addObject:[NSString stringWithFormat:@"%@@%@", NSStringFromClass([gr class]), NSStringFromClass([gr.view class])]];
             }
         }
         for (UIView *sub in v.subviews) scan(sub);
     };
-    for (UIWindow *w in wins) { if (hit) break; if (w) scan(w); }
-    if (hit) OBLog(@"[diag-handle] 命中活动选择手柄(%@)，shouldBegin 让路", hitCls ? hitCls : @"?");
+    for (UIWindow *w in wins) { if (w) scan(w); }
+    static int sNearCount = 0;
+    if (hit) {
+        OBLog(@"[diag-handle] 命中活动选择手柄(%@)，shouldBegin 让路 (触摸x=%.0f)", hitCls ? hitCls : @"?", sp.x);
+    } else if (leftZone && anyHandlePresent && minDist > hitR && sNearCount < 20) {
+        sNearCount++;
+        OBLog(@"[diag-near] 左缘选择激活但触摸未命中手柄: 最近=%@ 距离=%.0f 候选pan=%@",
+              minCls ? minCls : @"?", minDist, (panCands ? [panCands allObjects] : @[]));
+    }
     return hit;
 }
 // （否则用户横滑关抽屉被我们的返回抢走，只能点按钮关）。
