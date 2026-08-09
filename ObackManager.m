@@ -13,12 +13,13 @@
 - (void)_obShareLog:(UIBarButtonItem *)sender;
 - (void)_obCopyLog;
 - (BOOL)_isQQRichTextSelectionPan:(UIPanGestureRecognizer *)g;   // [v13] 前向声明：在其定义之前被 _isQQTextOrSelectionPan: 调用
+- (NSArray<UIWindow *> *)_allVisibleWindows;   // [P3] 集中枚举可见 window，替代 5 处重复实现
 @property (nonatomic, retain) UIActivityViewController *logActivityVC;  // [v11c] retain 防活动视图控制器提前释放(MRC 陷阱)
 @end
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"opt-P4P5"
+#define OBACK_BUILD_TAG @"opt-P3"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -1067,24 +1068,7 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     // （interacting=0 → ObackNavDelegate 返回 nil → 走 NTPushPopLib 瞬返）。改为枚举所有可见 window 的
     // pan 一并压制（跨 window 的 requireToFail 依赖对 UIKit 有效）。
     NSArray *windows = nil;
-    @try {
-        if (@available(iOS 13.0, *)) {
-            NSMutableArray *arr = [NSMutableArray array];
-            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]]) {
-                    [arr addObjectsFromArray:((UIWindowScene *)scene).windows];
-                }
-            }
-            windows = arr;
-        }
-        if (!windows || windows.count == 0) {
-            // 兜底：connectedScenes 为空时的旧 API（弃用，仅作安全网，用 pragma 压掉 -Werror 告警）
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            windows = [[UIApplication sharedApplication] windows];
-            #pragma clang diagnostic pop
-        }
-    } @catch (NSException *e) { windows = nil; }
+    @try { windows = [self _allVisibleWindows]; } @catch (NSException *e) { windows = nil; }
     if (!windows || windows.count == 0) windows = @[win];
     for (UIWindow *w in windows) {
         if (!w) continue;
@@ -1182,22 +1166,7 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
     Class scrollPanCls = NSClassFromString(@"UIScrollViewPanGestureRecognizer");
     // 枚举所有可见 window 的 pan（含 overlay window 上的 QQ 原生 pan）
     NSArray *windows = nil;
-    @try {
-        if (@available(iOS 13.0, *)) {
-            NSMutableArray *arr = [NSMutableArray array];
-            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]])
-                    [arr addObjectsFromArray:((UIWindowScene *)scene).windows];
-            }
-            windows = arr;
-        }
-        if (!windows || windows.count == 0) {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            windows = [[UIApplication sharedApplication] windows];
-            #pragma clang diagnostic pop
-        }
-    } @catch (NSException *e) { windows = nil; }
+    @try { windows = [self _allVisibleWindows]; } @catch (NSException *e) { windows = nil; }
     if (!windows || windows.count == 0) windows = @[];
     for (UIWindow *w in windows) {
         if (!w) continue;
@@ -1651,22 +1620,7 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
             // 转绝对屏幕坐标，跨任意 window/transform 都准，且不受透明覆盖层拦截 hitTest 影响。
             CGPoint sp = [win convertPoint:loc toView:nil];   // nil=屏幕坐标系，跨 window 桥接基准
             NSArray *ywins = nil;
-            @try {
-                if (@available(iOS 13.0, *)) {
-                    NSMutableArray *arr = [NSMutableArray array];
-                    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                        if ([scene isKindOfClass:[UIWindowScene class]])
-                            [arr addObjectsFromArray:((UIWindowScene *)scene).windows];
-                    }
-                    ywins = arr;
-                }
-                if (!ywins || ywins.count == 0) {
-                    #pragma clang diagnostic push
-                    #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-                    ywins = [[UIApplication sharedApplication] windows];
-                    #pragma clang diagnostic pop
-                }
-            } @catch (NSException *e) { ywins = nil; }
+            @try { ywins = [self _allVisibleWindows]; } @catch (NSException *e) { ywins = nil; }
             if (!ywins || ywins.count == 0) ywins = @[win];
             BOOL hitEar = NO;
             NSMutableString *diag = nil;
@@ -2959,6 +2913,27 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 
 #pragma mark - 辅助
 
+// [P3] 集中所有「枚举可见 window」逻辑：iOS13+ 走 connectedScenes，否则/为空时回退弃用旧 API。
+// 原 5 处重复枚举合并于此，改一处全局生效（含 iOS<13 与 connectedScenes 为空两层兜底）。
+- (NSArray<UIWindow *> *)_allVisibleWindows {
+    NSMutableArray<UIWindow *> *arr = [NSMutableArray array];
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                [arr addObjectsFromArray:((UIWindowScene *)scene).windows];
+            }
+        }
+    }
+    if (arr.count == 0) {
+        // 兜底：connectedScenes 为空(旧系统/异常)或 iOS<13，退回弃用旧 API
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        [arr addObjectsFromArray:[[UIApplication sharedApplication] windows]];
+        #pragma clang diagnostic pop
+    }
+    return arr;
+}
+
 // iOS 13+ 多场景后 keyWindow 已废弃，需遍历 connectedScenes 取前台活跃窗口
 - (UIWindow *)currentKeyWindow {
     UIWindow *window = nil;
@@ -3064,21 +3039,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     if ([self _activeTextSelectionInView:win]) return YES;
     // QQ 等可能把选择/放大镜视图放到 overlay window，补充枚举其余 window
     NSArray *wins = nil;
-    @try {
-        if (@available(iOS 13.0, *)) {
-            NSMutableArray *arr = [NSMutableArray array];
-            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]])
-                    [arr addObjectsFromArray:((UIWindowScene *)scene).windows];
-            }
-            wins = arr;
-        } else {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            wins = [[UIApplication sharedApplication] windows];
-            #pragma clang diagnostic pop
-        }
-    } @catch (NSException *e) { wins = nil; }
+    @try { wins = [self _allVisibleWindows]; } @catch (NSException *e) { wins = nil; }
     for (UIWindow *w in wins) {
         if (w && w != win && [self _activeTextSelectionInView:w]) return YES;
     }
@@ -3099,17 +3060,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     Class dragHandleCls = NSClassFromString(@"_UIDragHandleGestureRecognizer");
     // 收集所有候选 window（含 QQ overlay window 上的选择视图）
     NSMutableArray *wins = [NSMutableArray array];
-    @try {
-        if (@available(iOS 13.0, *)) {
-            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes)
-                if ([scene isKindOfClass:[UIWindowScene class]]) [wins addObjectsFromArray:((UIWindowScene *)scene).windows];
-        } else {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            [wins addObjectsFromArray:[[UIApplication sharedApplication] windows]];
-            #pragma clang diagnostic pop
-        }
-    } @catch (NSException *e) { wins = nil; }
+    @try { [wins addObjectsFromArray:[self _allVisibleWindows]]; } @catch (NSException *e) { wins = nil; }
     if (!wins || wins.count == 0) return NO;
     // [diag-hit] 定位 QQ 自定义选择手柄真实类：在触摸点做跨 window hit-test（限前 50 次，避免刷屏）
     static int sHitCount = 0;
