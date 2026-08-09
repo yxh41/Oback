@@ -3177,7 +3177,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         }
         return acc;
     };
-    __block void (^scan)(UIView *, UIWindow *);
+    __block void (^scan)(UIView *, UIWindow *, UIView *);
     scan = ^(UIView *v, UIWindow *ownerWin, UIView *winHitView) {
         if (!v || v.hidden) return;  // [v10] 去掉 alpha<0.01/frame空跳过：QQ 手柄出现是 alpha/scale 动画，帧未稳时这些为真→漏检(根因)
         if ([v isKindOfClass:[UITextView class]]) checkTV((UITextView *)v);  // [P2] 合并 scanTV：UITextView 选择几何并入单次遍历
