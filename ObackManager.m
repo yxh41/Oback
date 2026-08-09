@@ -17,7 +17,7 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"FIX-handle-v12c"
+#define OBACK_BUILD_TAG @"FIX-handle-v12d"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -3122,6 +3122,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     BOOL leftZone = (sp.x < 60.0);   // 左缘热区：失败多发的竞争区
     __block BOOL hit = NO;
     __block NSString *hitCls = nil;
+    __block NSString *hitReason = nil;   // hitTest(可靠) / dist(坐标兜底)
     __block CGFloat minDist = CGFLOAT_MAX;
     __block NSString *minCls = nil;
     __block BOOL anyHandlePresent = NO;
@@ -3172,18 +3173,33 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
             [cls containsString:@"Flick"]) return 1;
         return 0;
     };
-    __block void (^scan)(UIView *);
-    scan = ^(UIView *v) {
+    __block void (^scan)(UIView *, UIWindow *);
+    scan = ^(UIView *v, UIWindow *ownerWin) {
         if (!v || v.hidden) return;  // [v10] 去掉 alpha<0.01/frame空跳过：QQ 手柄出现是 alpha/scale 动画，帧未稳时这些为真→漏检(根因)
         NSString *cls = NSStringFromClass([v class]);
         NSInteger kind = handleKind(cls);
         if (kind == 0 && dragHandleCls && [v isKindOfClass:dragHandleCls]) kind = 2;
         if (kind > 0) {
             anyHandlePresent = YES;
-            // [v10] 坐标尽力取三重兜底：convertRect→superview convertRect→center，杜绝「动画帧未稳/跨window」坐标取空导致漏检
-            // [v12c] 坐标兜底增强：QQ 手柄入场常处 scale 动画(frame/bounds=0)，前两种兜底拿空 rect；
-            // 而 v.center 在 scale 动画下仍是手柄"目标中心"，用 window 坐标换到屏幕即可精确定位
-            // （旧逻辑 superview=nil 时 center 兜底得(0,0)→漏检→选择激活却永不命中→全屏 pan 抢走 touch）。
+            // [v12d 根治] QQ 选择手柄在独立 overlay window 内；之前用 v.frame/v.center 算屏幕坐标，
+            // 因 scale 动画帧未稳 + v.window 在扫描时刻为 nil → 坐标算成(0,0)/CGFLOAT_MAX → 永不命中。
+            // 现改为：在手柄所属 window(ownerWin) 上对触摸点 sp 做 hitTest，若命中视图是 v 或其后代/
+            // 或命中链含手柄类 → 手指确在手柄上 → 让路。完全绕开坐标计算，用 UIKit 自带 hitTest 几何，
+            // 动画帧稳不稳都准（hitTest 按当前渲染帧判定，与视觉一致）。
+            if (ownerWin && !hit) {
+                CGPoint wp = CGPointZero;
+                @try { wp = [ownerWin convertPoint:sp fromView:nil]; } @catch (NSException *e) { wp = CGPointZero; }
+                UIView *hitView = nil;
+                @try { hitView = [ownerWin hitTest:wp withEvent:nil]; } @catch (NSException *e) { hitView = nil; }
+                UIView *t = hitView;
+                while (t) {
+                    if (t == v || handleKind(NSStringFromClass([t class])) > 0) {
+                        hit = YES; hitCls = cls; hitReason = @"hitTest"; break;
+                    }
+                    t = t.superview;
+                }
+            }
+            // 距离/坐标诊断（尽力；动画帧稳时作为 hitTest 的补充命中，不稳时仅诊断，不依赖）
             CGRect sf = CGRectZero;
             @try { sf = [v convertRect:v.bounds toView:nil]; } @catch (NSException *e) { sf = CGRectZero; }
             if (CGRectIsEmpty(sf)) { @try { sf = [v.superview convertRect:v.frame toView:nil]; } @catch (NSException *e) { sf = CGRectZero; } }
@@ -3212,12 +3228,14 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
                     d = (CGFloat)hypot(sp.x - c.x, sp.y - c.y);
                 }
                 if (d < minDist) { minDist = d; minCls = cls; }
-                BOOL small = (kind == 2) ? YES : (haveRect && !CGRectIsEmpty(sf) ? (sf.size.width < 140.0 && sf.size.height < 140.0) : NO);
-                // [v9] 半区约束 side：左柄管左半、右柄管右半；居中柄(≈W/2) side 恒真；极近(d<=45)兜底不限侧
-                BOOL side = (c.x < screenW * 0.5f) ? (sp.x < screenW * 0.5f) : (sp.x >= screenW * 0.5f);
-                BOOL near = (d <= hitR);
-                BOOL veryNear = (d <= 45.0f);
-                if (small && ((near && side) || veryNear)) { hit = YES; hitCls = cls; }
+                if (!hit) {
+                    BOOL small = (kind == 2) ? YES : (haveRect && !CGRectIsEmpty(sf) ? (sf.size.width < 140.0 && sf.size.height < 140.0) : NO);
+                    // [v9] 半区约束 side：左柄管左半、右柄管右半；居中柄(≈W/2) side 恒真；极近(d<=45)兜底不限侧
+                    BOOL side = (c.x < screenW * 0.5f) ? (sp.x < screenW * 0.5f) : (sp.x >= screenW * 0.5f);
+                    BOOL near = (d <= hitR);
+                    BOOL veryNear = (d <= 45.0f);
+                    if (small && ((near && side) || veryNear)) { hit = YES; hitCls = cls; hitReason = @"dist"; }
+                }
             }
         }
         if (panCands) {
@@ -3226,9 +3244,9 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
                     [panCands addObject:[NSString stringWithFormat:@"%@@%@", NSStringFromClass([gr class]), NSStringFromClass([gr.view class])]];
             }
         }
-        for (UIView *sub in v.subviews) scan(sub);
+        for (UIView *sub in v.subviews) scan(sub, ownerWin);
     };
-    for (UIWindow *w in wins) { if (w) scan(w); }
+    for (UIWindow *w in wins) { if (w) scan(w, w); }
     static int sGeomCount = 0;
     if (geomFound && sGeomCount < 50) { sGeomCount++;
         OBLog(@"[diag-selgeom] 选择活动 触摸x=%.0f 最近距离=%.0f 手柄rect=(%.0f,%.0f,%.0f,%.0f) hit=%d",
@@ -3238,7 +3256,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     if (outActive) *outActive = anyHandlePresent;
     if (outMinDist) *outMinDist = (minDist == CGFLOAT_MAX ? 0 : minDist);
     if (hit) {
-        OBLog(@"[diag-handle] 命中活动选择手柄(%@)，距离=%.0f 触摸x=%.0f → shouldBegin 让路", hitCls ? hitCls : @"?", (minDist==CGFLOAT_MAX?0:minDist), sp.x);
+        OBLog(@"[diag-handle] 命中活动选择手柄(%@) via %@ 距离=%.0f 触摸x=%.0f → shouldBegin 让路", hitCls ? hitCls : @"?", hitReason ? hitReason : @"?", (minDist==CGFLOAT_MAX?0:minDist), sp.x);
         return 2;
     }
     if (anyHandlePresent && minDist > hitR && minDist < 260.0 && sNearCount < 25) {
