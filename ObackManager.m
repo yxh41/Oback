@@ -17,7 +17,7 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"FIX-log-v11d"
+#define OBACK_BUILD_TAG @"FIX-handle-v12"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -3115,17 +3115,50 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
             OBLog(@"[diag-hit] @(%.0f,%.0f) top=%@ chain=%@ grs=%@", sp.x, sp.y, NSStringFromClass([hv class]), chain, grs);
         }
     }
-    CGFloat hitR = 100.0;  // [2026-08-09 v9] 容差 70→100；配合半区约束(side)既放宽命中又隔离全局返回误判
+    CGFloat hitR = 60.0;   // [2026-08-09 v12] 手柄命中容差：锚定真实手柄几何(起止 caret rect)，不再依赖半区；60pt=caret+手柄圆(~22)+手指余量
     CGFloat screenW = 0;
     if (wins.count) { @try { screenW = ((UIWindow *)wins.firstObject).bounds.size.width; } @catch (NSException *e) {} }
-    if (screenW <= 0) screenW = 390.0;  // 兜底宽度（用于半区划分）
+    if (screenW <= 0) screenW = 390.0;  // 兜底宽度
     BOOL leftZone = (sp.x < 60.0);   // 左缘热区：失败多发的竞争区
     __block BOOL hit = NO;
     __block NSString *hitCls = nil;
     __block CGFloat minDist = CGFLOAT_MAX;
     __block NSString *minCls = nil;
     __block BOOL anyHandlePresent = NO;
+    __block CGRect hsRect = CGRectZero;   // 最近手柄屏幕 rect（诊断用）
     __block NSMutableSet *panCands = (leftZone ? [NSMutableSet set] : nil);  // 左缘：收集非 Oback 的 pan 候选(找 QQ 左缘自定义手势)
+    // (A) [2026-08-09 v12] 公开 API 选择几何：UITextView 有活动选择时，用 caretRectForPosition 算出起止手柄
+    // 真实屏幕坐标→判断触摸是否落在手柄上。不依赖私有手柄类名/所在 window——QQ 手柄怎么实现都能精确命中。
+    __block BOOL geomFound = NO;
+    void (^checkTV)(UITextView *) = ^(UITextView *tv){
+        if (!tv) return;
+        @try {
+            id selRange = tv.selectedTextRange;
+            if (!selRange || [selRange isEmpty]) return;
+            CGRect rS = CGRectZero, rE = CGRectZero;
+            @try { rS = [tv convertRect:[tv caretRectForPosition:[selRange start]] toView:nil]; } @catch (NSException *e) {}
+            @try { rE = [tv convertRect:[tv caretRectForPosition:[selRange end]] toView:nil]; } @catch (NSException *e) {}
+            CGFloat (^rd)(CGRect) = ^CGFloat(CGRect r){
+                if (CGRectIsEmpty(r)) return (CGFloat)CGFLOAT_MAX;
+                CGFloat nx = MAX(r.origin.x, MIN(sp.x, r.origin.x + r.size.width));
+                CGFloat ny = MAX(r.origin.y, MIN(sp.y, r.origin.y + r.size.height));
+                return (CGFloat)hypot(sp.x - nx, sp.y - ny);
+            };
+            CGFloat dS = rd(rS), dE = rd(rE);
+            CGFloat d = MIN(dS, dE);
+            geomFound = YES;
+            if (d < minDist) { minDist = d; minCls = @"UITextView.selection"; hsRect = (dS <= dE) ? rS : rE; }
+            anyHandlePresent = YES;
+            if (d <= hitR) { hit = YES; hitCls = @"UITextView.selection"; }
+        } @catch (NSException *e) {}
+    };
+    __block void (^scanTV)(UIView *);
+    scanTV = ^(UIView *v){
+        if (!v || v.hidden) return;
+        if ([v isKindOfClass:[UITextView class]]) checkTV((UITextView *)v);
+        for (UIView *sub in v.subviews) scanTV(sub);
+    };
+    for (UIWindow *w in wins) { if (w) scanTV(w); }
     // 手柄类名判定：2=论断式(QQ DragAnimation.* + UIKit 系统手柄/光标/放大镜)，1=泛匹配(需小视图排除大块选择高亮)
     NSInteger (^handleKind)(NSString *) = ^NSInteger(NSString *cls){
         if (!cls) return 0;
@@ -3182,17 +3215,24 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         for (UIView *sub in v.subviews) scan(sub);
     };
     for (UIWindow *w in wins) { if (w) scan(w); }
+    static int sGeomCount = 0;
+    if (geomFound && sGeomCount < 50) { sGeomCount++;
+        OBLog(@"[diag-selgeom] 选择活动 触摸x=%.0f 最近距离=%.0f 手柄rect=(%.0f,%.0f,%.0f,%.0f) hit=%d",
+              sp.x, (minDist==CGFLOAT_MAX?0:minDist), hsRect.origin.x, hsRect.origin.y, hsRect.size.width, hsRect.size.height, (int)hit);
+    }
     static int sNearCount = 0;
     if (outActive) *outActive = anyHandlePresent;
-    if (outMinDist) *outMinDist = minDist;
+    if (outMinDist) *outMinDist = (minDist == CGFLOAT_MAX ? 0 : minDist);
     if (hit) {
         OBLog(@"[diag-handle] 命中活动选择手柄(%@)，shouldBegin 让路 (触摸x=%.0f)", hitCls ? hitCls : @"?", sp.x);
         return 2;
     }
-    if (anyHandlePresent && minDist > hitR && minDist < 220.0 && sNearCount < 25) {
+    if (anyHandlePresent && minDist > hitR && minDist < 260.0 && sNearCount < 25) {
         sNearCount++;
-        OBLog(@"[diag-near] 选择激活但触摸未命中手柄: 触摸x=%.0f 最近=%@ 距离=%.0f 候选pan=%@",
-              sp.x, minCls ? minCls : @"?", minDist, (panCands ? [panCands allObjects] : @[]));
+        OBLog(@"[diag-near] 选择激活但触摸未命中手柄: 触摸x=%.0f 最近=%@ 距离=%.0f rect=(%.0f,%.0f,%.0f,%.0f) 候选pan=%@",
+              sp.x, minCls ? minCls : @"?", (minDist==CGFLOAT_MAX?0:minDist),
+              hsRect.origin.x, hsRect.origin.y, hsRect.size.width, hsRect.size.height,
+              (panCands ? [panCands allObjects] : @[]));
     }
     return anyHandlePresent ? 1 : 0;
 }
