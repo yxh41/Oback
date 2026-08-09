@@ -4,7 +4,7 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"FIX-handle-v6"
+#define OBACK_BUILD_TAG @"FIX-handle-v7"
 
 #pragma mark - 诊断日志（落地文件 + syslog，便于真机定位手势为何不触发）
 
@@ -1141,23 +1141,30 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
             CGPoint gloc = [pan locationInView:gw];
             CGPoint sp = [gw convertPoint:gloc toView:nil];   // 屏幕坐标，与手柄屏幕帧比对
             BOOL selActive = NO;
-            NSInteger hs = [self _touchOnActiveTextSelectionHandle:sp selectionActive:&selActive];
+            CGFloat minDist = 0;
+            NSInteger hs = [self _touchOnActiveTextSelectionHandle:sp selectionActive:&selActive minDist:&minDist];
             if (hs == 2) {
                 // 精确命中手柄(含动画帧容差)：让路手柄独占拖拽
                 OBLog(@"shouldBegin=NO (触摸命中文本选择手柄, 让路手柄拖拽)");
                 return NO;
             }
             if (selActive) {
-                // [2026-08-09 修复 v6] 选择激活时，回退侧热区列内触摸让路手柄拖拽。
-                // 日志34实证：用户常按在 x=80~110 文本上(手柄在 x≈55)，未命中60pt→被全屏 pan 抢走→拖不动；
-                // 对方大字体手柄更大→更易命中→能拉。此处分层：精确命中(hs==2)或回退侧列内(选择激活)→均让路。
-                // 这样「按在手柄附近文本上」也照样让路，不再依赖精确命中(命中目标太小会漏判)。
+                // [2026-08-09 修复 v6→v7] 选择激活时让路手柄拖拽，覆盖左右缘/按偏两种失败：
+                // (a) 回退侧热区列内触摸让路(保持左缘已验证行为，覆盖「按在手柄附近文本上」)；
+                // (b) 任意侧手柄：触摸靠近最近手柄(容差110pt)即让路——对称覆盖右缘手柄/按偏，
+                //     不再只限左缘110pt列(日志36实证：右缘手柄无宽松让路→按偏即被全屏 pan 抢走→拖不动)。
+                // (a)(b) 均以「选择激活 + 触摸在手柄附近」为条件→选择结束后全局返回立刻恢复，不回归。
                 BOOL rightSide = [ObackPreferences isGlobalBackRightSide];
                 CGFloat W = gw.bounds.size.width;
                 CGFloat col = 110.0;   // 回退侧热区列宽(覆盖对方左文本列 x≈50~110)
                 BOOL inBackCol = rightSide ? (sp.x > W - col) : (sp.x < col);
                 if (inBackCol) {
                     OBLog(@"shouldBegin=NO (选择激活+回退侧列内触摸x=%.0f, 让路手柄拖拽)", sp.x);
+                    return NO;
+                }
+                if (minDist <= 110.0) {
+                    // 触摸靠近某侧选择手柄(任意位置)→让路手柄独占拖拽，覆盖右缘手柄/按偏
+                    OBLog(@"shouldBegin=NO (选择激活+靠近选择手柄 x=%.0f 距离=%.0f, 让路手柄拖拽)", sp.x, minDist);
                     return NO;
                 }
             }
@@ -2905,7 +2912,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 // sp 为屏幕坐标([pan locationInView:win] 经 convertPoint:toView:nil 得到)，与各 window 手柄的屏幕帧比对。
 // 仅命中选择手柄类视图(系统私有类 _UIDragHandleGestureRecognizer 或其载体 _UIDragHandleView)，
 // 不靠模糊"Handle"匹配大视图→不会误杀全局返回。命中半径 44pt 容差手指。
-- (NSInteger)_touchOnActiveTextSelectionHandle:(CGPoint)sp selectionActive:(BOOL *)outActive {
+- (NSInteger)_touchOnActiveTextSelectionHandle:(CGPoint)sp selectionActive:(BOOL *)outActive minDist:(CGFloat *)outMinDist {
     if (outActive) *outActive = NO;
     Class dragHandleCls = NSClassFromString(@"_UIDragHandleGestureRecognizer");
     // 收集所有候选 window（含 QQ overlay window 上的选择视图）
@@ -2993,14 +3000,15 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     for (UIWindow *w in wins) { if (w) scan(w); }
     static int sNearCount = 0;
     if (outActive) *outActive = anyHandlePresent;
+    if (outMinDist) *outMinDist = minDist;
     if (hit) {
         OBLog(@"[diag-handle] 命中活动选择手柄(%@)，shouldBegin 让路 (触摸x=%.0f)", hitCls ? hitCls : @"?", sp.x);
         return 2;
     }
-    if (leftZone && anyHandlePresent && minDist > hitR && sNearCount < 20) {
+    if (anyHandlePresent && minDist > hitR && minDist < 220.0 && sNearCount < 25) {
         sNearCount++;
-        OBLog(@"[diag-near] 左缘选择激活但触摸未命中手柄: 最近=%@ 距离=%.0f 候选pan=%@",
-              minCls ? minCls : @"?", minDist, (panCands ? [panCands allObjects] : @[]));
+        OBLog(@"[diag-near] 选择激活但触摸未命中手柄: 触摸x=%.0f 最近=%@ 距离=%.0f 候选pan=%@",
+              sp.x, minCls ? minCls : @"?", minDist, (panCands ? [panCands allObjects] : @[]));
     }
     return anyHandlePresent ? 1 : 0;
 }
