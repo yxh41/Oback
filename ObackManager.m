@@ -2,9 +2,18 @@
 #import "ObackPreferences.h"
 #import <objc/runtime.h>
 
+// [v11] 私有方法前向声明：obShowLogCallback 是 C 函数，需显式声明否则 -Werror 报方法找不到
+@interface ObackManager ()
+- (void)_armShowLogOnForeground;
+- (void)_obShowLogNow;
+- (void)_obPresentLogVC:(NSString *)text;
+- (void)_obDismissLogVC;
+- (UIViewController *)_obKeyRootVC;
+@end
+
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"FIX-log-v11"
+#define OBACK_BUILD_TAG @"FIX-log-v11b"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -380,11 +389,36 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     });
 }
 
+- (UIViewController *)_obKeyRootVC {
+    UIWindow *kw = nil;
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
+            if ([sc isKindOfClass:[UIWindowScene class]] &&
+                sc.activationState == UISceneActivationStateForegroundActive) {
+                UIWindowScene *ws = (UIWindowScene *)sc;
+                // UIWindowScene.windows / UIWindow.isKeyWindow 均未被废弃，避开 UIApplication.windows/keyWindow 的 -Werror
+                for (UIWindow *w in ws.windows) {
+                    if (w.isKeyWindow) { kw = w; break; }
+                }
+                if (!kw && ws.windows.count) kw = ws.windows.firstObject;
+                break;
+            }
+        }
+    }
+    if (!kw) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        for (UIWindow *w in [UIApplication sharedApplication].windows) {
+            if (w.isKeyWindow) { kw = w; break; }
+        }
+        if (!kw) kw = [UIApplication sharedApplication].keyWindow;
+#pragma clang diagnostic pop
+    }
+    return kw.rootViewController;
+}
+
 - (void)_obPresentLogVC:(NSString *)text {
-    UIViewController *rvc = nil;
-    NSArray *wins = [UIApplication sharedApplication].windows;
-    for (UIWindow *w in wins) { if (w.isKeyWindow) { rvc = w.rootViewController; break; } }
-    if (!rvc) rvc = [UIApplication sharedApplication].keyWindow.rootViewController;
+    UIViewController *rvc = [self _obKeyRootVC];
     if (!rvc) return;
     UIViewController *vc = [[UIViewController alloc] init];
     vc.title = [NSString stringWithFormat:@"Oback 日志(%@)", OBACK_BUILD_TAG];
@@ -409,10 +443,7 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
 }
 
 - (void)_obDismissLogVC {
-    UIViewController *rvc = nil;
-    NSArray *wins = [UIApplication sharedApplication].windows;
-    for (UIWindow *w in wins) { if (w.isKeyWindow) { rvc = w.rootViewController; break; } }
-    if (!rvc) rvc = [UIApplication sharedApplication].keyWindow.rootViewController;
+    UIViewController *rvc = [self _obKeyRootVC];
     if (!rvc) return;
     if (rvc.presentedViewController) [rvc dismissViewControllerAnimated:YES completion:nil];
 }
