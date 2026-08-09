@@ -18,7 +18,7 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"opt-P1P6"
+#define OBACK_BUILD_TAG @"opt-P4P5"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -1111,35 +1111,6 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
             // [2026-08-06 修复①] 单条消息左滑引用/快速回复手势（SwipeAction/QuickReply）：
             // 不应被压制，而要让 panG 让步于它——左滑引用时它独占，右滑返回时它不 begin → panG 照常驱动返回。
             if ([self _isQQQuotePan:g]) {
-                @try { [globalPan requireGestureRecognizerToFail:g]; } @catch (NSException *e) {}
-                return;
-            }
-            // [2026-08-07 修复 元宝AI总结浮耳滑不出] 浮耳(NTAISummaryFloatEar)是独立拖拽手势：
-            // 不能让它失败于 Oback（否则 Oback 接管时浮耳被强制 fail → 拖不动总结），改为让 Oback 全屏 pan
-            // 失败于浮耳——用户滑浮耳时浮耳独占拖拽、Oback 让出（与引用手势同模式，单向无死锁）。
-            // 配合 _suppressQQNativePopForNav: 已排除禁用浮耳，浮耳可正常工作。
-            Class ybCls = NSClassFromString(@"NTAISummaryFloatEar");
-            if (ybCls && g.view && [g.view isKindOfClass:ybCls]) {
-                @try { [globalPan requireGestureRecognizerToFail:g]; } @catch (NSException *e) {}
-                return;
-            }
-            // [2026-08-08 修复 文本选择/光标] 光标/loupe(_UIPanOrFlickGestureRecognizer) 及文本视图上的 pan：
-            // Oback 让步（失败于它们），不在压制里禁用，否则聊天里选字/移动光标被吞。
-            // 注：消息列表的 _UIMultiSelectOneFingerPanGesture 不在此设静态 requireToFail——它铺满整个
-            // 聊天区(含左缘返回热区)，静态让路会在「从左缘起滑返回」时误让路给选择手势导致返回偶尔失效；
-            // 改由 gestureRecognizer:shouldBeRequiredToFailBy 动态仲裁(返回热区内不让路，保全局返回)。
-            Class flickCls = NSClassFromString(@"_UIPanOrFlickGestureRecognizer");
-            BOOL isLoupe = (flickCls && [g isKindOfClass:flickCls]);
-            BOOL isText = (g.view && ([g.view isKindOfClass:[UITextView class]] || [g.view isKindOfClass:[UITextField class]]));
-            if (isLoupe || isText) {
-                @try { [globalPan requireGestureRecognizerToFail:g]; } @catch (NSException *e) {}
-                return;
-            }
-            // [2026-08-08 修复 元宝总结左滑] 消息左滑手势(NTDiffableListKit.NTSwipeSpringAnimationContainerView)
-            // 用于触发引用/回复/元宝总结等；左滑永非全局返回（全局返回是右滑），Oback 一律让步（失败于它），
-            // 让其独占拖拽，解决「元宝总结滑不出」（见用户反馈）。
-            Class swipeCls = NSClassFromString(@"NTDiffableListKit.NTSwipeSpringAnimationContainerView");
-            if (swipeCls && g.view && [g.view isKindOfClass:swipeCls]) {
                 @try { [globalPan requireGestureRecognizerToFail:g]; } @catch (NSException *e) {}
                 return;
             }
@@ -3114,49 +3085,6 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     return NO;
 }
 
-// [2026-08-09 回归修复] 判定「蓝色选择手柄」是否正在被拖拽：仅当手柄手势(_UIDragHandleGestureRecognizer)
-// 真实处于 Began/Changed 才视为拖拽中。手柄手势类常驻于文本视图(未拖拽时为 Possible/Failed)，
-// 不能仅凭类名/视图存在判断——否则聊天里任意滑返回都会被误判为"在拖手柄"而让路、全局返回失效。
-// 与 _activeTextSelectionInWindow: 区分：后者判"是否有选择"(含静止选中态)，本方法判"是否正在拖拽手柄"。
-- (BOOL)_activeHandleDragInWindow:(UIWindow *)win {
-    if (!win) return NO;
-    Class dragHandleCls = NSClassFromString(@"_UIDragHandleGestureRecognizer");
-    if (!dragHandleCls) return NO;
-    __block BOOL found = NO;
-    __block void (^checkView)(UIView *);
-    checkView = ^(UIView *v) {
-        if (found || !v) return;
-        for (UIGestureRecognizer *gr in v.gestureRecognizers) {
-            if ([gr isKindOfClass:dragHandleCls]) {
-                UIGestureRecognizerState s = gr.state;
-                if (s == UIGestureRecognizerStateBegan || s == UIGestureRecognizerStateChanged) { found = YES; return; }
-            }
-        }
-        for (UIView *sub in v.subviews) checkView(sub);
-    };
-    checkView(win);
-    if (found) return YES;
-    // 补充 overlay window（QQ 选择/放大镜视图可能放在别的 window）
-    NSArray *wins = nil;
-    @try {
-        if (@available(iOS 13.0, *)) {
-            NSMutableArray *arr = [NSMutableArray array];
-            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]]) [arr addObjectsFromArray:((UIWindowScene *)scene).windows];
-            }
-            wins = arr;
-        } else {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            wins = [[UIApplication sharedApplication] windows];
-            #pragma clang diagnostic pop
-        }
-    } @catch (NSException *e) { wins = nil; }
-    for (UIWindow *w in wins) {
-        if (w && w != win) { checkView(w); if (found) return YES; }
-    }
-    return NO;
-}
 
 // [2026-08-09 文本选择手柄修复 v3] 判定「屏幕坐标 sp 是否落在活动文本选择手柄(蓝柄)上/附近」。
 // 仅在 shouldBegin 可控层使用：触摸落在手柄→Oback pan 不 begin→手柄独占拖拽。
