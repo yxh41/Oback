@@ -17,7 +17,7 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"FIX-handle-v12d"
+#define OBACK_BUILD_TAG @"FIX-handle-v12e"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -3115,7 +3115,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
             OBLog(@"[diag-hit] @(%.0f,%.0f) top=%@ chain=%@ grs=%@", sp.x, sp.y, NSStringFromClass([hv class]), chain, grs);
         }
     }
-    CGFloat hitR = 60.0;   // [2026-08-09 v12] 手柄命中容差：锚定真实手柄几何(起止 caret rect)，不再依赖半区；60pt=caret+手柄圆(~22)+手指余量
+    CGFloat hitR = 75.0;   // [2026-08-09 v12e] 容差 60→75：配合子视图真实帧定位，给手指余量；半区 side 约束仍护全局返回
     CGFloat screenW = 0;
     if (wins.count) { @try { screenW = ((UIWindow *)wins.firstObject).bounds.size.width; } @catch (NSException *e) {} }
     if (screenW <= 0) screenW = 390.0;  // 兜底宽度
@@ -3173,6 +3173,28 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
             [cls containsString:@"Flick"]) return 1;
         return 0;
     };
+    // [v12e] 手柄有效屏幕 rect：容器 frame 可能为零(动画/overlay window)，递归取其可见子视图(手柄球)的非空小帧包围盒
+    // 定位真实手柄位置——v.center 对零帧容器失真(实测差 101~160pt→漏判)。只取 <140pt 的小帧，排除选择高亮等大块。
+    CGRect (^effectiveRect)(UIView *) = ^CGRect(UIView *hv){
+        CGRect r = CGRectZero;
+        @try { r = [hv convertRect:hv.bounds toView:nil]; } @catch (NSException *e) { r = CGRectZero; }
+        if (!CGRectIsEmpty(r)) return r;
+        __block CGRect acc = CGRectZero;
+        __block void (^walk)(UIView *, int) = nil;
+        walk = ^(UIView *v, int depth){
+            if (!v || depth > 2) return;
+            for (UIView *s in v.subviews) {
+                CGRect sr = CGRectZero;
+                @try { sr = [s convertRect:s.bounds toView:nil]; } @catch (NSException *e) { sr = CGRectZero; }
+                if (!CGRectIsEmpty(sr) && sr.size.width < 140.0 && sr.size.height < 140.0) {
+                    acc = CGRectIsEmpty(acc) ? sr : CGRectUnion(acc, sr);
+                }
+                if (depth < 2) walk(s, depth + 1);
+            }
+        };
+        walk(hv, 0);
+        return acc;
+    };
     __block void (^scan)(UIView *, UIWindow *);
     scan = ^(UIView *v, UIWindow *ownerWin) {
         if (!v || v.hidden) return;  // [v10] 去掉 alpha<0.01/frame空跳过：QQ 手柄出现是 alpha/scale 动画，帧未稳时这些为真→漏检(根因)
@@ -3200,9 +3222,8 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
                 }
             }
             // 距离/坐标诊断（尽力；动画帧稳时作为 hitTest 的补充命中，不稳时仅诊断，不依赖）
-            CGRect sf = CGRectZero;
-            @try { sf = [v convertRect:v.bounds toView:nil]; } @catch (NSException *e) { sf = CGRectZero; }
-            if (CGRectIsEmpty(sf)) { @try { sf = [v.superview convertRect:v.frame toView:nil]; } @catch (NSException *e) { sf = CGRectZero; } }
+            // [v12e] 用 effectiveRect：零帧容器取可见子视图(手柄球)真实帧，纠正 v.center 失真
+            CGRect sf = effectiveRect(v);
             CGPoint c = CGPointZero; BOOL haveRect = NO;
             if (!CGRectIsEmpty(sf)) {
                 c = CGPointMake(CGRectGetMidX(sf), CGRectGetMidY(sf)); haveRect = YES;
