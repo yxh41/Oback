@@ -19,7 +19,7 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"opt-P3"
+#define OBACK_BUILD_TAG @"opt-P2"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -3123,13 +3123,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
             if (d <= hitR) { hit = YES; hitCls = @"UITextView.selection"; }
         } @catch (NSException *e) {}
     };
-    __block void (^scanTV)(UIView *);
-    scanTV = ^(UIView *v){
-        if (!v || v.hidden) return;
-        if ([v isKindOfClass:[UITextView class]]) checkTV((UITextView *)v);
-        for (UIView *sub in v.subviews) scanTV(sub);
-    };
-    for (UIWindow *w in wins) { if (w) scanTV(w); }
+    // [P2] 原 scanTV(UITextView 选择几何) 已合并进下方 scan 的单次遍历：整树遍历 2 次→1 次，检测逻辑零变化
     // 手柄类名判定：2=论断式(QQ DragAnimation.* + UIKit 系统手柄/光标/放大镜)，1=泛匹配(需小视图排除大块选择高亮)
     NSInteger (^handleKind)(NSString *) = ^NSInteger(NSString *cls){
         if (!cls) return 0;
@@ -3184,8 +3178,9 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         return acc;
     };
     __block void (^scan)(UIView *, UIWindow *);
-    scan = ^(UIView *v, UIWindow *ownerWin) {
+    scan = ^(UIView *v, UIWindow *ownerWin, UIView *winHitView) {
         if (!v || v.hidden) return;  // [v10] 去掉 alpha<0.01/frame空跳过：QQ 手柄出现是 alpha/scale 动画，帧未稳时这些为真→漏检(根因)
+        if ([v isKindOfClass:[UITextView class]]) checkTV((UITextView *)v);  // [P2] 合并 scanTV：UITextView 选择几何并入单次遍历
         NSString *cls = NSStringFromClass([v class]);
         NSInteger kind = handleKind(cls);
         if (kind == 0 && dragHandleCls && [v isKindOfClass:dragHandleCls]) kind = 2;
@@ -3198,12 +3193,8 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
             // 现改为：在手柄所属 window(ownerWin) 上对触摸点 sp 做 hitTest，若命中视图是 v 或其后代/
             // 或命中链含手柄类 → 手指确在手柄上 → 让路。完全绕开坐标计算，用 UIKit 自带 hitTest 几何，
             // 动画帧稳不稳都准（hitTest 按当前渲染帧判定，与视觉一致）。
-            if (ownerWin && !hit) {
-                CGPoint wp = CGPointZero;
-                @try { wp = [ownerWin convertPoint:sp fromView:nil]; } @catch (NSException *e) { wp = CGPointZero; }
-                UIView *hitView = nil;
-                @try { hitView = [ownerWin hitTest:wp withEvent:nil]; } @catch (NSException *e) { hitView = nil; }
-                UIView *t = hitView;
+            if (ownerWin && !hit && winHitView) {  // [P2] 复用每 window 预计算的 hitTest 结果，不再为每个手柄视图重复 hitTest 整树
+                UIView *t = winHitView;
                 while (t) {
                     if (t == v || handleKind(NSStringFromClass([t class])) > 0) {
                         hit = YES; hitCls = cls; hitReason = @"hitTest"; break;
@@ -3268,9 +3259,16 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
                     [panCands addObject:[NSString stringWithFormat:@"%@@%@", NSStringFromClass([gr class]), NSStringFromClass([gr.view class])]];
             }
         }
-        for (UIView *sub in v.subviews) scan(sub, ownerWin);
+        for (UIView *sub in v.subviews) scan(sub, ownerWin, winHitView);
     };
-    for (UIWindow *w in wins) { if (w) scan(w, w); }
+    for (UIWindow *w in wins) {   // [P2] 每 window 仅做一次 hitTest，结果随 scan 下传，避免对每个手柄视图重复 hitTest 整树
+        if (!w) continue;
+        CGPoint wp = CGPointZero;
+        @try { wp = [w convertPoint:sp fromView:nil]; } @catch (NSException *e) {}
+        UIView *hw = nil;
+        @try { hw = [w hitTest:wp withEvent:nil]; } @catch (NSException *e) { hw = nil; }
+        scan(w, w, hw);
+    }
     static int sGeomCount = 0;
     if (geomFound && sGeomCount < 50) { sGeomCount++;
         OBDIAG(@"[diag-selgeom] 选择活动 触摸x=%.0f 最近距离=%.0f 手柄rect=(%.0f,%.0f,%.0f,%.0f) hit=%d",
