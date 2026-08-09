@@ -4,7 +4,7 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"FIX-handle-v8"
+#define OBACK_BUILD_TAG @"FIX-handle-v9"
 
 #pragma mark - 诊断日志（落地文件 + syslog，便于真机定位手势为何不触发）
 
@@ -2942,7 +2942,10 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
             OBLog(@"[diag-hit] @(%.0f,%.0f) top=%@ chain=%@ grs=%@", sp.x, sp.y, NSStringFromClass([hv class]), chain, grs);
         }
     }
-    CGFloat hitR = 70.0;   // 手指容差半径（覆盖手柄动画帧未稳定/定位偏差；同时是"精确命中手柄"的让路门槛）
+    CGFloat hitR = 100.0;  // [2026-08-09 v9] 容差 70→100；配合半区约束(side)既放宽命中又隔离全局返回误判
+    CGFloat screenW = 0;
+    if (wins.count) { @try { screenW = ((UIWindow *)wins.firstObject).bounds.size.width; } @catch (NSException *e) {} }
+    if (screenW <= 0) screenW = 390.0;  // 兜底宽度（用于半区划分）
     BOOL leftZone = (sp.x < 60.0);   // 左缘热区：失败多发的竞争区
     __block BOOL hit = NO;
     __block NSString *hitCls = nil;
@@ -2975,10 +2978,18 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
             @try { sf = [v convertRect:v.bounds toView:nil]; } @catch (NSException *e) { sf = CGRectZero; }
             if (!CGRectIsEmpty(sf)) {
                 CGPoint c = CGPointMake(CGRectGetMidX(sf), CGRectGetMidY(sf));
-                CGFloat d = (CGFloat)hypot(c.x - sp.x, c.y - sp.y);
+                // [v9] 改用「到手柄矩形最近点距离」(dRect)：按在手柄边缘外侧也能命中，比到中心距离更准
+                CGFloat nx = MAX(sf.origin.x, MIN(sp.x, sf.origin.x + sf.size.width));
+                CGFloat ny = MAX(sf.origin.y, MIN(sp.y, sf.origin.y + sf.size.height));
+                CGFloat d = (CGFloat)hypot(sp.x - nx, sp.y - ny);
                 if (d < minDist) { minDist = d; minCls = cls; }
                 BOOL small = (kind == 2) ? YES : (sf.size.width < 140.0 && sf.size.height < 140.0);
-                if (small && d <= hitR) { hit = YES; hitCls = cls; }
+                // [v9] 半区约束 side：手柄中心与触摸点在同一半屏才放宽让路，避免 v7「选择激活+任意处≤110」
+                // 把全屏返回起滑误判为让路(全局返回回归)。左柄只管左半、右柄只管右半；居中柄(≈W/2) side 恒真。
+                BOOL side = (c.x < screenW * 0.5f) ? (sp.x < screenW * 0.5f) : (sp.x >= screenW * 0.5f);
+                BOOL near = (d <= hitR);
+                BOOL veryNear = (d <= 45.0f);   // 极近兜底：不限侧，范围小不影响返回
+                if (small && ((near && side) || veryNear)) { hit = YES; hitCls = cls; }
             }
         }
         if (panCands) {
