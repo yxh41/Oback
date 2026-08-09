@@ -18,7 +18,7 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"FIX-handle-v13"
+#define OBACK_BUILD_TAG @"opt-P1P6"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -46,8 +46,23 @@ static NSString *OBLogPath(void) {
 
 static BOOL _obLogWasOn = NO;   // 跟踪上次开关状态，用于「关→开」翻转时打分隔标记（明确日志起点边界）
 
+// [P1] debugLog 开关状态微缓存：避免每条日志都读盘整个 plist（见 OBLog 内使用）
+static BOOL __obLogEnabledCache = NO;            // 缓存的开关值
+static NSTimeInterval __obLogEnabledCacheTS = 0;  // 缓存时间戳（timeIntervalSinceReferenceDate）
+#define OB_LOG_ENABLED_TTL 0.3                     // 缓存窗口(秒)：少读盘 vs 开关近即时生效
+
 void OBLog(NSString *fmt, ...) {
-    BOOL enabled = [ObackPreferences debugLogEnabledLive];   // [v11] 实时读，去 2s TTL 缓存，开关翻转下次手势即生效
+    // [P1] 热路径微缓存：debugLog 开关缓存 0.3s，避免每条日志都 dictionaryWithContentsOfFile 读整个 plist
+    // （此前每次触摸十余次主线程磁盘 IO，低端机可感微卡；现每 0.3s 最多读一次，开关翻转延迟≤0.3s 仍近即时）。
+    NSTimeInterval __obLogNow = [NSDate timeIntervalSinceReferenceDate];
+    BOOL enabled;
+    if ((__obLogNow - __obLogEnabledCacheTS) < OB_LOG_ENABLED_TTL) {
+        enabled = __obLogEnabledCache;
+    } else {
+        enabled = [ObackPreferences debugLogEnabledLive];
+        __obLogEnabledCache = enabled;
+        __obLogEnabledCacheTS = __obLogNow;
+    }
     if (!enabled) {
         // 开→关翻转：追加「关闭」分隔标记，明确日志边界，消除「关了还有日志」的困惑
         // （那其实是旧文件累积；有边界标记就能一眼看出哪段是有效日志、哪段是历史）。仅打一次，不持续写。
@@ -93,6 +108,16 @@ void OBLog(NSString *fmt, ...) {
     NSLog(@"%@", line);
     [msg release];
 }
+
+#pragma mark - [P6] 诊断日志宏（编译期收敛）
+
+// 所有 [diag-*] 诊断日志统一走本宏。当前在 Makefile 定义 OBACK_DIAG=1（真机调试需要），故照常输出；
+// 若需极简 release 包，去掉 Makefile 的 -DOBACK_DIAG 即可把全部诊断日志整体编译剔除（含参数计算），进一步减负。
+#ifdef OBACK_DIAG
+#define OBDIAG(fmt, ...) OBLog(fmt, ##__VA_ARGS__)
+#else
+#define OBDIAG(fmt, ...) do {} while (0)
+#endif
 
 #pragma mark - 仅识别横向的 pan（避免纵向滑动误触发返回）
 @interface ObackPanGestureRecognizer : UIScreenEdgePanGestureRecognizer
@@ -1074,7 +1099,7 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
             // → Oback 照常接管全局返回。逐 cell 局部手势，不覆盖空白区/导航栏/底栏，全局返回爆炸半径极小。
             if ([self _isQQRichTextSelectionPan:g]) {
                 @try { [globalPan requireGestureRecognizerToFail:g]; } @catch (NSException *e) {}
-                OBLog(@"[diag-qqsel] 静态让步: Oback 全屏 pan 失败于 QQ 选择拖拽 pan %@@%@",
+                OBDIAG(@"[diag-qqsel] 静态让步: Oback 全屏 pan 失败于 QQ 选择拖拽 pan %@@%@",
                       NSStringFromClass([g class]), NSStringFromClass([g.view class]));
                 return;
             }
@@ -1218,7 +1243,7 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
             // 手柄自然拖不动。现放行不压制。它不可能是 QQ 原生 pop（原生 pop 挂 UILayoutContainerView）。
             if ([self _isQQTextOrSelectionPan:g]) {
                 if ([self _isQQRichTextSelectionPan:g])
-                    OBLog(@"[diag-qqsel] 压制放行: 保留 QQ 选择拖拽 pan %@@%@ (不禁用)",
+                    OBDIAG(@"[diag-qqsel] 压制放行: 保留 QQ 选择拖拽 pan %@@%@ (不禁用)",
                           NSStringFromClass([g class]), NSStringFromClass([g.view class]));
                 return;
             }
@@ -1380,7 +1405,7 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
                 // 文本选择(按在手柄上)仍由 hs==2 精确命中接管，不受影响。
                 static int sBackOk = 0;
                 if (sBackOk < 15) { sBackOk++;
-                    OBLog(@"[diag-back-ok] 选择激活但触摸x=%.0f 不在手柄上(最近距离=%.0f) → Oback 全局返回 proceed", sp.x, minDist);
+                    OBDIAG(@"[diag-back-ok] 选择激活但触摸x=%.0f 不在手柄上(最近距离=%.0f) → Oback 全局返回 proceed", sp.x, minDist);
                 }
             }
         }
@@ -1433,7 +1458,7 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
         top = nav.topViewController;
     }
     if (edge == ObackEdgeLeft && [kind isEqualToString:@"nav"]) {
-        OBLog(@"[diag-left-nav] kind=nav nav=%@ top=%@ presenting=%d childCount=%lu",
+        OBDIAG(@"[diag-left-nav] kind=nav nav=%@ top=%@ presenting=%d childCount=%lu",
               nav ? NSStringFromClass([nav class]) : @"nil",
               top ? NSStringFromClass([top class]) : @"nil",
               (int)(top.presentingViewController != nil),
@@ -2086,7 +2111,7 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
                            (other.view && ([other.view isKindOfClass:[UITextView class]] ||
                                            [other.view isKindOfClass:[UITextField class]])));
             if (selish) {
-                OBLog(@"[diag-reqfail-sel] shouldRequireFailureOf globalPan other=%@ view=%@ isHandle=%d isCaret=%d",
+                OBDIAG(@"[diag-reqfail-sel] shouldRequireFailureOf globalPan other=%@ view=%@ isHandle=%d isCaret=%d",
                       socls, other.view ? NSStringFromClass([other.view class]) : @"nil", isHandle, isCaret);
             }
         }
@@ -2095,7 +2120,7 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
         BOOL isQQSelPan = ([other isKindOfClass:[UIPanGestureRecognizer class]] &&
                            [self _isQQRichTextSelectionPan:(UIPanGestureRecognizer *)other]);
         if (isHandle || isCaret || isQQSelPan) {
-            OBLog(@"[diag-reqfail] shouldRequireFailureOf: 全屏 panG 要求 %@@%@ 先判定(让路文本选择手柄/光标/QQ选择拖拽)",
+            OBDIAG(@"[diag-reqfail] shouldRequireFailureOf: 全屏 panG 要求 %@@%@ 先判定(让路文本选择手柄/光标/QQ选择拖拽)",
                   NSStringFromClass([other class]), other.view ? NSStringFromClass([other.view class]) : @"nil");
             return YES;
         }
@@ -2169,7 +2194,7 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
                               (theOther.view && ([theOther.view isKindOfClass:[UITextView class]] ||
                                                  [theOther.view isKindOfClass:[UITextField class]]));
                 if (diagSel) {
-                    OBLog(@"[diag-simul] shouldRecognizeSimultaneouslyWith: global=%@ other=%@ view=%@ ret=NO",
+                    OBDIAG(@"[diag-simul] shouldRecognizeSimultaneouslyWith: global=%@ other=%@ view=%@ ret=NO",
                           NSStringFromClass([global class]), oName, NSStringFromClass([theOther.view class]));
                 }
             }
@@ -2227,7 +2252,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
                               (other.view && ([other.view isKindOfClass:[UITextView class]] ||
                                               [other.view isKindOfClass:[UITextField class]]));
                 if (diagSel) {
-                    OBLog(@"[diag-yield] shouldBeRequiredToFailBy: g=panG other=%@ view=%@ isQQYieldPan=%d",
+                    OBDIAG(@"[diag-yield] shouldBeRequiredToFailBy: g=panG other=%@ view=%@ isQQYieldPan=%d",
                           oName, NSStringFromClass([other.view class]),
                           [self _isQQYieldPan:(UIPanGestureRecognizer *)other]);
                 }
@@ -2715,7 +2740,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         BOOL knownCustom = (bid && [bid caseInsensitiveCompare:@"com.tencent.xin"] == NSOrderedSame)
                         || (nav && [NSStringFromClass([nav class]) hasPrefix:@"MMUI"]);
         if (!t && !knownCustom) {
-            OBLog(@"[diag-navTarget] nil | bid=%@ nav=%@ ipg=%@ enabled=%d targets.count=%lu delegate=%@",
+            OBDIAG(@"[diag-navTarget] nil | bid=%@ nav=%@ ipg=%@ enabled=%d targets.count=%lu delegate=%@",
                   bid, NSStringFromClass([nav class]), ipg,
                   (ipg ? (int)((UIGestureRecognizer *)ipg).enabled : -1),
                   (unsigned long)(targets ? targets.count : 0),
@@ -3176,7 +3201,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
             while (t && d < 5) { [chain appendFormat:@"%@/", NSStringFromClass([t class])]; t = t.superview; d++; }
             NSMutableString *grs = [NSMutableString string];
             for (UIGestureRecognizer *g in (hv.gestureRecognizers ?: @[])) [grs appendFormat:@"%@,", NSStringFromClass([g class])];
-            OBLog(@"[diag-hit] @(%.0f,%.0f) top=%@ chain=%@ grs=%@", sp.x, sp.y, NSStringFromClass([hv class]), chain, grs);
+            OBDIAG(@"[diag-hit] @(%.0f,%.0f) top=%@ chain=%@ grs=%@", sp.x, sp.y, NSStringFromClass([hv class]), chain, grs);
         }
     }
     CGFloat hitR = 75.0;   // [2026-08-09 v12e] 容差 60→75：配合子视图真实帧定位，给手指余量；半区 side 约束仍护全局返回
@@ -3369,19 +3394,19 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     for (UIWindow *w in wins) { if (w) scan(w, w); }
     static int sGeomCount = 0;
     if (geomFound && sGeomCount < 50) { sGeomCount++;
-        OBLog(@"[diag-selgeom] 选择活动 触摸x=%.0f 最近距离=%.0f 手柄rect=(%.0f,%.0f,%.0f,%.0f) hit=%d",
+        OBDIAG(@"[diag-selgeom] 选择活动 触摸x=%.0f 最近距离=%.0f 手柄rect=(%.0f,%.0f,%.0f,%.0f) hit=%d",
               sp.x, (minDist==CGFLOAT_MAX?0:minDist), hsRect.origin.x, hsRect.origin.y, hsRect.size.width, hsRect.size.height, (int)hit);
     }
     static int sNearCount = 0;
     if (outActive) *outActive = anyHandlePresent;
     if (outMinDist) *outMinDist = (minDist == CGFLOAT_MAX ? 0 : minDist);
     if (hit) {
-        OBLog(@"[diag-handle] 命中活动选择手柄(%@) via %@ 距离=%.0f 触摸x=%.0f → shouldBegin 让路", hitCls ? hitCls : @"?", hitReason ? hitReason : @"?", (minDist==CGFLOAT_MAX?0:minDist), sp.x);
+        OBDIAG(@"[diag-handle] 命中活动选择手柄(%@) via %@ 距离=%.0f 触摸x=%.0f → shouldBegin 让路", hitCls ? hitCls : @"?", hitReason ? hitReason : @"?", (minDist==CGFLOAT_MAX?0:minDist), sp.x);
         return 2;
     }
     if (anyHandlePresent && minDist > hitR && minDist < 260.0 && sNearCount < 25) {
         sNearCount++;
-        OBLog(@"[diag-near] 选择激活但触摸未命中手柄: 触摸x=%.0f 最近=%@ 距离=%.0f rect=(%.0f,%.0f,%.0f,%.0f) 手柄视图数=%d winNil=%d geom=%d 候选pan=%@",
+        OBDIAG(@"[diag-near] 选择激活但触摸未命中手柄: 触摸x=%.0f 最近=%@ 距离=%.0f rect=(%.0f,%.0f,%.0f,%.0f) 手柄视图数=%d winNil=%d geom=%d 候选pan=%@",
               sp.x, minCls ? minCls : @"?", (minDist==CGFLOAT_MAX?0:minDist),
               hsRect.origin.x, hsRect.origin.y, hsRect.size.width, hsRect.size.height,
               sHandleViews, sHandleWinNil, (int)geomFound,

@@ -20,6 +20,7 @@ Oback_FILES := Tweak.xm \
 Oback_FRAMEWORKS := UIKit
 Oback_PRIVATE_FRAMEWORKS :=
 Oback_LIBRARIES :=
+Oback_CFLAGS := -DOBACK_DIAG=1   # [P6] 开启诊断日志编译（移除即整体剔除 [diag-*] 诊断日志，出极简包）
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
