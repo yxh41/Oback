@@ -82,6 +82,18 @@ static NSDictionary *_obSliderUnits(void) {
         id val = [d objectForKey:key];
         if (val) oback_setGlobalPref(key, val);   // 仅镜像有显式值的 key；nil 跳过，避免清掉未设置项的默认
     }
+    // [P9] 同步「调试日志」按钮标题（开关改为直写，标题反映文件真实状态）
+    BOOL _dl = NO;
+    NSDictionary *_dg = [NSDictionary dictionaryWithContentsOfFile:kOBGlobalPlist];
+    if (_dg) { id _dv = [_dg objectForKey:@"debugLog"]; if (_dv) _dl = [_dv boolValue]; }
+    for (PSSpecifier *spec in _specifiers) {
+        if ([[spec propertyForKey:@"action"] isEqualToString:@"toggleDebugLog"]) {
+            [spec performSelector:NSSelectorFromString(@"setProperty:forKey:")
+                       withObject:(_dl ? @"调试日志：开" : @"调试日志：关")
+                       withObject:@"label"];
+            break;
+        }
+    }
 }
 
 // 方案B（弹窗返回）专属键集合：关掉「弹窗返回增强设置」时整体隐藏这些项及其独占分组头。
@@ -312,6 +324,32 @@ static NSSet *_obPlanBKeys(void) {
     [a addAction:[UIAlertAction actionWithTitle:@"好"
                                           style:UIAlertActionStyleDefault
                                         handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+// [P9] 调试日志开关改为按钮直写：点按直接 oback_setGlobalPref 写全局文件，
+// 不依赖 PreferenceLoader 的 setPreferenceValue: 回调（用户 roothide 下该回调不可靠，开关拨了 tweak 读不到）。
+// 复用与黑名单相同的写路径（ObackAppListController 直写，已证明 tweak 可读到），确保 toggle 一定生效。
+- (void)toggleDebugLog {
+    BOOL cur = NO;
+    NSDictionary *g = [NSDictionary dictionaryWithContentsOfFile:kOBGlobalPlist];
+    if (g) { id v = [g objectForKey:@"debugLog"]; if (v) cur = [v boolValue]; }
+    BOOL next = !cur;
+    oback_setGlobalPref(@"debugLog", @(next));
+    // 刷新标题（下次进设置页也会由 viewWillAppear 同步）
+    for (PSSpecifier *spec in _specifiers) {
+        if ([[spec propertyForKey:@"action"] isEqualToString:@"toggleDebugLog"]) {
+            [spec performSelector:NSSelectorFromString(@"setProperty:forKey:")
+                       withObject:(next ? @"调试日志：开" : @"调试日志：关")
+                       withObject:@"label"];
+            break;
+        }
+    }
+    UIAlertController *a = [UIAlertController
+        alertControllerWithTitle:@"调试日志"
+                         message:(next ? @"已开启。回 QQ 做几次手势，再用「显示调试日志」查看内存日志。" : @"已关闭。")
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:a animated:YES completion:nil];
 }
 
