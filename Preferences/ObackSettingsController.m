@@ -25,10 +25,11 @@
 - (void)setProperty:(id)property forKey:(NSString *)key;
 @end
 
-// PSListController 头未声明 reloadSpecifier:/cellForSpecifier:，补前向声明让刷新按钮标题在 -Werror 下编译通过
+// PSListController 头未声明 reloadSpecifier:/cellForSpecifier:/indexPathForSpecifier:，补前向声明让刷新按钮标题在 -Werror 下编译通过
 @interface PSListController (ObackCellRefresh)
 - (void)reloadSpecifier:(PSSpecifier *)specifier;
 - (UITableViewCell *)cellForSpecifier:(PSSpecifier *)specifier;
+- (NSIndexPath *)indexPathForSpecifier:(PSSpecifier *)specifier;
 @end
 
 // 方案B（弹窗/sheet 下拉返回）专属设置项——关掉「弹窗返回增强设置」开关时整体隐藏，
@@ -352,16 +353,27 @@ static NSSet *_obPlanBKeys(void) {
     for (PSSpecifier *spec in _specifiers) {
         if ([[spec propertyForKey:@"action"] isEqualToString:@"toggleDebugLog"]) {
             [spec setProperty:newTitle forKey:@"label"];
+            // [P11/P13] 刷新「调试日志」按钮可见标题。
+            // reloadSpecifier: 在本 roothide PreferenceLoader 版本不重渲染 PSButtonCell 标题，
+            // 且 cellForSpecifier: 可能返回非屏上 cell；故优先用 indexPathForSpecifier: +
+            // tableView cellForRowAtIndexPath: 取到屏上真实 cell，直接改 textLabel（最稳）。
+            UITableViewCell *liveCell = nil;
+            if ([self respondsToSelector:@selector(indexPathForSpecifier:)]) {
+                NSIndexPath *ip = [self indexPathForSpecifier:spec];
+                if (ip && [self respondsToSelector:@selector(tableView)]) {
+                    liveCell = [self.tableView cellForRowAtIndexPath:ip];
+                }
+            }
+            if (!liveCell && [self respondsToSelector:@selector(cellForSpecifier:)]) {
+                liveCell = [self cellForSpecifier:spec];
+            }
+            if (liveCell && [liveCell respondsToSelector:@selector(textLabel)] && liveCell.textLabel) {
+                liveCell.textLabel.text = newTitle;
+                [liveCell setNeedsLayout];
+            }
+            // 兜底：整行重建（仍读 spec.label=新值）
             if ([self respondsToSelector:@selector(reloadSpecifier:)]) {
-                [self reloadSpecifier:spec];   // 重建 cell 读取新 label
-            }
-            // 兜底：直接改可见 cell 文本，避免 reloadSpecifier 在某些 PreferenceLoader 版本不重渲染标题
-            UITableViewCell *cell = nil;
-            if ([self respondsToSelector:@selector(cellForSpecifier:)]) {
-                cell = [self cellForSpecifier:spec];
-            }
-            if (cell && [cell respondsToSelector:@selector(textLabel)] && cell.textLabel) {
-                cell.textLabel.text = newTitle;
+                [self reloadSpecifier:spec];
             }
             break;
         }
