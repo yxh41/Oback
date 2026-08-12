@@ -353,30 +353,18 @@ static NSSet *_obPlanBKeys(void) {
     for (PSSpecifier *spec in _specifiers) {
         if ([[spec propertyForKey:@"action"] isEqualToString:@"toggleDebugLog"]) {
             [spec setProperty:newTitle forKey:@"label"];
-            // [P11/P13] 刷新「调试日志」按钮可见标题。
-            // reloadSpecifier: 在本 roothide PreferenceLoader 版本不重渲染 PSButtonCell 标题，
-            // 且 cellForSpecifier: 可能返回非屏上 cell；故优先用 indexPathForSpecifier: +
-            // tableView cellForRowAtIndexPath: 取到屏上真实 cell，直接改 textLabel（最稳）。
-            UITableViewCell *liveCell = nil;
-            if ([self respondsToSelector:@selector(indexPathForSpecifier:)]) {
-                NSIndexPath *ip = [self indexPathForSpecifier:spec];
-                if (ip && [self respondsToSelector:@selector(tableView)]) {
-                    liveCell = [self.tableView cellForRowAtIndexPath:ip];
-                }
-            }
-            if (!liveCell && [self respondsToSelector:@selector(cellForSpecifier:)]) {
-                liveCell = [self cellForSpecifier:spec];
-            }
-            if (liveCell && [liveCell respondsToSelector:@selector(textLabel)] && liveCell.textLabel) {
-                liveCell.textLabel.text = newTitle;
-                [liveCell setNeedsLayout];
-            }
-            // 兜底：整行重建（仍读 spec.label=新值）
-            if ([self respondsToSelector:@selector(reloadSpecifier:)]) {
-                [self reloadSpecifier:spec];
-            }
             break;
         }
+    }
+    // [P14] 整表重建以刷新 PSButtonCell 标题。PSButtonCell 的标题渲染在内部按钮(_button)上，
+    // 本 roothide PreferenceLoader 下 reloadSpecifier:/cellForSpecifier:/indexPathForSpecifier:
+    // 均不更新按钮标题（P11/P13 实测无效），且 self.tableView 不返回真实 tableView。唯一可靠路径是
+    // 直接 reload 整个 UITableView，重建所有 cell 重走 setSpecifier: 从已改的 spec.label 读新标题。
+    // 设置页 specifier 数量极少，整表重建无性能/视觉负担。
+    UITableView *tv = nil;
+    @try { tv = [self valueForKey:@"table"]; } @catch (NSException *e) { tv = nil; }
+    if (tv && [tv respondsToSelector:@selector(reloadData)]) {
+        [tv reloadData];
     }
     UIAlertController *a = [UIAlertController
         alertControllerWithTitle:@"调试日志"
