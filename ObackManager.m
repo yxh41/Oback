@@ -14,12 +14,13 @@
 - (void)_obCopyLog;
 - (BOOL)_isQQRichTextSelectionPan:(UIPanGestureRecognizer *)g;   // [v13] 前向声明：在其定义之前被 _isQQTextOrSelectionPan: 调用
 - (NSArray<UIWindow *> *)_allVisibleWindows;   // [P3] 集中枚举可见 window，替代 5 处重复实现
+- (void)_obInterruptActiveInteraction;   // [P8] 进后台/自愈看门狗强制收尾进行中交互（防 QQ 快照 watchdog 闪退）
 @property (nonatomic, retain) UIActivityViewController *logActivityVC;  // [v11c] retain 防活动视图控制器提前释放(MRC 陷阱)
 @end
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"opt-P2"
+#define OBACK_BUILD_TAG @"opt-P8"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -563,6 +564,12 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(windowBecameKey:)
                                                  name:UIWindowDidBecomeKeyNotification
+                                               object:nil];
+    // [P8] 进后台强制收尾进行中交互：QQ 切后台时系统做场景快照，若 Oback 使其视图层卡在转场中
+    // 会让快照等不到 settle → 10s 0x8BADF00D watchdog 闪退。进后台即收尾使视图静止，快照可 settle。
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(_obInterruptActiveInteraction)
+                                                 name:UIApplicationDidEnterBackgroundNotification
                                                object:nil];
 }
 
@@ -1753,6 +1760,13 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
                 pan.cancelsTouchesInView = NO;
             }
             self.interacting = YES;   // 占住，防其他 pan 同时在 shouldBegin 被放行
+            // [P8] 自愈看门狗：若本次手势 1.5s 后仍未收到终态并被清空(interacting 仍 YES)，
+            // 说明手势被切后台/锁屏/弹窗等中断而未派发 Ended/Cancelled → interacting 卡死，
+            // 会致 QQ 视图层卡在转场中、切后台快照 watchdog(0x8BADF00D) 闪退。兜底强制收尾。
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                if (self.interacting) { [self _obInterruptActiveInteraction]; }
+            });
             // [2026-08-06 根治 QQ 原生 NTPushPopLib 抢先 pop] Began 即禁用 QQ 原生全屏返回 pan，
             // 使其收不到本轮触摸，Oback 独占驱动（不再依赖不可靠的跨 window requireToFail）；
             // 手势结束/取消时 _restoreQQNativePop 恢复。仅 QQ/TIM 且有可 pop 的 nav 时生效。
@@ -1857,6 +1871,36 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
     [self dismissIndicatorSafety];
     pan.enabled = NO;
     pan.enabled = YES;
+}
+
+// [P8] 修复 QQ 切后台 scene-update watchdog 闪退（崩溃报告 EXC_CRASH/SIGKILL 0x8BADF00D）：
+// 全屏 pan 接管 QQ 的 NTPushPopLib 转场后，手势被切后台/锁屏/弹窗中断而未收到终态回调时，
+// interacting 会卡在 YES、挂起转场动画不收尾 → QQ 视图层永远「在转场中」→
+// 后台场景快照(UIApplication _performSnapshotsWithAction)等不到 settle → 10s 看门狗强杀。
+// 进后台/失活或前台自愈看门狗触发时调用：主动收尾一切进行中交互，使视图层立即静止 → 快照可 settle。
+- (void)_obInterruptActiveInteraction {
+    if (self.interacting) {
+        OBLog(@"[P8] 强制收尾进行中交互 interacting=YES（防快照 watchdog 闪退）");
+    }
+    self.interacting = NO;
+    _globalDriven = NO;
+    [self _restoreQQNativePop];                 // 清残留的 QQ 原生 pop 禁用（避免原生手势永久失能）
+    // 强制完成挂起的转场动画（视图归位静止），复用既有 forceFinishIfNeeded 收尾路径
+    if (_watchAnimator) {
+        @try { [_watchAnimator forceFinishIfNeeded]; } @catch (NSException *e) { OBLog(@"[P8] forceFinish(_watchAnimator) fail: %@", e); }
+        [_watchAnimator release];
+        _watchAnimator = nil;
+    }
+    // 方案A 系统交互动画器若仍卡 interactive 态，同样强制收尾（参考 _scheduleNavPopWatchdog 防御性复位）
+    if (_navPopTarget && [_navPopTarget respondsToSelector:@selector(finishInteractiveTransition)]) {
+        @try { [_navPopTarget finishInteractiveTransition]; } @catch (NSException *e) { OBLog(@"[P8] finish(_navPopTarget) fail: %@", e); }
+    }
+    _navPopTarget = nil;
+    self.currentAnimator = nil;
+    self.interactive = nil;
+    _currentPercent = 0;
+    _transitionTriggered = NO;
+    [self dismissIndicatorSafety];              // 收起胶囊（interacting 已置 NO，会执行）
 }
 
 - (void)beginTransition:(UIPanGestureRecognizer *)pan {
