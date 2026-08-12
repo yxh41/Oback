@@ -20,6 +20,11 @@
 - (void)setPreferenceValue:(id)value forSpecifier:(PSSpecifier *)specifier;
 @end
 
+// PSSpecifier 头未声明 setProperty:forKey:，补声明以直接调用（避免 performSelector 泄漏警告 -Werror 编译失败）
+@interface PSSpecifier (ObackSetProp)
+- (void)setProperty:(id)property forKey:(NSString *)key;
+@end
+
 // 方案B（弹窗/sheet 下拉返回）专属设置项——关掉「弹窗返回增强设置」开关时整体隐藏，
 // 避免用户在日常用方案A（原生 nav pop）时误调这些"调了无变化"的滑块。
 @interface ObackSettingsController ()
@@ -88,9 +93,7 @@ static NSDictionary *_obSliderUnits(void) {
     if (_dg) { id _dv = [_dg objectForKey:@"debugLog"]; if (_dv) _dl = [_dv boolValue]; }
     for (PSSpecifier *spec in _specifiers) {
         if ([[spec propertyForKey:@"action"] isEqualToString:@"toggleDebugLog"]) {
-            [spec performSelector:NSSelectorFromString(@"setProperty:forKey:")
-                       withObject:(_dl ? @"调试日志：开" : @"调试日志：关")
-                       withObject:@"label"];
+            [spec setProperty:(_dl ? @"调试日志：开" : @"调试日志：关") forKey:@"label"];
             break;
         }
     }
@@ -339,9 +342,7 @@ static NSSet *_obPlanBKeys(void) {
     // 刷新标题（下次进设置页也会由 viewWillAppear 同步）
     for (PSSpecifier *spec in _specifiers) {
         if ([[spec propertyForKey:@"action"] isEqualToString:@"toggleDebugLog"]) {
-            [spec performSelector:NSSelectorFromString(@"setProperty:forKey:")
-                       withObject:(next ? @"调试日志：开" : @"调试日志：关")
-                       withObject:@"label"];
+            [spec setProperty:(next ? @"调试日志：开" : @"调试日志：关") forKey:@"label"];
             break;
         }
     }
