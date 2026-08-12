@@ -20,7 +20,7 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"opt-P11"
+#define OBACK_BUILD_TAG @"opt-P12"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -1029,10 +1029,54 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
     if (scrollPanCls && [g isKindOfClass:scrollPanCls]) return NO;   // scrollView 的 pan 另有通道，不在此
     NSString *vcls = NSStringFromClass([g.view class]);
     if (!vcls) return NO;
-    NSArray *kw = @[@"RichText", @"TextContent", @"AIOText", @"TextView", @"TextField", @"TextMessage", @"TextBubble"];
+    NSArray *kw = @[@"RichText", @"TextContent", @"AIOText", @"TextMessage", @"TextBubble"];
     for (NSString *k in kw) {
         if ([vcls rangeOfString:k options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
     }
+    return NO;
+}
+
+// [2026-08-13 P12 窄让路] 判定是否处于「文本选择中」：仅此时才让路给 QQ 文本/手柄手势，
+// 否则 Oback 接管全局返回(避免聊天正文区返回失效)。触发条件：
+//  ① 真实 UITextView/UITextField 已有选中文本(selectedRange>0 / selectedTextRange 非空)；
+//  ② loupe/光标手势(_UIPanOrFlickGestureRecognizer)已开始(长按选择进行中)；
+//  ③ 窗口内存在选择手柄(_UIDragHandleGestureRecognizer 或类名含 DragHandle/SelectionHandle)→ 选中态。
+// 覆盖 QQ 自研 AIO 富文本(其视图无 selectedRange API，靠手柄存在性判定)。
+- (BOOL)_obWindowHasDragHandle:(UIWindow *)win {
+    if (!win) return NO;
+    Class dh = NSClassFromString(@"_UIDragHandleGestureRecognizer");
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:win];
+    while (stack.count) {
+        UIView *v = [stack lastObject];
+        [stack removeLastObject];
+        for (UIGestureRecognizer *gr in v.gestureRecognizers) {
+            if (dh && [gr isKindOfClass:dh] && gr.enabled) return YES;
+            NSString *cn = NSStringFromClass([gr class]);
+            if ([cn containsString:@"DragHandle"] || [cn containsString:@"SelectionHandle"] ||
+                [cn containsString:@"TextSelectionHandle"]) return YES;
+        }
+        for (UIView *sub in v.subviews) [stack addObject:sub];
+    }
+    return NO;
+}
+
+- (BOOL)_obShouldYieldToTextSelection:(UIPanGestureRecognizer *)other {
+    if (other.view) {
+        if ([other.view isKindOfClass:[UITextView class]]) {
+            UITextView *tv = (UITextView *)other.view;
+            if (tv.selectedRange.length > 0) return YES;
+        } else if ([other.view isKindOfClass:[UITextField class]]) {
+            UITextField *tf = (UITextField *)other.view;
+            UITextRange *sr = tf.selectedTextRange;
+            if (sr && ![sr isEmpty]) return YES;
+        }
+    }
+    Class flickCls = NSClassFromString(@"_UIPanOrFlickGestureRecognizer");
+    if (flickCls && [other isKindOfClass:flickCls] &&
+        (other.state == UIGestureRecognizerStateBegan || other.state == UIGestureRecognizerStateChanged)) return YES;
+    NSArray *wins = nil;
+    @try { wins = [self _allVisibleWindows]; } @catch (NSException *e) { wins = nil; }
+    for (UIWindow *w in wins) { if ([self _obWindowHasDragHandle:w]) return YES; }
     return NO;
 }
 
@@ -1089,8 +1133,10 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
             // 按住手柄 → 它 begin → Oback 不 begin，手柄独占拖拽；在气泡上普通横滑 → 它不识别、立即 fail
             // → Oback 照常接管全局返回。逐 cell 局部手势，不覆盖空白区/导航栏/底栏，全局返回爆炸半径极小。
             if ([self _isQQRichTextSelectionPan:g]) {
-                @try { [globalPan requireGestureRecognizerToFail:g]; } @catch (NSException *e) {}
-                OBDIAG(@"[diag-qqsel] 静态让步: Oback 全屏 pan 失败于 QQ 选择拖拽 pan %@@%@",
+                // [P12] 不再静态 requireToFail：此前无条件让路导致聊天正文区全屏返回失效。
+                // 改交 shouldRequireFailureOf/shouldBeRequiredToFailBy 动态仲裁：仅当选中态激活
+                // (_obShouldYieldToTextSelection)时 Oback 才让路(保手柄拖拽)，否则 Oback 默认接管返回。
+                OBDIAG(@"[diag-qqsel] 富文本选择 pan 改动态仲裁(不再静态让步): %@@%@",
                       NSStringFromClass([g class]), NSStringFromClass([g.view class]));
                 return;
             }
@@ -2076,7 +2122,8 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
         Class flickCls = NSClassFromString(@"_UIPanOrFlickGestureRecognizer");
         BOOL isCaret = (flickCls && [other isKindOfClass:flickCls] &&
                         other.view && ([other.view isKindOfClass:[UITextView class]] ||
-                                       [other.view isKindOfClass:[UITextField class]]));
+                                       [other.view isKindOfClass:[UITextField class]]) &&
+                        [self _obShouldYieldToTextSelection:(UIPanGestureRecognizer *)other]);
         // [DIAG4] 更宽的选类过滤日志：只要对手类名含 Handle/Drag/Flick/Select/Caret 或挂在文本视图，
         // 就打一行（即便 isHandle/isCaret 没命中也打），用于确认 shouldRequireFailureOf 是否被 UIKit
         // 用手柄调用过。若这行从不出现 → 手柄根本没进我们的仲裁(不同 window/独占)→ 需 hook 思路。
@@ -2095,7 +2142,8 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
         // [2026-08-09 v13] 加入 QQ 自研富文本选择拖拽 pan：本方法返回 YES == 我们的 panG 要求 other 先失败
         // → other 优先，这才是真正的"让路"方向（与 shouldBeRequiredToFailBy 相反，勿再搞混）。
         BOOL isQQSelPan = ([other isKindOfClass:[UIPanGestureRecognizer class]] &&
-                           [self _isQQRichTextSelectionPan:(UIPanGestureRecognizer *)other]);
+                           [self _isQQRichTextSelectionPan:(UIPanGestureRecognizer *)other] &&
+                           [self _obShouldYieldToTextSelection:(UIPanGestureRecognizer *)other]);
         if (isHandle || isCaret || isQQSelPan) {
             OBDIAG(@"[diag-reqfail] shouldRequireFailureOf: 全屏 panG 要求 %@@%@ 先判定(让路文本选择手柄/光标/QQ选择拖拽)",
                   NSStringFromClass([other class]), other.view ? NSStringFromClass([other.view class]) : @"nil");
@@ -2276,11 +2324,27 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
                 return NO;
             }
             if ([self _isQQRichTextSelectionPan:(UIPanGestureRecognizer *)other]) {
-                return NO;   // [v13] QQ 选择拖拽 pan：同上，不给 Oback 优先（静态 requireToFail 已让路）
+                return NO;   // [P12] QQ 选择拖拽 pan：不给 Oback 优先；让路与否由 shouldRequireFailureOf 按选中态动态决定
             }
             // 元宝浮耳拖拽 / 消息左滑：宽区交互，返回热区(对应侧边缘 40pt)内优先返回、不让路；
             // 热区外(真正在气泡上左滑)才让路。与上面手柄/光标不同，这里边缘返回优先更合理。
             if ([self _isQQYieldPan:(UIPanGestureRecognizer *)other]) {
+                // [P12] 文本/选择类手势(手柄/光标/loupe/真实文本视图)：仅选中态让路，否则 Oback 接管返回(任意位置有效)
+                Class dragHandleCls = NSClassFromString(@"_UIDragHandleGestureRecognizer");
+                Class flickClsY = NSClassFromString(@"_UIPanOrFlickGestureRecognizer");
+                BOOL isTextSel = (dragHandleCls && [other isKindOfClass:dragHandleCls]) ||
+                                 (flickClsY && [other isKindOfClass:flickClsY]) ||
+                                 (other.view && ([other.view isKindOfClass:[UITextView class]] ||
+                                                [other.view isKindOfClass:[UITextField class]]));
+                if (isTextSel) {
+                    if ([self _obShouldYieldToTextSelection:(UIPanGestureRecognizer *)other]) {
+                        OBLog(@"shouldBeRequiredToFailBy: 全屏 panG 让路于 %@ (选中态保文本选择)", NSStringFromClass([other class]));
+                        return YES;
+                    }
+                    OBLog(@"shouldBeRequiredToFailBy: 全屏 panG 不让路于 %@ (无选中, 保全局返回)", NSStringFromClass([other class]));
+                    return NO;
+                }
+                // 元宝浮耳/消息左滑：保留原返回热区(对应侧边缘 40pt)内优先返回、热区外让路
                 BOOL rightSide = [ObackPreferences isGlobalBackRightSide];
                 CGPoint p = [g locationInView:nil];
                 CGFloat W = [UIScreen mainScreen].bounds.size.width;
