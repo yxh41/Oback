@@ -25,6 +25,12 @@
 - (void)setProperty:(id)property forKey:(NSString *)key;
 @end
 
+// PSListController 头未声明 reloadSpecifier:/cellForSpecifier:，补前向声明让刷新按钮标题在 -Werror 下编译通过
+@interface PSListController (ObackCellRefresh)
+- (void)reloadSpecifier:(PSSpecifier *)specifier;
+- (UITableViewCell *)cellForSpecifier:(PSSpecifier *)specifier;
+@end
+
 // 方案B（弹窗/sheet 下拉返回）专属设置项——关掉「弹窗返回增强设置」开关时整体隐藏，
 // 避免用户在日常用方案A（原生 nav pop）时误调这些"调了无变化"的滑块。
 @interface ObackSettingsController ()
@@ -339,10 +345,24 @@ static NSSet *_obPlanBKeys(void) {
     if (g) { id v = [g objectForKey:@"debugLog"]; if (v) cur = [v boolValue]; }
     BOOL next = !cur;
     oback_setGlobalPref(@"debugLog", @(next));
-    // 刷新标题（下次进设置页也会由 viewWillAppear 同步）
+    // [P11] 刷新「调试日志」按钮标题：仅改 spec.label 不会刷新已显示的 cell（PSButtonCell 在
+    // setSpecifier: 时读 label 作标题，后续不变），故必须 reload 该行或直设 cell.textLabel。
+    // 之前无论开/关都显示「关」即此因——点按后 alert 弹窗盖住旧 cell，关掉后 cell 仍是 plist 静态文案。
+    NSString *newTitle = (next ? @"调试日志：开" : @"调试日志：关");
     for (PSSpecifier *spec in _specifiers) {
         if ([[spec propertyForKey:@"action"] isEqualToString:@"toggleDebugLog"]) {
-            [spec setProperty:(next ? @"调试日志：开" : @"调试日志：关") forKey:@"label"];
+            [spec setProperty:newTitle forKey:@"label"];
+            if ([self respondsToSelector:@selector(reloadSpecifier:)]) {
+                [self reloadSpecifier:spec];   // 重建 cell 读取新 label
+            }
+            // 兜底：直接改可见 cell 文本，避免 reloadSpecifier 在某些 PreferenceLoader 版本不重渲染标题
+            UITableViewCell *cell = nil;
+            if ([self respondsToSelector:@selector(cellForSpecifier:)]) {
+                cell = [self cellForSpecifier:spec];
+            }
+            if (cell && [cell respondsToSelector:@selector(textLabel)] && cell.textLabel) {
+                cell.textLabel.text = newTitle;
+            }
             break;
         }
     }
