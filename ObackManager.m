@@ -20,7 +20,7 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"opt-P9"
+#define OBACK_BUILD_TAG @"opt-P10"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -1763,9 +1763,17 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
             // [P8] 自愈看门狗：若本次手势 1.5s 后仍未收到终态并被清空(interacting 仍 YES)，
             // 说明手势被切后台/锁屏/弹窗等中断而未派发 Ended/Cancelled → interacting 卡死，
             // 会致 QQ 视图层卡在转场中、切后台快照 watchdog(0x8BADF00D) 闪退。兜底强制收尾。
+            // [P10] 前台自愈看门狗仅在「手势非用户正在拖动」(pan.state != .changed) 时才强制收尾。
+            // 此前只判 self.interacting，未判 pan 是否仍在拖动：用户慢拖到半路停顿 >~1.5s 时被误杀 →
+            // _obInterruptActiveInteraction 清 interacting/_globalDriven 但未取消 pan → 仍活跃的 .changed
+            // 重入 handleGlobalPan 二次设 _globalDriven=YES 并空转 beginTransition(currentAnimator 仍 nil) →
+            // 二次转场无 animator 可收尾 → 视图卡半路须切后台快照才恢复。进后台路径(DidEnterBackgroundNotification)
+            // 仍无条件收尾，确保快照前归位正确。MRC：pan 为长期挂 window 的同一实例，块强引用无环。
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
-                if (self.interacting) { [self _obInterruptActiveInteraction]; }
+                if (self.interacting && pan.state != UIGestureRecognizerStateChanged) {
+                    [self _obInterruptActiveInteraction];
+                }
             });
             // [2026-08-06 根治 QQ 原生 NTPushPopLib 抢先 pop] Began 即禁用 QQ 原生全屏返回 pan，
             // 使其收不到本轮触摸，Oback 独占驱动（不再依赖不可靠的跨 window requireToFail）；
