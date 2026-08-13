@@ -275,6 +275,18 @@ static void OBApplyParallax(CGFloat percent,
         // 双保险：无论动画是否完成，收尾前强制上一页 transform 归位为 identity，
         // 杜绝 dispatch_after/异常路径下 toView 残留缩放态（scrollView 错位/空白）。
         toView.transform = CGAffineTransformIdentity;
+        // [2026-08-13 诊断] 顶部空白排查：转场收尾记录 toView 关键状态，供下次日志定位
+        {
+            UINavigationController *diagNav = [toVC navigationController] ?: [fromVC navigationController];
+            OBLog(@"[topblank-diag] to=%@ frame=%@ tf=%@ sup=%@ win=%@ navBarHidden=%d topVC=%@",
+                  NSStringFromClass([toVC class]),
+                  NSStringFromCGRect(toView.frame),
+                  NSStringFromCGAffineTransform(toView.transform),
+                  toView.superview ? NSStringFromClass([toView.superview class]) : @"nil",
+                  toView.window ? @"Y" : @"N",
+                  diagNav ? (int)(diagNav.navigationBar.hidden) : -1,
+                  diagNav ? NSStringFromClass([diagNav.topViewController class]) : @"nil");
+        }
         @try {
             [ctx completeTransition:commit];
         } @catch (NSException *exception) {
