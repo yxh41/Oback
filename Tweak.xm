@@ -8,10 +8,11 @@
 static void *kNavDelegateKey = &kNavDelegateKey;
 extern void *kPanKey;   // 定义于 ObackManager.m：window 上挂载的 Oback 全屏 pan 手势
 
-#pragma mark - 冲突插件检测（仅诊断，不再阻断）
-// 已知与 Oback 可能共存的 tweak（如 AppTool）。以前命中即完全退避（setDelegate 透传），会掐掉
-// Oback 的 nav 自定义动画。现已解除退避——ObackNavDelegate 安全转发，fd 必为最外层，动画接管由
-// Oback 决定。此处仅保留运行时检测并打日志，供真机验证共存风险。
+#pragma mark - 冲突插件检测（命中即退避）
+// 已知与 Oback 可能共存的 tweak（AppTool）。2026-07-25 曾解除退避（仅诊断），
+// 但真机证实 AppTool 共存会令 QQ 在注入期进程秒杀（无 .ips/无日志，Choicy 禁其注入即恢复）。
+// 故恢复退避：命中即整体不注入（setDelegate 透传 + 不启动手势管理器 + 不挂边缘 pan），
+// 彻底规避与 AppTool 在 QQ 进程内的冲突。需用 AppTool 的用户可用 Choicy 二选一。
 // 检测在运行时（App 启动后所有 dylib 已加载）惰性解析一次并缓存，避免 %ctor 阶段顺序问题导致漏检。
 static BOOL _obackBackOffResolved = NO;
 static BOOL _obackBackOff = NO;
@@ -153,18 +154,21 @@ static BOOL oback_shouldBackOff(void) {
 %hook UINavigationController
 
 - (void)setDelegate:(id)delegate {
-    // [2026-07-25 变更] 解除 AppTool 退避：此前命中 AppTool 时完全透传、永不包装 ObackNavDelegate，
-    // 导致 nav 自定义动画（视差/胶囊/动量）整个被掐掉。现改为即使检测到 AppTool 共存也正常包装 fd——
-    // ObackNavDelegate 已实现 forwardingTargetForSelector:，对未实现方法安全转发回原 delegate，
-    // 不会让 AppTool 收到 nil；且 fd 必为 nav.delegate 最外层，动画接管由 Oback 决定，AppTool 通过
-    // forwarding 仍能收到 delegate 消息。与 AppTool 共存的手势双触发/卡死/黑屏风险需真机验证。
-    // 当前 App 不在生效范围（白/黑名单）时，仍直接透传原方法，不做任何包装
+    // [2026-07-25 变更] 曾解除 AppTool 退避（改为正常包装 ObackNavDelegate），但真机证实 AppTool 共存
+    // 会令 QQ 注入期进程秒杀（无 .ips/无日志，Choicy 禁其注入即恢复）。
+    // [2026-08-13 回退] 恢复退避：命中 AppTool 即完全透传（见下方 oback_shouldBackOff 分支），
+    // 不再包装 fd，彻底规避与 AppTool 在 QQ 进程内的冲突。代价是 AppTool 在场时 Oback 在 QQ 内不生效
+    // （用户可用 Choicy 二选一）。当前 App 不在生效范围（白/黑名单）时，仍直接透传原方法，不做任何包装
     if (![ObackPreferences isAllowed]) {
         %orig;
         return;
     }
     if (oback_shouldBackOff()) {
-        OBLog(@"oback: 检测到 AppTool 共存，已解除退避，正常包装 fd（共存风险待真机验证）");
+        // [2026-08-13 修复] AppTool 共存实测令 QQ 注入期进程秒杀（无 .ips/无日志），Choicy 禁其注入即恢复。
+        // 恢复退避：命中即完全透传、不包装 ObackNavDelegate，彻底规避与 AppTool 在 QQ 进程内的冲突。
+        OBLog(@"oback: 检测到 AppTool 共存，已退避（不包装 nav delegate，规避共存崩溃）");
+        %orig;
+        return;
     }
     // 避免递归：已是我们自己的转发器时直接调用原方法（透传原参数）
     if ([delegate isKindOfClass:[ObackNavDelegate class]]) {
@@ -198,7 +202,7 @@ static BOOL oback_shouldBackOff(void) {
     }
     // [2026-07-25 修复 朋友圈] 双 hook（viewDidLoad + viewDidAppear）确保微信 MMUINavigationController
     // 无论在哪一处调用 super 都能挂上边缘 pan（幂等，重复挂无效）；绕过自定义容器枚举遗漏。
-    if (![ObackPreferences isAllowed]) return;
+    if (![ObackPreferences isAllowed] || oback_shouldBackOff()) return;
     [[ObackManager shared] _attachNavPanToNav:self win:self.view.window];
     if (![ObackPreferences isLeftEdgeExcluded]) {
     self.interactivePopGestureRecognizer.enabled = NO;
@@ -211,7 +215,7 @@ static BOOL oback_shouldBackOff(void) {
     // [2026-07-25 修复 朋友圈] swizzle UINavigationController 基类：任意子类（含微信 MMUINavigationController）
     // 一显示即自动挂边缘 pan 到 nav.view 并关掉系统原生 interactivePop——绕过自定义容器枚举遗漏
     // （朋友圈所在 nav 不在 win.rootViewController 标准 childViewControllers 链上，旧枚举永远漏挂 → 无返回）。
-    if (![ObackPreferences isAllowed]) return;
+    if (![ObackPreferences isAllowed] || oback_shouldBackOff()) return;
     [[ObackManager shared] _attachNavPanToNav:self win:self.view.window];
     if (![ObackPreferences isLeftEdgeExcluded]) {
     self.interactivePopGestureRecognizer.enabled = NO;
@@ -230,7 +234,7 @@ static BOOL oback_shouldBackOff(void) {
     // 几乎必调，作为兜底挂载点（幂等：已挂过则 _attachNavPanToNav 直接 return）。此处只挂 pan +
     // 关原生 interactivePop，不做全窗口链接（layout 调用频次高，链接已在 viewDidAppear / windowBecameKey
     // 各跑一次，且晚到 scrollView 由 shouldBegin 精准补链）。
-    if (![ObackPreferences isAllowed]) return;
+    if (![ObackPreferences isAllowed] || oback_shouldBackOff()) return;
     if (self.view.window) {
         [[ObackManager shared] _attachNavPanToNav:self win:self.view.window];
         if (![ObackPreferences isLeftEdgeExcluded]) {
@@ -273,8 +277,12 @@ static BOOL oback_shouldBackOff(void) {
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification *note){
-        // 注：手势(核心功能)始终启动；与 AppTool 的冲突只通过 setDelegate: 透传来规避，
-        // 不在此处停掉手势，否则会连主功能一起关掉。
+        // [2026-08-13 修复] AppTool 共存会令进程秒杀，故检测到即整体退避（不启动手势管理器），
+        // 与下方 nav hook 的退避一致，彻底规避冲突。Choicy 禁 AppTool 注入时本检测为假，Oback 正常生效。
+        if (oback_shouldBackOff()) {
+            OBLog(@"oback: 检测到 AppTool 共存，已退避，不启动手势管理器（规避共存崩溃）");
+            return;
+        }
         [[ObackManager shared] start];
     }];
 }
