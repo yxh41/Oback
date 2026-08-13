@@ -8,17 +8,18 @@
 static void *kNavDelegateKey = &kNavDelegateKey;
 extern void *kPanKey;   // 定义于 ObackManager.m：window 上挂载的 Oback 全屏 pan 手势
 
-#pragma mark - 冲突插件检测（命中即退避）
-// 已知与 Oback 可能共存的 tweak（AppTool）。2026-07-25 曾解除退避（仅诊断），
-// 但真机证实 AppTool 共存会令 QQ 在注入期进程秒杀（无 .ips/无日志，Choicy 禁其注入即恢复）。
-// 故恢复退避：命中即整体不注入（setDelegate 透传 + 不启动手势管理器 + 不挂边缘 pan），
-// 彻底规避与 AppTool 在 QQ 进程内的冲突。需用 AppTool 的用户可用 Choicy 二选一。
+#pragma mark - 冲突插件检测（仅诊断，不阻断）
+// 已知与 Oback 可能共存的 tweak（AppTool）。2026-07-25 起解除退避（仅诊断）；
+// 真机中 AppTool 共存曾疑似令 QQ 注入期秒杀，但用户实测其他 app 在 Oback+AppTool 共存下均正常，
+// 判定 QQ 闪退为其他问题，故维持「不阻断」：检测到 AppTool 仅打日志，Oback 仍照常注入
+// （setDelegate 包装 + 启动手势管理器 + 挂边缘 pan），两插件共存均生效。
 // 检测在运行时（App 启动后所有 dylib 已加载）惰性解析一次并缓存，避免 %ctor 阶段顺序问题导致漏检。
 static BOOL _obackBackOffResolved = NO;
-static BOOL _obackBackOff = NO;
 
 static BOOL oback_shouldBackOff(void) {
-    if (_obackBackOffResolved) return _obackBackOff;
+    // 2026-08-14 起：仅做运行时检测并打印诊断日志，不再据此退避——
+    // 用户实测其他 app 在 Oback+AppTool 共存下均正常，判定 QQ 闪退为其他问题，两插件均保持生效。
+    if (_obackBackOffResolved) return NO;
     _obackBackOffResolved = YES;
     NSArray<NSString *> *incompatible = @[ @"AppTool" ];
     for (uint32_t i = 0; i < _dyld_image_count(); i++) {
@@ -27,10 +28,9 @@ static BOOL oback_shouldBackOff(void) {
         NSString *name = [NSString stringWithUTF8String:img];
         if (!name) continue;
         for (NSString *n in incompatible) {
-            if ([[name lastPathComponent] hasPrefix:n]) { _obackBackOff = YES; OBLog(@"oback backoff resolved = 1 (检测到 %@)", n); return YES; }
+            if ([[name lastPathComponent] hasPrefix:n]) { OBLog(@"oback: 检测到 %@ 共存（仅诊断，Oback 仍生效）", n); return NO; }
         }
     }
-    _obackBackOff = NO;
     OBLog(@"oback backoff resolved = 0 (无冲突插件)");
     return NO;
 }
@@ -154,19 +154,9 @@ static BOOL oback_shouldBackOff(void) {
 %hook UINavigationController
 
 - (void)setDelegate:(id)delegate {
-    // [2026-07-25 变更] 曾解除 AppTool 退避（改为正常包装 ObackNavDelegate），但真机证实 AppTool 共存
-    // 会令 QQ 注入期进程秒杀（无 .ips/无日志，Choicy 禁其注入即恢复）。
-    // [2026-08-13 回退] 恢复退避：命中 AppTool 即完全透传（见下方 oback_shouldBackOff 分支），
-    // 不再包装 fd，彻底规避与 AppTool 在 QQ 进程内的冲突。代价是 AppTool 在场时 Oback 在 QQ 内不生效
-    // （用户可用 Choicy 二选一）。当前 App 不在生效范围（白/黑名单）时，仍直接透传原方法，不做任何包装
+    // 冲突插件（AppTool 等）仅做运行时诊断打印，不阻断：Oback 始终照常包装 ObackNavDelegate。
+    // 用户实测其他 app 在 Oback+AppTool 共存下均正常，故两插件均在 QQ 生效。
     if (![ObackPreferences isAllowed]) {
-        %orig;
-        return;
-    }
-    if (oback_shouldBackOff()) {
-        // [2026-08-13 修复] AppTool 共存实测令 QQ 注入期进程秒杀（无 .ips/无日志），Choicy 禁其注入即恢复。
-        // 恢复退避：命中即完全透传、不包装 ObackNavDelegate，彻底规避与 AppTool 在 QQ 进程内的冲突。
-        OBLog(@"oback: 检测到 AppTool 共存，已退避（不包装 nav delegate，规避共存崩溃）");
         %orig;
         return;
     }
@@ -277,12 +267,7 @@ static BOOL oback_shouldBackOff(void) {
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification *note){
-        // [2026-08-13 修复] AppTool 共存会令进程秒杀，故检测到即整体退避（不启动手势管理器），
-        // 与下方 nav hook 的退避一致，彻底规避冲突。Choicy 禁 AppTool 注入时本检测为假，Oback 正常生效。
-        if (oback_shouldBackOff()) {
-            OBLog(@"oback: 检测到 AppTool 共存，已退避，不启动手势管理器（规避共存崩溃）");
-            return;
-        }
+        // 冲突插件（AppTool 等）仅诊断打印，不阻断手势管理器启动；Oback 与 AppTool 共存均生效。
         [[ObackManager shared] start];
     }];
 }
