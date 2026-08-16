@@ -275,16 +275,30 @@ static void OBApplyParallax(CGFloat percent,
         // 双保险：无论动画是否完成，收尾前强制上一页 transform 归位为 identity，
         // 杜绝 dispatch_after/异常路径下 toView 残留缩放态（scrollView 错位/空白）。
         toView.transform = CGAffineTransformIdentity;
-        // [2026-08-13 诊断] 顶部空白排查：转场收尾记录 toView 关键状态，供下次日志定位
+        // [2026-08-16 诊断增强] 顶部空白排查：转场收尾记录 toView + 导航栏关键状态，供下次日志定位
         {
             UINavigationController *diagNav = [toVC navigationController] ?: [fromVC navigationController];
-            OBLog(@"[topblank-diag] to=%@ frame=%@ tf=%@ sup=%@ win=%@ navBarHidden=%d topVC=%@",
+            UINavigationBar *dnb = diagNav.navigationBar;
+            UINavigationItem *dTop = dnb.topItem;
+            UIView *tv = dTop.titleView;
+            UIView *toFirst = toView.subviews.firstObject;
+            OBLog(@"[topblank-diag] to=%@ frame=%@ tf=%@ sup=%@ win=%@ navHidden=%d navFrame=%@ items=%d topItemTitle=%@ titleView=%@ tvFrame=%@ tvHidden=%d toFirst=%@ toFirstFrame=%@ toFirstHidden=%d safeTop=%.1f topVC=%@",
                   NSStringFromClass([toVC class]),
                   NSStringFromCGRect(toView.frame),
                   NSStringFromCGAffineTransform(toView.transform),
                   toView.superview ? NSStringFromClass([toView.superview class]) : @"nil",
                   toView.window ? @"Y" : @"N",
-                  diagNav ? (int)(diagNav.navigationBar.hidden) : -1,
+                  dnb ? (int)(dnb.hidden) : -1,
+                  dnb ? NSStringFromCGRect(dnb.frame) : @"nil",
+                  dnb ? (int)(dnb.items.count) : -1,
+                  dTop ? (dTop.title ?: @"<nil-title>") : @"<nil-item>",
+                  tv ? NSStringFromClass([tv class]) : @"nil",
+                  tv ? NSStringFromCGRect(tv.frame) : @"-",
+                  tv ? (int)(tv.hidden) : -1,
+                  toFirst ? NSStringFromClass([toFirst class]) : @"nil",
+                  toFirst ? NSStringFromCGRect(toFirst.frame) : @"-",
+                  toFirst ? (int)(toFirst.hidden) : -1,
+                  toView.safeAreaInsets.top,
                   diagNav ? NSStringFromClass([diagNav.topViewController class]) : @"nil");
         }
         @try {
@@ -293,6 +307,13 @@ static void OBApplyParallax(CGFloat percent,
             OBLog(@"forceComplete completeTransition CRASH: %@", exception.reason);
         }
         if (toView) toView.hidden = NO;   // 还原真实底页可见
+        // [2026-08-16] 顶部空白修复尝试：完成转场后强制导航栏与底页重新布局，
+        // 避免自定义 nav 转场下顶栏内容(标题/搜索栏)未及时刷新导致顶部留白。
+        {
+            UINavigationController *dn = [toVC navigationController] ?: [fromVC navigationController];
+            if (dn) { [dn.view setNeedsLayout]; [dn.navigationBar setNeedsLayout]; }
+            [toView setNeedsLayout];
+        }
         // 显式清理所有非 from/to 子视图（遮罩等）
         NSArray *subs = [[container.subviews copy] autorelease];
         for (UIView *sub in subs) {
@@ -324,6 +345,34 @@ static void OBApplyParallax(CGFloat percent,
         fromView.layer.masksToBounds = NO;
         fromView.layer.shadowOpacity = 0.0;
         OBLog(@"animator forceComplete done (dispatch_after, cancelled=%d)", !commit);
+    });
+
+    // [2026-08-16] 顶部空白二次诊断：完成 0.5s 后抓一次，捕捉"完成瞬间正常、随后留白"的竞态
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        @try {
+            UINavigationController *dn2 = [toVC navigationController] ?: [fromVC navigationController];
+            UINavigationBar *nb2 = dn2.navigationBar;
+            UINavigationItem *ti2 = nb2.topItem;
+            UIView *tv2 = ti2.titleView;
+            UIView *tf2 = toView.subviews.firstObject;
+            OBLog(@"[topblank-diag2] navHidden=%d navFrame=%@ items=%d topItemTitle=%@ titleView=%@ tvFrame=%@ tvHidden=%d toFrame=%@ toTf=%@ toFirst=%@ toFirstFrame=%@ toFirstHidden=%d topVC=%@",
+                  nb2 ? (int)(nb2.hidden) : -1,
+                  nb2 ? NSStringFromCGRect(nb2.frame) : @"nil",
+                  nb2 ? (int)(nb2.items.count) : -1,
+                  ti2 ? (ti2.title ?: @"<nil>") : @"<nil>",
+                  tv2 ? NSStringFromClass([tv2 class]) : @"nil",
+                  tv2 ? NSStringFromCGRect(tv2.frame) : @"-",
+                  tv2 ? (int)(tv2.hidden) : -1,
+                  NSStringFromCGRect(toView.frame),
+                  NSStringFromCGAffineTransform(toView.transform),
+                  tf2 ? NSStringFromClass([tf2 class]) : @"nil",
+                  tf2 ? NSStringFromCGRect(tf2.frame) : @"-",
+                  tf2 ? (int)(tf2.hidden) : -1,
+                  dn2 ? NSStringFromClass([dn2.topViewController class]) : @"nil");
+        } @catch (NSException *e) {
+            OBLog(@"topblank-diag2 error: %@", e.reason);
+        }
     });
 }
 
