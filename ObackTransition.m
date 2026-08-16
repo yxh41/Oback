@@ -307,12 +307,27 @@ static void OBApplyParallax(CGFloat percent,
             OBLog(@"forceComplete completeTransition CRASH: %@", exception.reason);
         }
         if (toView) toView.hidden = NO;   // 还原真实底页可见
-        // [2026-08-16] 顶部空白修复尝试：完成转场后强制导航栏与底页重新布局，
-        // 避免自定义 nav 转场下顶栏内容(标题/搜索栏)未及时刷新导致顶部留白。
+        // [2026-08-16] 顶部空白修复：完成转场后强制同步重布局导航栏与底页，
+        // 并针对 QQ 自定义圆角导航栏背景(QQCornerRadiusNavBarBgView，toView 首子视图)高度被清零做 heal。
+        // 根因：Oback 自定义 nav 转场不协调 QQ 私有导航栏，从频道/群首页(guild 等)返回时 QQ 按来源页栏样式
+        // 把目标页 QQCornerRadiusNavBarBgView 高度算成 0 → 顶部留白（聊天返回栏样式一致故正常）。
         {
             UINavigationController *dn = [toVC navigationController] ?: [fromVC navigationController];
-            if (dn) { [dn.view setNeedsLayout]; [dn.navigationBar setNeedsLayout]; }
-            [toView setNeedsLayout];
+            if (dn) { [dn.view layoutIfNeeded]; [dn.navigationBar layoutIfNeeded]; }
+            [toView layoutIfNeeded];
+            // QQ 专用 heal：首子视图是圆角导航栏背景且高度塌缩(<20)时，toggle 导航栏隐藏强制 QQ 重设栏外观。
+            Class qqBarBg = NSClassFromString(@"QQCornerRadiusNavBarBgView");
+            UIView *toFirst = toView.subviews.firstObject;
+            if (qqBarBg && toFirst && [toFirst isKindOfClass:qqBarBg] && CGRectGetHeight(toFirst.frame) < 20.0) {
+                OBLog(@"[topblank-heal] QQ 圆角导航栏背景高度塌缩=%.1f, toggle 导航栏强制重刷", CGRectGetHeight(toFirst.frame));
+                if (dn) {
+                    BOOL h = dn.navigationBarHidden;
+                    [dn setNavigationBarHidden:YES animated:NO];
+                    [dn setNavigationBarHidden:h animated:NO];
+                    [dn.view layoutIfNeeded];
+                    [toView layoutIfNeeded];
+                }
+            }
         }
         // 显式清理所有非 from/to 子视图（遮罩等）
         NSArray *subs = [[container.subviews copy] autorelease];
