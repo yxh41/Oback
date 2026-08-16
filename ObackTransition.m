@@ -4,6 +4,21 @@
 // 核心：根据百分比把"当前页"和"上一页"摆到位，模拟 OPPO 风格边缘返回
 // 弹窗 dismiss 方案B：只动被 dismiss 的 fromView(sheet 滑出+轻微缩小)，
 // 绝不碰底层 presenting(toView)（黑屏根因），也不加深遮罩（避免已可见背景闪暗）。
+// [2026-08-16] 顶部空白 heal 辅助：递归找首个 UIScrollView（用于触发 QQ 列表回顶以展开大标题栏背景）
+static UIScrollView *_obFirstScrollView(UIView *root) {
+    if (!root) return nil;
+    if ([root isKindOfClass:[UIScrollView class]]) return (UIScrollView *)root;
+    for (UIView *sub in root.subviews) {
+        UIScrollView *r = _obFirstScrollView(sub);
+        if (r) return r;
+    }
+    return nil;
+}
+
+// [2026-08-16] QQ 圆角导航栏背景(QQCornerRadiusNavBarBgView)基线高度缓存——首次正常返回时记录，
+// 后续塌缩时用它把 frame 高度重设回去（自适应机型/页面，不硬编码 151）。
+static CGFloat g_obackNavBgBaselineH = 0.0;
+
 // 注：自定义 nav 视差（实验）功能已移除——nav pop 一律走系统原生转场（方案A），不再经本文件自定义动画。
 static void OBApplyParallax(CGFloat percent,
                             UIView *fromView,
@@ -315,17 +330,25 @@ static void OBApplyParallax(CGFloat percent,
             UINavigationController *dn = [toVC navigationController] ?: [fromVC navigationController];
             if (dn) { [dn.view layoutIfNeeded]; [dn.navigationBar layoutIfNeeded]; }
             [toView layoutIfNeeded];
-            // QQ 专用 heal：首子视图是圆角导航栏背景且高度塌缩(<20)时，toggle 导航栏隐藏强制 QQ 重设栏外观。
+            // QQ 专用 heal：首子视图是圆角导航栏背景(QQCornerRadiusNavBarBgView)时，
+            // 正常高度则记录基线；塌缩(<20)则直接重设 frame 高度(治表)，并触发消息列表滚回顶部
+            // 以让 QQ 自行展开大标题栏背景(治本)。toggle 导航栏法经实测无效(QQ 不因此重算私有栏背景)。
             Class qqBarBg = NSClassFromString(@"QQCornerRadiusNavBarBgView");
             UIView *toFirst = toView.subviews.firstObject;
-            if (qqBarBg && toFirst && [toFirst isKindOfClass:qqBarBg] && CGRectGetHeight(toFirst.frame) < 20.0) {
-                OBLog(@"[topblank-heal] QQ 圆角导航栏背景高度塌缩=%.1f, toggle 导航栏强制重刷", CGRectGetHeight(toFirst.frame));
-                if (dn) {
-                    BOOL h = dn.navigationBarHidden;
-                    [dn setNavigationBarHidden:YES animated:NO];
-                    [dn setNavigationBarHidden:h animated:NO];
-                    [dn.view layoutIfNeeded];
-                    [toView layoutIfNeeded];
+            if (qqBarBg && toFirst && [toFirst isKindOfClass:qqBarBg]) {
+                CGFloat h = CGRectGetHeight(toFirst.frame);
+                if (h > 20.0) {
+                    g_obackNavBgBaselineH = h;   // 记录首次正常值(自适应机型)
+                } else {
+                    CGFloat baseline = (g_obackNavBgBaselineH > 20.0) ? g_obackNavBgBaselineH
+                        : (CGRectGetMinY(dn.navigationBar.frame) + CGRectGetHeight(dn.navigationBar.frame) + 60.0);
+                    CGRect bf = toFirst.frame; bf.size.height = baseline; toFirst.frame = bf;
+                    toFirst.hidden = NO;
+                    [toFirst setNeedsLayout]; [toFirst.superview layoutIfNeeded];
+                    OBLog(@"[topblank-heal] QQ 栏背景塌缩=%.1f, 重设高度=%.1f (baseline=%.1f)", h, baseline, g_obackNavBgBaselineH);
+                    // 治本尝试：列表滚回顶部 -> QQ 展开大标题栏背景(若本就在顶部则无副作用)
+                    UIScrollView *sv = _obFirstScrollView(toView);
+                    if (sv && sv.contentOffset.y > 0) { [sv setContentOffset:CGPointZero animated:NO]; }
                 }
             }
         }
@@ -371,6 +394,17 @@ static void OBApplyParallax(CGFloat percent,
             UINavigationItem *ti2 = nb2.topItem;
             UIView *tv2 = ti2.titleView;
             UIView *tf2 = toView.subviews.firstObject;
+            // [2026-08-16 二次 heal] 0.5s 后若 QQ 又把栏背景高度清零，再重设一次 + 触发列表回顶(对抗 QQ 覆盖)
+            Class qqBarBg2 = NSClassFromString(@"QQCornerRadiusNavBarBgView");
+            if (qqBarBg2 && tf2 && [tf2 isKindOfClass:qqBarBg2] && CGRectGetHeight(tf2.frame) < 20.0) {
+                CGFloat baseline = (g_obackNavBgBaselineH > 20.0) ? g_obackNavBgBaselineH
+                    : (CGRectGetMinY(nb2.frame) + CGRectGetHeight(nb2.frame) + 60.0);
+                CGRect bf = tf2.frame; bf.size.height = baseline; tf2.frame = bf; tf2.hidden = NO;
+                [tf2 setNeedsLayout]; [tf2.superview layoutIfNeeded];
+                UIScrollView *sv2 = _obFirstScrollView(toView);
+                if (sv2 && sv2.contentOffset.y > 0) [sv2 setContentOffset:CGPointZero animated:NO];
+                OBLog(@"[topblank-heal2] 0.5s 后仍塌缩, 二次重设高度=%.1f", baseline);
+            }
             OBLog(@"[topblank-diag2] navHidden=%d navFrame=%@ items=%d topItemTitle=%@ titleView=%@ tvFrame=%@ tvHidden=%d toFrame=%@ toTf=%@ toFirst=%@ toFirstFrame=%@ toFirstHidden=%d topVC=%@",
                   nb2 ? (int)(nb2.hidden) : -1,
                   nb2 ? NSStringFromCGRect(nb2.frame) : @"nil",
