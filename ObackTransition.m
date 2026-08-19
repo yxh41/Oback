@@ -15,6 +15,17 @@ static UIScrollView *_obFirstScrollView(UIView *root) {
     return nil;
 }
 
+// 自愈器直接落盘 trace 用的日志路径（与 OBLog 同策略：优先 /var/mobile 共享路径）
+static NSString *_obHealTracePath(void) {
+    if ([[NSFileManager defaultManager] isWritableFileAtPath:@"/var/mobile"]) {
+        return @"/var/mobile/oback_debug.log";
+    }
+    NSString *dir = [NSSearchPathForDirectoriesForDomains(NSDocumentDirectory,
+                                                          NSUserDomainMask, YES) firstObject];
+    return dir ? [dir stringByAppendingPathComponent:@"oback_debug.log"]
+               : @"/var/mobile/oback_debug.log";
+}
+
 // [2026-08-16] QQ 圆角导航栏背景(QQCornerRadiusNavBarBgView)基线高度缓存——首次正常返回时记录，
 // 后续塌缩时用它把 frame 高度重设回去（自适应机型/页面，不硬编码 151）。
 static CGFloat g_obackNavBgBaselineH = 0.0;
@@ -515,9 +526,9 @@ static void OBApplyParallax(CGFloat percent,
 
 - (void)check:(NSTimer *)t {
     _ticks++;
-    BOOL fixed = [self healOnce];
-    // 窗口耗尽，或已连续校正若干次（QQ 不再清零）即停止并释放。
-    if (_ticks >= _maxTicks || (fixed && _ticks >= 4)) {
+    // 每个 tick 都尝试校正：约束修复后 QQ 若再次清零，仍能兜底重设，直到窗口耗尽。
+    [self healOnce];
+    if (_ticks >= _maxTicks) {
         [self stop];
     }
 }
@@ -531,16 +542,35 @@ static void OBApplyParallax(CGFloat percent,
         g_obackNavBgBaselineH = h;   // 正常高度则更新基线（自适应机型/页面）
         return NO;
     }
-    // 塌缩：重设 frame 高度（治表）+ 强制可见 + 重布局；并触发列表回顶（治本：QQ 展开大标题栏背景）。
+    // 塌缩：QQ 用 Auto Layout 管背景高度，直接设 frame 会被下一轮 layout 按旧约束(高度0)覆盖回去
+    // -> 改高度约束常量（治本），再兜底设 frame（治标：当下可见），最后让 layout 按新约束重排。
     CGFloat baseline = (_baseline > 20.0) ? _baseline
         : (CGRectGetMinY(first.frame) > 0.5 ? CGRectGetMinY(first.frame)
             : (g_obackNavBgBaselineH > 20.0 ? g_obackNavBgBaselineH : 151.0));
+    NSLayoutConstraint *hc = nil;
+    for (NSLayoutConstraint *c in first.constraints) {
+        if (c.firstItem == first && c.firstAttribute == NSLayoutAttributeHeight) { hc = c; break; }
+    }
+    if (!hc) {
+        for (NSLayoutConstraint *c in first.superview.constraints) {
+            if (c.firstItem == first && c.firstAttribute == NSLayoutAttributeHeight) { hc = c; break; }
+        }
+    }
+    if (hc) { hc.constant = baseline; }
     CGRect bf = first.frame; bf.size.height = baseline; first.frame = bf;
     first.hidden = NO;
-    @try { [first setNeedsLayout]; [first.superview layoutIfNeeded]; } @catch (NSException *e) {}
+    @try { [first.superview setNeedsLayout]; [first.superview layoutIfNeeded]; } @catch (NSException *e) {}
     UIScrollView *sv = _obFirstScrollView(_toView);
     if (sv && sv.contentOffset.y > 0) { @try { [sv setContentOffset:CGPointZero animated:NO]; } @catch (NSException *e) {} }
-    OBLog(@"[topblank-heal] QQ 栏背景塌缩=%.1f, 重设高度=%.1f (baseline=%.1f tick=%d)", h, baseline, _baseline, _ticks);
+    OBLog(@"[topblank-heal] QQ 栏背景塌缩=%.1f, 重设高度=%.1f (baseline=%.1f tick=%d constraint=%@)", h, baseline, _baseline, _ticks, hc?@"Y":@"N");
+    // 直接落盘 trace（绕过 OBLog，release 下 OBLog 格式串会被剥，故此处直接写以可验证自愈器确实跑过）
+    @try {
+        NSString *lp = _obHealTracePath();
+        NSString *line = [NSString stringWithFormat:@"[topblank-heal@] collapsed=%.1f -> baseline=%.1f tick=%d constraint=%@\n", h, baseline, _ticks, hc?@"Y":@"N"];
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:lp];
+        if (fh) { [fh seekToEndOfFile]; [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; }
+        else { [line writeToFile:lp atomically:NO encoding:NSUTF8StringEncoding error:nil]; }
+    } @catch (NSException *e) {}
     return YES;
 }
 
