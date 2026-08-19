@@ -19,6 +19,27 @@ static UIScrollView *_obFirstScrollView(UIView *root) {
 // 后续塌缩时用它把 frame 高度重设回去（自适应机型/页面，不硬编码 151）。
 static CGFloat g_obackNavBgBaselineH = 0.0;
 
+// [2026-08-20] 顶部空白自愈 observer（方案C）前向声明。
+// 转场收尾后启动短期观察者窗口，重复检查 QQ 自定义圆角导航栏背景(QQCornerRadiusNavBarBgView)高度，
+// 一旦被 QQ 按来源页栏样式塌缩(<20)即立即纠正回基线（重设 frame 高度 + 列表回顶），时序无关——
+// 无论 QQ 在转场后多久清零都被纠正，克服旧版 0.5s 快照 heal 的时序漏网。窗口结束后自动 stop 释放，
+// 无常驻开销。遵守私有类铁律(NSClassFromString + isKindOfClass)。
+// MRC：禁用 __weak，_timer 用 assign（不 retain timer）避免 timer<->healer 循环引用；
+// timer 在 scheduledTimer 时 retain self，stop 中 invalidate 后 timer release self -> healer 自动 dealloc。
+@interface ObackTopBlankHealer : NSObject {
+    NSTimer *_timer;        // assign：不 retain，避免循环引用
+    UIView  *_toView;       // retain
+    UIView  *_fromView;     // retain（用于 _obFirstScrollView 回顶）
+    Class    _barBgClass;   // assign（类对象无需 retain）
+    CGFloat  _baseline;
+    int      _ticks;
+    int      _maxTicks;
+}
+- (void)startWithToView:(UIView *)toView fromView:(UIView *)fromView;
+- (void)stop;
+- (BOOL)healOnce;
+@end
+
 // 注：自定义 nav 视差（实验）功能已移除——nav pop 一律走系统原生转场（方案A），不再经本文件自定义动画。
 static void OBApplyParallax(CGFloat percent,
                             UIView *fromView,
@@ -322,35 +343,15 @@ static void OBApplyParallax(CGFloat percent,
             OBLog(@"forceComplete completeTransition CRASH: %@", exception.reason);
         }
         if (toView) toView.hidden = NO;   // 还原真实底页可见
-        // [2026-08-16] 顶部空白修复：完成转场后强制同步重布局导航栏与底页，
-        // 并针对 QQ 自定义圆角导航栏背景(QQCornerRadiusNavBarBgView，toView 首子视图)高度被清零做 heal。
-        // 根因：Oback 自定义 nav 转场不协调 QQ 私有导航栏，从频道/群首页(guild 等)返回时 QQ 按来源页栏样式
-        // 把目标页 QQCornerRadiusNavBarBgView 高度算成 0 → 顶部留白（聊天返回栏样式一致故正常）。
+        // [2026-08-20] 顶部空白自愈（方案C）：启动短期自愈 observer 代替旧版「0.5s 快照 heal」。
+        // 转场收尾瞬间先同步校正一次，再启动 ~2s 窗口的重复校正——QQ 任意时刻把栏背景高度清零都会被
+        // 立即纠正，时序无关，克服 0.5s 快照 heal 的漏网。observer 窗口结束自动 stop 释放，无常驻开销。
+        // 根因：Oback 自定义 nav 转场不协调 QQ 私有导航栏，从频道/群首页返回时 QQ 按来源页栏样式把
+        // QQCornerRadiusNavBarBgView 高度算成 0 → 顶部留白（聊天返回栏样式一致故正常）。
         {
-            UINavigationController *dn = [toVC navigationController] ?: [fromVC navigationController];
-            if (dn) { [dn.view layoutIfNeeded]; [dn.navigationBar layoutIfNeeded]; }
-            [toView layoutIfNeeded];
-            // QQ 专用 heal：首子视图是圆角导航栏背景(QQCornerRadiusNavBarBgView)时，
-            // 正常高度则记录基线；塌缩(<20)则直接重设 frame 高度(治表)，并触发消息列表滚回顶部
-            // 以让 QQ 自行展开大标题栏背景(治本)。toggle 导航栏法经实测无效(QQ 不因此重算私有栏背景)。
-            Class qqBarBg = NSClassFromString(@"QQCornerRadiusNavBarBgView");
-            UIView *toFirst = toView.subviews.firstObject;
-            if (qqBarBg && toFirst && [toFirst isKindOfClass:qqBarBg]) {
-                CGFloat h = CGRectGetHeight(toFirst.frame);
-                if (h > 20.0) {
-                    g_obackNavBgBaselineH = h;   // 记录首次正常值(自适应机型)
-                } else {
-                    CGFloat baseline = (g_obackNavBgBaselineH > 20.0) ? g_obackNavBgBaselineH
-                        : (CGRectGetMinY(dn.navigationBar.frame) + CGRectGetHeight(dn.navigationBar.frame) + 60.0);
-                    CGRect bf = toFirst.frame; bf.size.height = baseline; toFirst.frame = bf;
-                    toFirst.hidden = NO;
-                    [toFirst setNeedsLayout]; [toFirst.superview layoutIfNeeded];
-                    OBLog(@"[topblank-heal] QQ 栏背景塌缩=%.1f, 重设高度=%.1f (baseline=%.1f)", h, baseline, g_obackNavBgBaselineH);
-                    // 治本尝试：列表滚回顶部 -> QQ 展开大标题栏背景(若本就在顶部则无副作用)
-                    UIScrollView *sv = _obFirstScrollView(toView);
-                    if (sv && sv.contentOffset.y > 0) { [sv setContentOffset:CGPointZero animated:NO]; }
-                }
-            }
+            ObackTopBlankHealer *healer = [[ObackTopBlankHealer alloc] init];
+            [healer startWithToView:toView fromView:fromView];
+            // healer 由内部 NSTimer retain 保活，窗口结束自动 stop 并释放，此处不额外 retain。
         }
         // 显式清理所有非 from/to 子视图（遮罩等）
         NSArray *subs = [[container.subviews copy] autorelease];
@@ -394,17 +395,6 @@ static void OBApplyParallax(CGFloat percent,
             UINavigationItem *ti2 = nb2.topItem;
             UIView *tv2 = ti2.titleView;
             UIView *tf2 = toView.subviews.firstObject;
-            // [2026-08-16 二次 heal] 0.5s 后若 QQ 又把栏背景高度清零，再重设一次 + 触发列表回顶(对抗 QQ 覆盖)
-            Class qqBarBg2 = NSClassFromString(@"QQCornerRadiusNavBarBgView");
-            if (qqBarBg2 && tf2 && [tf2 isKindOfClass:qqBarBg2] && CGRectGetHeight(tf2.frame) < 20.0) {
-                CGFloat baseline = (g_obackNavBgBaselineH > 20.0) ? g_obackNavBgBaselineH
-                    : (CGRectGetMinY(nb2.frame) + CGRectGetHeight(nb2.frame) + 60.0);
-                CGRect bf = tf2.frame; bf.size.height = baseline; tf2.frame = bf; tf2.hidden = NO;
-                [tf2 setNeedsLayout]; [tf2.superview layoutIfNeeded];
-                UIScrollView *sv2 = _obFirstScrollView(toView);
-                if (sv2 && sv2.contentOffset.y > 0) [sv2 setContentOffset:CGPointZero animated:NO];
-                OBLog(@"[topblank-heal2] 0.5s 后仍塌缩, 二次重设高度=%.1f", baseline);
-            }
             OBLog(@"[topblank-diag2] navHidden=%d navFrame=%@ items=%d topItemTitle=%@ titleView=%@ tvFrame=%@ tvHidden=%d toFrame=%@ toTf=%@ toFirst=%@ toFirstFrame=%@ toFirstHidden=%d topVC=%@",
                   nb2 ? (int)(nb2.hidden) : -1,
                   nb2 ? NSStringFromCGRect(nb2.frame) : @"nil",
@@ -498,6 +488,71 @@ static void OBApplyParallax(CGFloat percent,
 
 - (void)dealloc {
     if (_params) [_params release];
+    [super dealloc];
+}
+
+@end
+
+#pragma mark - 顶部空白自愈 observer（方案C）
+
+@implementation ObackTopBlankHealer
+
+- (void)startWithToView:(UIView *)toView fromView:(UIView *)fromView {
+    _toView    = [toView retain];
+    _fromView  = [fromView retain];
+    _barBgClass = NSClassFromString(@"QQCornerRadiusNavBarBgView");   // 私有类铁律：NSClassFromString + isKindOfClass
+    _baseline  = (g_obackNavBgBaselineH > 20.0) ? g_obackNavBgBaselineH : 0.0;   // 用已记录的基线（自适应机型）
+    _ticks     = 0;
+    _maxTicks  = 20;   // ~2.0s @0.1s：覆盖 QQ 转场后清零的竞态窗口
+    [self healOnce];   // 收尾瞬间若已塌缩，先同步校正一次
+    // timer retain self(healer)；healer 不 retain timer（assign）-> 无循环引用。
+    _timer = [NSTimer scheduledTimerWithTimeInterval:0.1
+                                              target:self
+                                            selector:@selector(check:)
+                                            userInfo:nil
+                                             repeats:YES];
+}
+
+- (void)check:(NSTimer *)t {
+    _ticks++;
+    BOOL fixed = [self healOnce];
+    // 窗口耗尽，或已连续校正若干次（QQ 不再清零）即停止并释放。
+    if (_ticks >= _maxTicks || (fixed && _ticks >= 4)) {
+        [self stop];
+    }
+}
+
+- (BOOL)healOnce {
+    if (!_toView || !_barBgClass) return NO;
+    UIView *first = _toView.subviews.firstObject;
+    if (!first || ![first isKindOfClass:_barBgClass]) return NO;
+    CGFloat h = CGRectGetHeight(first.frame);
+    if (h > 20.0) {
+        g_obackNavBgBaselineH = h;   // 正常高度则更新基线（自适应机型/页面）
+        return NO;
+    }
+    // 塌缩：重设 frame 高度（治表）+ 强制可见 + 重布局；并触发列表回顶（治本：QQ 展开大标题栏背景）。
+    CGFloat baseline = (_baseline > 20.0) ? _baseline
+        : (CGRectGetMinY(first.frame) > 0.5 ? CGRectGetMinY(first.frame)
+            : (g_obackNavBgBaselineH > 20.0 ? g_obackNavBgBaselineH : 151.0));
+    CGRect bf = first.frame; bf.size.height = baseline; first.frame = bf;
+    first.hidden = NO;
+    @try { [first setNeedsLayout]; [first.superview layoutIfNeeded]; } @catch (NSException *e) {}
+    UIScrollView *sv = _obFirstScrollView(_toView);
+    if (sv && sv.contentOffset.y > 0) { @try { [sv setContentOffset:CGPointZero animated:NO]; } @catch (NSException *e) {} }
+    OBLog(@"[topblank-heal] QQ 栏背景塌缩=%.1f, 重设高度=%.1f (baseline=%.1f tick=%d)", h, baseline, _baseline, _ticks);
+    return YES;
+}
+
+- (void)stop {
+    if (_timer) { [_timer invalidate]; _timer = nil; }
+    // timer 已从 runloop 移除并 release self -> healer 在此之后可能被 dealloc。
+}
+
+- (void)dealloc {
+    if (_toView)   [_toView release];
+    if (_fromView) [_fromView release];
+    // _timer 为 assign 且 stop 中已 invalidate+nil，无需 release（避免重复释放）。
     [super dealloc];
 }
 
