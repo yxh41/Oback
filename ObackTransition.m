@@ -20,8 +20,10 @@ static NSString *_obHealTracePath(void) {
     if ([[NSFileManager defaultManager] isWritableFileAtPath:@"/var/mobile"]) {
         return @"/var/mobile/oback_debug.log";
     }
-    NSString *dir = [NSSearchPathForDirectoriesForDomains(NSDocumentDirectory,
-                                                          NSUserDomainMask, YES) firstObject];
+    // 兜底：沙盒内 Documents。注意函数名是 ...InDomains（不是 ForDomains——写错会触发
+    // -Werror,-Wimplicit-function-declaration 直接编译失败）。与 ObackManager.m 的 OBLog 路径同策略。
+    NSString *dir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                         NSUserDomainMask, YES) firstObject];
     return dir ? [dir stringByAppendingPathComponent:@"oback_debug.log"]
                : @"/var/mobile/oback_debug.log";
 }
