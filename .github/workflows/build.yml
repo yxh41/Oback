@@ -16,6 +16,8 @@ env:
 jobs:
   build:
     runs-on: macos-15
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -72,6 +74,7 @@ jobs:
           grep -iE "error:|undeclared identifier|No such file" ci-build.log | sed 's|^|::error::|' || true
           ROOTHIDE_DEB=$(ls packages/*_iphoneos-arm64e.deb 2>/dev/null | head -n1)
           echo "ROOTHIDE_DEB=$ROOTHIDE_DEB"
+          echo "ROOTHIDE_DEB=$ROOTHIDE_DEB" >> "$GITHUB_ENV"
           [ -n "$ROOTHIDE_DEB" ] || { echo "No roothide .deb produced"; exit 1; }
           ls -la "$ROOTHIDE_DEB"
           dpkg-deb -I "$ROOTHIDE_DEB" | head -20
@@ -101,3 +104,34 @@ jobs:
           path: packages/*_iphoneos-arm64e.deb
           if-no-files-found: error
           retention-days: 90
+
+      # 两个用户 PAT 均已失效（REST API 401），无法通过 API 下载 artifact。
+      # 改用 workflow 自带 GITHUB_TOKEN 把 .deb 推到 deb-artifacts 分支，本地 git fetch 取回，
+      # 完全绕开失效的 REST API。失败时也提交 ci-build.log 以便定位。
+      - name: Publish .deb via git (bypass dead REST API)
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.email "ci@oback.local"
+          git config user.name "Oback CI"
+          SHA=$(git rev-parse --short=7 HEAD)
+          TMP=$(mktemp -d)
+          if [ -n "$ROOTHIDE_DEB" ] && [ -f "$ROOTHIDE_DEB" ]; then
+            cp "$ROOTHIDE_DEB" "$TMP/oback_${SHA}.deb"
+            echo "publish: deb present"
+          else
+            echo "publish: no deb (build failed or skipped)"
+          fi
+          [ -f ci-build.log ] && cp ci-build.log "$TMP/ci-build.log"
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/yxh41/Oback.git"
+          git fetch origin deb-artifacts 2>/dev/null || true
+          git checkout --orphan deb-artifacts
+          git reset --hard
+          rm -rf .github .gitignore Makefile control layout *.xm *.m *.h Tweak.xm 2>/dev/null || true
+          git clean -fdx >/dev/null 2>&1 || true
+          mkdir -p out
+          cp "$TMP"/* out/ 2>/dev/null || true
+          git add out 2>/dev/null || true
+          git commit -m "build ${SHA} (deb=${ROOTHIDE_DEB:+1})" >/dev/null 2>&1 || echo "nothing to commit"
+          git push --force origin deb-artifacts 2>&1 | tail -3
