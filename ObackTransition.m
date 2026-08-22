@@ -503,7 +503,9 @@ static void OBApplyParallax(CGFloat percent,
 - (void)startWithToView:(UIView *)toView fromView:(UIView *)fromView {
     _toView    = [toView retain];
     _fromView  = [fromView retain];
-    _barBgClass = NSClassFromString(@"QQCornerRadiusNavBarBgView");   // 私有类铁律：NSClassFromString + isKindOfClass
+    static Class barBgCls; static dispatch_once_t once;
+    dispatch_once(&once, ^{ barBgCls = NSClassFromString(@"QQCornerRadiusNavBarBgView"); });
+    _barBgClass = barBgCls;   // 私有类铁律：NSClassFromString + isKindOfClass（startWithToView 每次转场一次，缓存免重复查表）
     _baseline  = (g_obackNavBgBaselineH > 20.0) ? g_obackNavBgBaselineH : 0.0;   // 用已记录的基线（自适应机型）
     _ticks     = 0;
     _maxTicks  = 20;   // ~2.0s @0.1s：覆盖 QQ 转场后清零的竞态窗口
