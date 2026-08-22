@@ -20,7 +20,7 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"opt-P9"
+#define OBACK_BUILD_TAG @"FIX-P9-stuck-transition"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -377,6 +377,9 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
     // 全局返回：全屏 pan 相关状态
     CGPoint _globalStart;                // 全屏 pan 起点（Began 记录，Changed 判定方向）
     BOOL    _globalDriven;               // 全屏 pan 是否已确认横向意图并交给 beginTransition 驱动
+    // [2026-08-22 P9] interacting 置位时刻：用于「下次触摸自愈」——若上一轮交互卡死(转场未收尾)，
+    // 新手势的 shouldBegin 不再无条件 return NO，而是超时后强制收尾并放行，杜绝返回永久失效。
+    NSTimeInterval _interactingSince;
     // 注：不再用单 ivar _globalPan 存引用（多 window 会被覆盖成孤儿 pan → 漏进边缘分支访问 pan.edges 崩）；
     // 改用关联对象标记 kGlobalPanKey 识别全屏 pan（见 gestureRecognizerShouldBegin: 与 attachToWindow:）
 }
@@ -399,6 +402,28 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
                                         CFNotificationSuspensionBehaviorDeliverImmediately);
     });
     return m;
+}
+
+// [2026-08-22 P9] 拦截 interacting 置位时刻，供「下次触摸自愈」判定卡死时长（见 _obStuckSelfHealIfNeeded）
+- (void)setInteracting:(BOOL)interacting {
+    if (interacting && !_interacting) _interactingSince = [NSDate timeIntervalSinceReferenceDate];
+    if (!interacting) _interactingSince = 0;
+    _interacting = interacting;
+}
+
+// [2026-08-22 P9 根治「返回永久失效」] 新手势 shouldBegin 入口自愈：
+// 若 interacting 已卡住超过 2s（远超任何正常手势时长），说明上一轮交互被中断且所有兜底都漏了
+// （1.5s dispatch_after 看门狗可能因块被丢弃/时序错位而没生效），此时强制收尾并放行本次手势。
+// 这是「最后一道防线」：只要用户再滑一次，就必然自愈，绝不会出现杀进程才恢复的死局。
+- (BOOL)_obStuckSelfHealIfNeeded {
+    if (!self.interacting) return NO;
+    NSTimeInterval since = _interactingSince;
+    if (since <= 0) return NO;
+    NSTimeInterval held = [NSDate timeIntervalSinceReferenceDate] - since;
+    if (held < 2.0) return NO;
+    OBLog(@"[P9] 检测到 interacting 卡死 %.2fs → 强制自愈收尾并放行本次手势", held);
+    [self _obInterruptActiveInteraction];
+    return YES;
 }
 
 - (void)_emitDiagWithManual:(BOOL)manual {
@@ -1407,7 +1432,10 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
     // 杜绝上一轮 endTransition/abortTransition 万一漏跑、残留 YES 污染下一轮（曾致进入聊天界面闪小程序卡片残影）。
     // 真实滑动时 beginTransition 会按 rightSimplePop 重新定值（接管型=YES / 标准nav=NO），不影响已验证行为。
     pan.cancelsTouchesInView = NO;
-    if (self.interacting) { OBLog(@"shouldBegin=NO (已在交互中)"); return NO; }
+    if (self.interacting) {
+        // [P9] 卡死自愈：超时未收尾则强制收尾并继续判定（不再无条件 return NO 致返回永久失效）
+        if (![self _obStuckSelfHealIfNeeded]) { OBLog(@"shouldBegin=NO (已在交互中)"); return NO; }
+    }
     BOOL allowed = [ObackPreferences isAllowed];
     if (!allowed) { OBLog(@"shouldBegin=NO (isAllowed=NO, bid=%@)", NSBundle.mainBundle.bundleIdentifier); return NO; }
 
@@ -1635,7 +1663,10 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
 
 - (BOOL)_globalPanShouldBegin:(UIPanGestureRecognizer *)pan {
     // [2026-08-09] kYieldActiveKey 机制已移除（多次引发回归），不再需要每轮复位
-    if (self.interacting) { OBLog(@"globalShouldBegin=NO (已在交互中)"); return NO; }
+    if (self.interacting) {
+        // [P9] 卡死自愈：全局返回同样受益——上一轮转场卡死后，下一次滑动即自愈放行，不再永久失效
+        if (![self _obStuckSelfHealIfNeeded]) { OBLog(@"globalShouldBegin=NO (已在交互中)"); return NO; }
+    }
     [self _restoreQQNativePop];   // 清扫上一轮可能残留的禁用（保险；正常路径已在 End/Cancel 恢复，空集合时无日志）
     if (![ObackPreferences isAllowed]) return NO;
     if (![ObackPreferences isGlobalBackEnabled]) return NO;
@@ -1925,6 +1956,26 @@ static const void *kSuppressedQQPansKey = &kSuppressedQQPansKey;
     self.interacting = NO;
     _globalDriven = NO;
     [self _restoreQQNativePop];                 // 清残留的 QQ 原生 pop 禁用（避免原生手势永久失能）
+    // [2026-08-22 P9 根治「返回按钮+手势同时失效」] 必须先让真正持有转场 context 的 currentAnimator
+    // 收尾，再置 nil。此前直接 self.currentAnimator = nil（下方）会把持有 context 的 ObackAnimator
+    // 丢弃而从不调 completeTransition → nav 永久卡在 isTransitioning=YES →
+    // popViewControllerAnimated: 被 UIKit 忽略（返回按钮点了没反应）且新转场起不来（手势也没反应），
+    // 只能杀进程恢复。QQ/TIM 自定义 nav pop 走 currentAnimator，而 _watchAnimator/_navPopTarget
+    // 在该路径为 nil（_scheduleNavPopWatchdog 只服务方案A），故此前两处强收尾对 QQ 完全空转。
+    // currentAnimator 是 assign（见 ObackManager.h:15），调用它不影响 MRC 引用计数，安全。
+    if (self.currentAnimator) {
+        OBLog(@"[P9] 强制收尾 currentAnimator（治 nav 卡 isTransitioning：返回按钮+手势同时失效）");
+        // 中断态语义=取消回弹（未收到 Ended 说明用户没提交），避免意外把页面 pop 掉
+        self.currentAnimator.interactiveCancelled = YES;
+        @try { [self.currentAnimator forceFinishIfNeeded]; } @catch (NSException *e) { OBLog(@"[P9] forceFinish(currentAnimator) fail: %@", e); }
+    }
+    // 交互控制器持有的 animator 若与 currentAnimator 不是同一实例（装配错配的极端情形），一并收尾。
+    // forceFinishIfNeeded 内部 _completed 守卫保证同一实例不会重复 completeTransition。
+    if (self.interactive && self.interactive.animator && self.interactive.animator != self.currentAnimator) {
+        OBLog(@"[P9] 强制收尾 interactive.animator（与 currentAnimator 不同实例）");
+        self.interactive.animator.interactiveCancelled = YES;
+        @try { [self.interactive.animator forceFinishIfNeeded]; } @catch (NSException *e) { OBLog(@"[P9] forceFinish(interactive.animator) fail: %@", e); }
+    }
     // 强制完成挂起的转场动画（视图归位静止），复用既有 forceFinishIfNeeded 收尾路径
     if (_watchAnimator) {
         @try { [_watchAnimator forceFinishIfNeeded]; } @catch (NSException *e) { OBLog(@"[P8] forceFinish(_watchAnimator) fail: %@", e); }
