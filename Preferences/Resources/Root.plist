@@ -62,21 +62,7 @@
 			<key>defaults</key>
 			<string>com.zlhkf.oback</string>
 			<key>footnote</key>
-			<string>开（默认）：显示「弹窗（下拉 sheet）返回」专属的阴影 / 动画时长 / 弹性收尾 / 灵敏度等设置——这些仅在弹窗返回时生效，常用 App 内原生返回（方案A）不消费。关：隐藏这些用不到的项，面板只剩日常真正能调动的「触发宽度」与各全局开关，清爽不误调。</string>
-			<key>key</key>
-			<string>sheetEnhanceEnabled</string>
-			<key>label</key>
-			<string>弹窗返回增强设置</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>default</key>
-			<true/>
-			<key>defaults</key>
-			<string>com.zlhkf.oback</string>
-			<key>footnote</key>
-			<string>返回过程中给当前页面叠加投影，增强层叠立体感。（注：默认原生边缘返回走系统转场，不消费以下动画参数；仅弹窗返回时生效，属预期行为而非 bug。）</string>
+			<string>返回过程中给当前页面叠加投影，增强层叠立体感（偏移/柔和度/浓度已固定为调优后的默认值，无需手动调节）。默认原生边缘返回走系统转场不消费此项；弹窗返回与 QQ/TIM 自定义转场时生效。</string>
 			<key>key</key>
 			<string>shadowEnabled</string>
 			<key>label</key>
@@ -108,73 +94,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>调节返回时当前页阴影的水平偏移（0–20pt）。数值越大，页面「抬起」的纵深感越强。（默认原生边缘返回走系统转场不消费此参数；仅弹窗返回时生效。）</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSliderCell</string>
-			<key>default</key>
-			<real>6.0</real>
-			<key>defaults</key>
-			<string>com.zlhkf.oback</string>
-			<key>key</key>
-			<string>shadowOffset</string>
-			<key>label</key>
-			<string>阴影偏移</string>
-			<key>max</key>
-			<real>20.0</real>
-			<key>min</key>
-			<real>0.0</real>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>footerText</key>
-			<string>调节阴影的模糊半径（0–40pt）。数值越大阴影越柔和弥散。（默认原生边缘返回走系统转场不消费此参数；仅弹窗返回时生效。）</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSliderCell</string>
-			<key>default</key>
-			<real>12.0</real>
-			<key>defaults</key>
-			<string>com.zlhkf.oback</string>
-			<key>key</key>
-			<string>shadowRadius</string>
-			<key>label</key>
-			<string>阴影柔和度</string>
-			<key>max</key>
-			<real>40.0</real>
-			<key>min</key>
-			<real>0.0</real>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>footerText</key>
-			<string>调节阴影的浓度（0–1）。数值越大阴影越深重，越小越淡。（默认原生边缘返回走系统转场不消费此参数；仅弹窗返回时生效。）</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSliderCell</string>
-			<key>default</key>
-			<real>0.25</real>
-			<key>defaults</key>
-			<string>com.zlhkf.oback</string>
-			<key>key</key>
-			<string>shadowOpacity</string>
-			<key>label</key>
-			<string>阴影浓度</string>
-			<key>max</key>
-			<real>1.0</real>
-			<key>min</key>
-			<real>0.0</real>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>footerText</key>
-			<string>调节松手后完成或取消返回动画的时长（0.15–0.6 秒）。越短越跟手，越长越顺滑。（注：默认原生边缘返回走系统转场，不消费以下动画参数；仅弹窗返回时生效，属预期行为而非 bug。）</string>
+			<string>调节松手后完成或取消返回动画的时长（0.15–0.6 秒）。越短越跟手，越长越顺滑。（默认原生边缘返回走系统转场不消费此参数；弹窗返回与 QQ/TIM 自定义转场时生效。）</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -196,66 +116,6 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>松手后的回弹动画。开启（默认）后释放速度会继承为弹性收尾，更跟手、更接近 OPPO/系统手感；若觉得回弹过头或想更线性，可关闭。（注：默认原生边缘返回走系统转场，不消费以下动画参数；仅弹窗返回时生效，属预期行为而非 bug。）</string>
-			<key>label</key>
-			<string>动画</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>default</key>
-			<true/>
-			<key>defaults</key>
-			<string>com.zlhkf.oback</string>
-			<key>footnote</key>
-			<string>开（默认）：按松手速度做动量继承的弹簧收尾。关：线性 easeOut，更克制。</string>
-			<key>key</key>
-			<string>springEnabled</string>
-			<key>label</key>
-			<string>弹性收尾</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>footer</key>
-			<string>弹窗（下拉 sheet）返回时的卡片圆角。仅方案B 弹窗返回生效；默认原生边缘返回不启用此圆角。开启后下拉 sheet 时圆角由 0 渐变到设定值，更贴近 iOS 原生 sheet 手感。</string>
-			<key>label</key>
-			<string>弹窗圆角</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>default</key>
-			<false/>
-			<key>defaults</key>
-			<string>com.zlhkf.oback</string>
-			<key>key</key>
-			<string>cardCornerEnabled</string>
-			<key>label</key>
-			<string>启用弹窗圆角</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSliderCell</string>
-			<key>default</key>
-			<real>12.0</real>
-			<key>defaults</key>
-			<string>com.zlhkf.oback</string>
-			<key>footnote</key>
-			<string>仅弹窗返回（方案B）时生效；默认左缘原生 nav 返回（方案A，系统转场）不消费此参数——调了无变化属预期，非 bug。</string>
-			<key>key</key>
-			<string>cardCornerValue</string>
-			<key>label</key>
-			<string>圆角半径 (pt)</string>
-			<key>max</key>
-			<real>40.0</real>
-			<key>min</key>
-			<real>0.0</real>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>footerText</key>
 			<string>设置边缘指示胶囊的视觉风格，修改后下一次边缘手势即生效。</string>
 			<key>label</key>
 			<string>胶囊特效</string>
@@ -267,48 +127,6 @@
 			<string>ObackCapsuleEffectController</string>
 			<key>label</key>
 			<string>胶囊风格</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>footerText</key>
-			<string>调节边缘返回的触发灵敏度。两个阈值都越低 → 越容易返回（更跟手，但快速横滑列表时可能误触）；越高 → 越需明显拖动或甩动才返回。建议保持默认，按真机手感微调。（注：默认原生边缘返回走系统转场，不消费以下动画参数；仅弹窗返回时生效，属预期行为而非 bug。）</string>
-			<key>label</key>
-			<string>返回灵敏度</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSliderCell</string>
-			<key>default</key>
-			<real>0.3</real>
-			<key>defaults</key>
-			<string>com.zlhkf.oback</string>
-			<key>key</key>
-			<string>commitRatio</string>
-			<key>label</key>
-			<string>提交位移阈值</string>
-			<key>max</key>
-			<real>0.5</real>
-			<key>min</key>
-			<real>0.1</real>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSliderCell</string>
-			<key>default</key>
-			<real>400.0</real>
-			<key>defaults</key>
-			<string>com.zlhkf.oback</string>
-			<key>footnote</key>
-			<string>仅弹窗返回（方案B）时生效；默认左缘原生 nav 返回（方案A，系统转场）不消费此参数——调了无变化属预期，非 bug。</string>
-			<key>key</key>
-			<string>commitVelocity</string>
-			<key>label</key>
-			<string>提交速度阈值</string>
-			<key>max</key>
-			<real>1000.0</real>
-			<key>min</key>
-			<real>100.0</real>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -396,7 +214,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>开启后把每次手势判定写入 /var/mobile/oback_debug.log（可用 Filza 抓取发我分析）。日用机建议关闭，避免日志频繁写盘。另：「立即打印诊断」按钮可向各 App 广播一次诊断（无需重启、无需 Mac）：各 App 把结果写入 /var/mobile/oback_diag.log 并在手机上直接弹文本框展示，用于核对当前 App 真实 bid / 名单命中 / 视差状态；也可随时用 Filza 看该文件。</string>
+			<string>开启后把每次手势判定写入 /var/mobile/oback_debug.log（可用 Filza 抓取发我分析）。日用机建议关闭，避免日志频繁写盘。另：「立即打印诊断」按钮可向各 App 广播一次诊断（无需重启、无需 Mac）：各 App 把结果写入 /var/mobile/oback_diag.log 并在手机上直接弹文本框展示，用于核对当前 App 真实 bid 与名单命中情况；也可随时用 Filza 看该文件。</string>
 			<key>label</key>
 			<string>调试</string>
 		</dict>
@@ -409,34 +227,6 @@
 			<string>关（默认）：完全不写日志（最省）。开：记录手势触发/提交/取消，便于定位问题。点按在「开/关」间切换；切换即时生效，回 QQ 做手势即可在「显示调试日志」里看到（此开关此前走系统回调不可靠，现改为直写，确保 toggle 一定落到 tweak 可读的文件）。</string>
 			<key>label</key>
 			<string>调试日志：关</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>default</key>
-			<false/>
-			<key>defaults</key>
-			<string>com.zlhkf.oback</string>
-			<key>footnote</key>
-			<string>关（默认）：不输出。开：在「调试日志」也开启的前提下，每次边缘起滑时把窗口内所有边缘返回手势的类名打进日志，用于定位「一次滑动返回两层」中的第二层（原生为 UIScreenEdgePanGestureRecognizer，其它类名即插件私有手势）。定位完请关闭。</string>
-			<key>key</key>
-			<string>doubleReturnDiag</string>
-			<key>label</key>
-			<string>双返回诊断</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>default</key>
-			<false/>
-			<key>defaults</key>
-			<string>com.zlhkf.oback</string>
-			<key>footnote</key>
-			<string>关（默认）：注入时完全静默。开：每次注入在 syslog 打印一条 [Oback-diag] 横幅（bid / whitelistMode / blacklistApps / isAllowed / 版本），可在 Mac 上 log stream | grep Oback-diag 抓真实 bundle id、确认黑名单是否命中、确认装的是哪个包。定位完请关闭。</string>
-			<key>key</key>
-			<string>diagBanner</string>
-			<key>label</key>
-			<string>诊断横幅</string>
 		</dict>
 		<dict>
 			<key>action</key>
@@ -458,7 +248,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>将所有 Oback 设置恢复为默认值。已选的白名单 / 黑名单程序、以及灵敏度等各项调节都会被清空。</string>
+			<string>将所有 Oback 设置恢复为默认值。已选的白名单 / 黑名单 / 左缘排除 / 全局返回 / 无动画修复程序，以及触发宽度、动画时长等调节都会被清空。</string>
 			<key>label</key>
 			<string>维护</string>
 		</dict>

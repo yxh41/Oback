@@ -32,10 +32,11 @@
 - (NSIndexPath *)indexPathForSpecifier:(PSSpecifier *)specifier;
 @end
 
-// 方案B（弹窗/sheet 下拉返回）专属设置项——关掉「弹窗返回增强设置」开关时整体隐藏，
-// 避免用户在日常用方案A（原生 nav pop）时误调这些"调了无变化"的滑块。
+// [2026-08-23 精简] 原「弹窗返回增强设置」折叠机制已随面板精简整体移除：
+// 阴影三滑块(shadowOffset/Radius/Opacity)、弹窗圆角(cardCornerEnabled/Value)、
+// 弹性收尾(springEnabled)、返回灵敏度(commitRatio/commitVelocity)已从 Root.plist 删除
+// （值仍由 ObackParams defaults 提供，行为与旧默认完全一致），故不再需要按开关显隐。
 @interface ObackSettingsController ()
-@property (nonatomic, strong) NSMutableArray *allSpecifiers;   // 完整 specifier 列表（过滤前），供按开关显隐方案B 项
 @end
 
 // ── 每个滑块 key 对应的单位后缀 ──────────────────────────────
@@ -45,13 +46,7 @@ static NSDictionary *_obSliderUnits(void) {
     dispatch_once(&once, ^{
         d = @{
             @"triggerWidth":    @" pt",
-            @"shadowOffset":  @" pt",
-            @"shadowRadius":  @" pt",
-            @"shadowOpacity": @"",
-            @"cardCornerValue": @" pt",
             @"duration":        @" s",
-            @"commitRatio":     @"",
-            @"commitVelocity":  @"",
         };
     });
     return d;
@@ -71,11 +66,43 @@ static NSDictionary *_obSliderUnits(void) {
     [super setPreferenceValue:value forSpecifier:specifier];
     NSString *key = [specifier propertyForKey:@"key"];
     if (key) oback_setGlobalPref(key, value);
-    // 「弹窗返回增强设置」开关翻转 → 重排表格以显隐方案B 专属项。
-    // 用 afterDelay:0 脱离当前 setPreferenceValue 调用栈，避免 reload 与开关 cell 配置重入。
-    if ([key isEqualToString:@"sheetEnhanceEnabled"]) {
-        [self performSelector:@selector(reloadSpecifiers) withObject:nil afterDelay:0];
+}
+
+// [2026-08-23 精简] 面板已删除的废弃 key：这些项曾可调，旧用户的全局 plist / suite 里可能残留
+// 自定义值，而 tweak 侧 ObackPreferences 仍会读取它们（例如残留 commitRatio=0.15 会继续覆盖默认 0.30）。
+// 面板里已没有控件可改回去 → 必须在打开设置页时主动清除，让行为回落到 ObackParams defaults。
+static NSArray *_obRetiredKeys(void) {
+    static NSArray *a = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        a = @[@"sheetEnhanceEnabled",   // 折叠元开关（机制已移除）
+              @"shadowOffset", @"shadowRadius", @"shadowOpacity",   // 阴影细节参数（固定为默认）
+              @"cardCornerEnabled", @"cardCornerValue",             // 弹窗圆角（与阴影互斥的装饰）
+              @"springEnabled",                                      // 弹性收尾（与 duration 耦合）
+              @"commitRatio", @"commitVelocity",                     // 灵敏度（方案A 不消费 + QQ/TIM 被 MAX 夹死）
+              @"doubleReturnDiag", @"diagBanner"];                   // 历史诊断开关
+    });
+    return a;
+}
+
+// 清理废弃 key（全局文件 + suite 两侧）。全局文件一次性读-改-写（避免逐 key 调 oback_setGlobalPref
+// 触发多次全量写盘）；无残留时完全不写，进设置页零额外 IO。
+- (void)_obPurgeRetiredKeys {
+    NSArray *retired = _obRetiredKeys();
+    NSMutableDictionary *g = [NSMutableDictionary dictionaryWithContentsOfFile:kOBGlobalPlist];
+    BOOL gDirty = NO;
+    if (g) {
+        for (NSString *k in retired) {
+            if ([g objectForKey:k]) { [g removeObjectForKey:k]; gDirty = YES; }
+        }
+        if (gDirty) [g writeToFile:kOBGlobalPlist atomically:YES];
     }
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:@"com.zlhkf.oback"];
+    BOOL sDirty = NO;
+    for (NSString *k in retired) {
+        if ([d objectForKey:k]) { [d removeObjectForKey:k]; sDirty = YES; }
+    }
+    if (sDirty) [d synchronize];
 }
 
 // 兜底镜像：每次打开设置页，把各开关/滑块的当前值从「设置」App 自身容器(suite)同步到
@@ -87,6 +114,7 @@ static NSDictionary *_obSliderUnits(void) {
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     if (!_specifiers) [self specifiers];
+    [self _obPurgeRetiredKeys];   // [2026-08-23] 先清废弃 key，再做镜像，避免把残留值又同步回全局文件
     NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:@"com.zlhkf.oback"];   // ARC bundle：不用 autorelease（会编译失败）
     for (PSSpecifier *spec in _specifiers) {
         NSString *key = [spec propertyForKey:@"key"];
@@ -106,63 +134,13 @@ static NSDictionary *_obSliderUnits(void) {
     }
 }
 
-// 方案B（弹窗返回）专属键集合：关掉「弹窗返回增强设置」时整体隐藏这些项及其独占分组头。
-static NSSet *_obPlanBKeys(void) {
-    static NSSet *s = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        s = [NSSet setWithObjects:
-             @"shadowEnabled", @"shadowOffset", @"shadowRadius", @"shadowOpacity",
-             @"duration", @"springEnabled", @"cardCornerEnabled", @"cardCornerValue",
-             @"commitRatio", @"commitVelocity", nil];
-    });
-    return s;
-}
-
-// 读取「弹窗返回增强设置」开关：设置 plist 经 NSUserDefaults(suite) 写入（同进程可读到），
-// 未设置 → 默认开（保留现有用户看到的全部项）。
-- (BOOL)_obShowPlanB {
-    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:@"com.zlhkf.oback"];
-    id v = [d objectForKey:@"sheetEnhanceEnabled"];
-    return v ? [v boolValue] : YES;
-}
-
+// [2026-08-23 精简] 面板已删除全部「调了看不出/被夹死」的方案B 参数，无需再按开关过滤，
+// 直接返回 Root.plist 的完整列表。
 - (NSArray *)specifiers {
-    if (!_allSpecifiers) {
-        _allSpecifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
+    if (!_specifiers) {
+        _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
     }
-    // 展开（默认）→ 直接返回完整列表
-    if ([self _obShowPlanB]) {
-        _specifiers = _allSpecifiers;
-        return _allSpecifiers;
-    }
-    // 收敛：隐藏方案B 专属项及其"仅含方案B 子项"的分组头
-    NSArray *all = _allSpecifiers;
-    NSUInteger n = all.count;
-    NSMutableArray *out = [NSMutableArray arrayWithCapacity:n];
-    for (NSUInteger i = 0; i < n; i++) {
-        PSSpecifier *s = all[i];
-        NSString *cell = [s propertyForKey:@"cell"];
-        if ([cell isEqualToString:@"PSGroupCell"]) {
-            // 判定该组后续（直到下一个 PSGroupCell）所有 keyed 子项是否全为方案B
-            BOOL allPlanB = YES, hasChild = NO;
-            for (NSUInteger j = i + 1; j < n; j++) {
-                PSSpecifier *c = all[j];
-                NSString *cc = [c propertyForKey:@"cell"];
-                if ([cc isEqualToString:@"PSGroupCell"]) break;
-                NSString *ck = [c propertyForKey:@"key"];
-                if (ck) { hasChild = YES; if (![_obPlanBKeys() containsObject:ck]) { allPlanB = NO; break; } }
-            }
-            if (hasChild && allPlanB) continue;   // 隐藏该分组头（其下全是方案B 项）
-            [out addObject:s];
-        } else {
-            NSString *k = [s propertyForKey:@"key"];
-            if (k && [_obPlanBKeys() containsObject:k]) continue;  // 隐藏方案B 项
-            [out addObject:s];
-        }
-    }
-    _specifiers = out;
-    return out;
+    return _specifiers;
 }
 
 #pragma mark - PSSliderCell delegate（端点文字）
@@ -424,6 +402,9 @@ static NSSet *_obPlanBKeys(void) {
     _valueLabels = [NSMutableDictionary dictionary];
 
     // 重建 specifiers 并刷新表格：所有开关/滑块回到 Root.plist 的 <default>
+    // [2026-08-23] 显式清空缓存——本类 specifiers 有 `if (!_specifiers)` 缓存，
+    // 若 reloadSpecifiers 未内部置 nil，会拿到旧列表导致重置后表格不回默认。
+    _specifiers = nil;
     [self reloadSpecifiers];
 }
 
