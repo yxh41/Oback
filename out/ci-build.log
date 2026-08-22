@@ -1,0 +1,44 @@
+[0;36m==> [1;36mNotice:[m Build may be slow as Theos isn’t using all available CPU cores on this computer. Consider upgrading GNU Make: https://theos.dev/docs/parallel-building
+[1;31m> [1;3;39mMaking all for tweak Oback…[m
+[0;31m==> [1;39mPreprocessing Tweak.xm…[m
+[0;32m==> [1;39mCompiling Tweak.xm (arm64)…[m
+[0;32m==> [1;39mCompiling ObackManager.m (arm64)…[m
+[0;32m==> [1;39mCompiling ObackTransition.m (arm64)…[m
+[0;32m==> [1;39mCompiling ObackPreferences.m (arm64)…[m
+[0;33m==> [1;39mLinking tweak Oback (arm64)…[m
+ld: warning: -multiply_defined is obsolete
+[0;34m==> [1;39mGenerating debug symbols for Oback…[m
+[0;34m==> [1;39mStripping Oback (arm64)…[m
+[0;31m==> [1;39mPreprocessing Tweak.xm…[m
+[0;32m==> [1;39mCompiling Tweak.xm (arm64e)…[m
+[0;32m==> [1;39mCompiling ObackManager.m (arm64e)…[m
+[0;32m==> [1;39mCompiling ObackTransition.m (arm64e)…[m
+[0;32m==> [1;39mCompiling ObackPreferences.m (arm64e)…[m
+[0;33m==> [1;39mLinking tweak Oback (arm64e)…[m
+ld: warning: -multiply_defined is obsolete
+[0;34m==> [1;39mGenerating debug symbols for Oback…[m
+[0;34m==> [1;39mStripping Oback (arm64e)…[m
+[0;34m==> [1;39mMerging tweak Oback…[m
+[0;34m==> [1;39mSigning Oback…[m
+[1;31m> [1;3;39mMaking all in Preferences…[m
+[0;36m==> [1;36mNotice:[m Build may be slow as Theos isn’t using all available CPU cores on this computer. Consider upgrading GNU Make: https://theos.dev/docs/parallel-building
+[1;31m> [1;3;39mMaking all for bundle ObackSettings…[m
+[0;35m==> [1;39mCopying resource directories into the bundle wrapper…[m
+[0;32m==> [1;39mCompiling ObackSettingsController.m (arm64)…[m
+[0;32m==> [1;39mCompiling ObackAppListController.m (arm64)…[m
+[0;33m==> [1;39mLinking bundle ObackSettings (arm64)…[m
+ld: warning: -multiply_defined is obsolete
+[0;34m==> [1;39mGenerating debug symbols for ObackSettings…[m
+[0;34m==> [1;39mStripping ObackSettings (arm64)…[m
+[0;32m==> [1;39mCompiling ObackSettingsController.m (arm64e)…[m
+[0;32m==> [1;39mCompiling ObackAppListController.m (arm64e)…[m
+[0;33m==> [1;39mLinking bundle ObackSettings (arm64e)…[m
+ld: warning: -multiply_defined is obsolete
+[0;34m==> [1;39mGenerating debug symbols for ObackSettings…[m
+[0;34m==> [1;39mStripping ObackSettings (arm64e)…[m
+[0;34m==> [1;39mMerging bundle ObackSettings…[m
+[0;34m==> [1;39mSigning ObackSettings…[m
+[1;31m> [1;3;39mMaking stage for tweak Oback…[m
+[1;31m> [1;3;39mMaking stage in Preferences…[m
+[1;31m> [1;3;39mMaking stage for bundle ObackSettings…[m
+dm.pl: building package `com.zlhkf.oback:iphoneos-arm64e' in `./packages/com.zlhkf.oback_0.1.0+fe5d0e0_iphoneos-arm64e.deb'
