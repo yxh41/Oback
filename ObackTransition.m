@@ -4,16 +4,6 @@
 // 核心：根据百分比把"当前页"和"上一页"摆到位，模拟 OPPO 风格边缘返回
 // 弹窗 dismiss 方案B：只动被 dismiss 的 fromView(sheet 滑出+轻微缩小)，
 // 绝不碰底层 presenting(toView)（黑屏根因），也不加深遮罩（避免已可见背景闪暗）。
-// [2026-08-16] 顶部空白 heal 辅助：递归找首个 UIScrollView（用于触发 QQ 列表回顶以展开大标题栏背景）
-static UIScrollView *_obFirstScrollView(UIView *root) {
-    if (!root) return nil;
-    if ([root isKindOfClass:[UIScrollView class]]) return (UIScrollView *)root;
-    for (UIView *sub in root.subviews) {
-        UIScrollView *r = _obFirstScrollView(sub);
-        if (r) return r;
-    }
-    return nil;
-}
 
 // 自愈器直接落盘 trace 用的日志路径（与 OBLog 同策略：优先 /var/mobile 共享路径）
 static NSString *_obHealTracePath(void) {
@@ -42,7 +32,7 @@ static CGFloat g_obackNavBgBaselineH = 0.0;
 @interface ObackTopBlankHealer : NSObject {
     NSTimer *_timer;        // assign：不 retain，避免循环引用
     UIView  *_toView;       // retain
-    UIView  *_fromView;     // retain（用于 _obFirstScrollView 回顶）
+    UIView  *_fromView;     // retain（来源页视图，保留引用以延长其生命周期，自愈窗口内不释放）
     Class    _barBgClass;   // assign（类对象无需 retain）
     CGFloat  _baseline;
     int      _ticks;
@@ -562,8 +552,8 @@ static void OBApplyParallax(CGFloat percent,
     CGRect bf = first.frame; bf.size.height = baseline; first.frame = bf;
     first.hidden = NO;
     @try { [first.superview setNeedsLayout]; [first.superview layoutIfNeeded]; } @catch (NSException *e) {}
-    UIScrollView *sv = _obFirstScrollView(_toView);
-    if (sv && sv.contentOffset.y > 0) { @try { [sv setContentOffset:CGPointZero animated:NO]; } @catch (NSException *e) {} }
+    // 注意：绝不在此触碰列表滚动位置（删除原 setContentOffset:CGPointZero 回顶逻辑——
+    // 每个 tick 强行回顶会在用户滑动中把 QQ 列表拽回顶部，见 2026-08-22 修复）。
     OBLog(@"[topblank-heal] QQ 栏背景塌缩=%.1f, 重设高度=%.1f (baseline=%.1f tick=%d constraint=%@)", h, baseline, _baseline, _ticks, hc?@"Y":@"N");
     // 直接落盘 trace（绕过 OBLog，release 下 OBLog 格式串会被剥，故此处直接写以可验证自愈器确实跑过）
     @try {
