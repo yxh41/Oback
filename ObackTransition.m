@@ -33,6 +33,7 @@ static CGFloat g_obackNavBgBaselineH = 0.0;
     NSTimer *_timer;        // assign：不 retain，避免循环引用
     UIView  *_toView;       // retain
     UIView  *_fromView;     // retain（来源页视图，保留引用以延长其生命周期，自愈窗口内不释放）
+    UIView  *_barBg;        // retain：[2026-08-20 P10] 命中后缓存栏背景视图，后续 tick 免重复递归搜索
     Class    _barBgClass;   // assign（类对象无需 retain）
     CGFloat  _baseline;
     int      _ticks;
@@ -42,6 +43,40 @@ static CGFloat g_obackNavBgBaselineH = 0.0;
 - (void)stop;
 - (BOOL)healOnce;
 @end
+
+// [2026-08-20 P10] 深度受限递归查找 QQ 栏背景视图。
+// 旧版只认 toView.subviews.firstObject —— 从「社区/频道」返回时 QQ 把 QQCornerRadiusNavBarBgView
+// 塞进中间容器（不是 toView 的首个子视图），导致 healOnce 第一行就 return NO，自愈完全不生效。
+// 深度上限 3 且逐层广度优先：命中概率高的浅层先扫，避免遍历 QQ 巨大视图树造成主线程开销。
+static UIView *_obFindBarBgInView(UIView *root, Class cls, int depth) {
+    if (!root || !cls || depth < 0) return nil;
+    for (UIView *v in root.subviews) {
+        if ([v isKindOfClass:cls]) return v;
+    }
+    if (depth == 0) return nil;
+    for (UIView *v in root.subviews) {
+        UIView *r = _obFindBarBgInView(v, cls, depth - 1);
+        if (r) return r;
+    }
+    return nil;
+}
+
+// [2026-08-20 P10] 高度约束查找：旧版只看 view.constraints 与 superview.constraints。
+// QQ 的高度约束可能挂在更上层容器上（约束由 addConstraint 的那个 view 持有，不一定是被约束者本身），
+// 故沿 superview 链向上最多 4 层查找；优先取「常量高度」约束(secondItem==nil)，其次任意 Height 约束。
+static NSLayoutConstraint *_obFindHeightConstraintFor(UIView *v) {
+    NSLayoutConstraint *loose = nil;
+    UIView *scan = v;
+    for (int lv = 0; lv < 4 && scan; lv++) {
+        for (NSLayoutConstraint *c in scan.constraints) {
+            if (c.firstItem != v || c.firstAttribute != NSLayoutAttributeHeight) continue;
+            if (c.secondItem == nil) return c;   // 常量高度：改 constant 即治本
+            if (!loose) loose = c;
+        }
+        scan = scan.superview;
+    }
+    return loose;
+}
 
 // 注：自定义 nav 视差（实验）功能已移除——nav pop 一律走系统原生转场（方案A），不再经本文件自定义动画。
 static void OBApplyParallax(CGFloat percent,
@@ -379,6 +414,13 @@ static void OBApplyParallax(CGFloat percent,
             OBLog(@"forceComplete completeTransition CRASH (dispatch_after): %@", exception.reason);
         }
         if (toView) toView.hidden = NO;   // 还原真实底页可见
+        // [2026-08-20 P10] 兜底收尾路径同样启动顶部空白自愈器。
+        // 旧版只在上面的 UIView completion 块启动 healer；一旦动画 completion 未触发而走到这里
+        // （异常/被打断/duration 调大），自愈完全缺席 -> 顶部空白无人纠正。此处补齐。
+        {
+            ObackTopBlankHealer *healer = [[ObackTopBlankHealer alloc] init];
+            [healer startWithToView:toView fromView:fromView];
+        }
         NSArray *subs = [[container.subviews copy] autorelease];
         for (UIView *sub in subs) {
             if (sub != fromView && sub != toView) [sub removeFromSuperview];
@@ -508,7 +550,10 @@ static void OBApplyParallax(CGFloat percent,
     _barBgClass = barBgCls;   // 私有类铁律：NSClassFromString + isKindOfClass（startWithToView 每次转场一次，缓存免重复查表）
     _baseline  = (g_obackNavBgBaselineH > 20.0) ? g_obackNavBgBaselineH : 0.0;   // 用已记录的基线（自适应机型）
     _ticks     = 0;
-    _maxTicks  = 20;   // ~2.0s @0.1s：覆盖 QQ 转场后清零的竞态窗口
+    // [2026-08-20 P10] 窗口 2.0s -> 4.0s：实测「从社区/频道返回」时 QQ 会在转场后较晚(>2s)
+    // 才按来源页栏样式把高度算成 0，2s 窗口漏网（用户线索：需下拉小程序再拉回触发 relayout 才恢复）。
+    // 命中缓存后每 tick 仅一次 frame 高度比较，4s 内 40 次，开销可忽略。
+    _maxTicks  = 40;   // ~4.0s @0.1s
     [self healOnce];   // 收尾瞬间若已塌缩，先同步校正一次
     // timer retain self(healer)；healer 不 retain timer（assign）-> 无循环引用。
     _timer = [NSTimer scheduledTimerWithTimeInterval:0.1
@@ -529,8 +574,30 @@ static void OBApplyParallax(CGFloat percent,
 
 - (BOOL)healOnce {
     if (!_toView || !_barBgClass) return NO;
-    UIView *first = _toView.subviews.firstObject;
-    if (!first || ![first isKindOfClass:_barBgClass]) return NO;
+    // [2026-08-20 P10] 先用缓存；未命中则「首个子视图快路径 + 深度<=3 递归」两级查找。
+    UIView *first = _barBg;
+    if (!first || !first.superview) {
+        UIView *fast = _toView.subviews.firstObject;
+        if (fast && [fast isKindOfClass:_barBgClass]) first = fast;
+        else first = _obFindBarBgInView(_toView, _barBgClass, 3);
+        if (first) { [first retain]; [_barBg release]; _barBg = first; }
+    }
+    if (!first) {
+        // [2026-08-20 P10] 诊断：栏背景视图完全找不到（深度<=3 未命中）。只在首个 tick 落一行，
+        // 避免刷日志；便于下次实机日志判断「是找不到视图」还是「找到但没塌缩」。
+        if (_ticks == 0) {
+            @try {
+                UIView *f0 = _toView.subviews.firstObject;
+                NSString *line = [NSString stringWithFormat:@"[topblank-heal@] barBg NOT FOUND in to=%@ subs=%d first=%@\n",
+                                  NSStringFromClass([_toView class]), (int)_toView.subviews.count,
+                                  f0 ? NSStringFromClass([f0 class]) : @"nil"];
+                NSString *lp = _obHealTracePath();
+                NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:lp];
+                if (fh) { [fh seekToEndOfFile]; [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; }
+            } @catch (NSException *e) {}
+        }
+        return NO;
+    }
     CGFloat h = CGRectGetHeight(first.frame);
     if (h > 20.0) {
         g_obackNavBgBaselineH = h;   // 正常高度则更新基线（自适应机型/页面）
@@ -541,19 +608,15 @@ static void OBApplyParallax(CGFloat percent,
     CGFloat baseline = (_baseline > 20.0) ? _baseline
         : (CGRectGetMinY(first.frame) > 0.5 ? CGRectGetMinY(first.frame)
             : (g_obackNavBgBaselineH > 20.0 ? g_obackNavBgBaselineH : 151.0));
-    NSLayoutConstraint *hc = nil;
-    for (NSLayoutConstraint *c in first.constraints) {
-        if (c.firstItem == first && c.firstAttribute == NSLayoutAttributeHeight) { hc = c; break; }
-    }
-    if (!hc) {
-        for (NSLayoutConstraint *c in first.superview.constraints) {
-            if (c.firstItem == first && c.firstAttribute == NSLayoutAttributeHeight) { hc = c; break; }
-        }
-    }
+    NSLayoutConstraint *hc = _obFindHeightConstraintFor(first);
     if (hc) { hc.constant = baseline; }
     CGRect bf = first.frame; bf.size.height = baseline; first.frame = bf;
     first.hidden = NO;
     @try { [first.superview setNeedsLayout]; [first.superview layoutIfNeeded]; } @catch (NSException *e) {}
+    // [2026-08-20 P10] 追加一次「整页 relayout」：用户线索——手动下拉小程序再拉回即可恢复，
+    // 说明 QQ 自身走一遍完整 layout 就会把栏背景算回正常高度。仅 superview 局部 layout 有时不足以
+    // 让上层容器重新下发约束，故对 toView 再触发一次（每 tick 仅在确实塌缩时执行，不构成常态开销）。
+    @try { [_toView setNeedsLayout]; [_toView layoutIfNeeded]; } @catch (NSException *e) {}
     // 注意：绝不在此触碰列表滚动位置（删除原 setContentOffset:CGPointZero 回顶逻辑——
     // 每个 tick 强行回顶会在用户滑动中把 QQ 列表拽回顶部，见 2026-08-22 修复）。
     OBLog(@"[topblank-heal] QQ 栏背景塌缩=%.1f, 重设高度=%.1f (baseline=%.1f tick=%d constraint=%@)", h, baseline, _baseline, _ticks, hc?@"Y":@"N");
@@ -576,6 +639,7 @@ static void OBApplyParallax(CGFloat percent,
 - (void)dealloc {
     if (_toView)   [_toView release];
     if (_fromView) [_fromView release];
+    if (_barBg)    [_barBg release];   // [2026-08-20 P10] 缓存的栏背景视图（retain）须释放
     // _timer 为 assign 且 stop 中已 invalidate+nil，无需 release（避免重复释放）。
     [super dealloc];
 }
