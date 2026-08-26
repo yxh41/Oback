@@ -100,6 +100,18 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     return NO;
 }
 
+// 内置排除列表（T4 / 2026-08-23）：QQ(com.tencent.mqq) / TIM(com.tencent.tim)。
+// 这两个 App 用 NTPushPopLib 等自研转场库整体接管交互返回，与 Oback 长期抢手势（瞬返 / 文本选择
+// 手柄拖不动 / 全屏返回失效），为其定制的两套专用子系统已在 T4 从源码移除。此处在「全局+黑名单」
+// 模式下直接判不生效（等价于内置黑名单，用户无需手动加），彻底不注入、零副作用。
+// 保留强制启用能力：切到白名单模式并显式勾选 QQ/TIM 仍会生效（供后续实验，风险自负）。
++ (BOOL)_isBuiltinExcluded:(NSString *)bid {
+    if (!bid.length) return NO;
+    if ([bid caseInsensitiveCompare:@"com.tencent.mqq"] == NSOrderedSame) return YES;
+    if ([bid caseInsensitiveCompare:@"com.tencent.tim"] == NSOrderedSame) return YES;
+    return NO;
+}
+
 // 是否允许当前 App 生效：
 //  - whitelistMode 未设置或 YES：只有白名单内的 App 生效（空白名单 = 全部不生效）
 //  - whitelistMode == NO：回到全局生效 + 黑名单排除（原逻辑）
@@ -112,6 +124,9 @@ static NSTimeInterval __obMergedPrefsTS = 0;
 
     id wm = [d objectForKey:@"whitelistMode"];
     BOOL whitelistMode = wm ? [wm boolValue] : NO;   // 未设置 → 默认全局生效（黑名单模式），符合"全局注入"设计
+
+    // 内置排除：黑名单模式下 QQ/TIM 一律不生效（白名单模式仍可显式勾选强制启用）
+    if (!whitelistMode && [self _isBuiltinExcluded:bid]) return NO;
 
     if (whitelistMode) {
         NSArray *white = [d objectForKey:@"whitelistApps"];

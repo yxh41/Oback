@@ -62,7 +62,7 @@
 			<key>defaults</key>
 			<string>com.zlhkf.oback</string>
 			<key>footnote</key>
-			<string>返回过程中给当前页面叠加投影，增强层叠立体感（偏移/柔和度/浓度已固定为调优后的默认值，无需手动调节）。默认原生边缘返回走系统转场不消费此项；弹窗返回与 QQ/TIM 自定义转场时生效。</string>
+			<string>返回过程中给当前页面叠加投影，增强层叠立体感（偏移/柔和度/浓度已固定为调优后的默认值，无需手动调节）。默认原生边缘返回走系统转场不消费此项；弹窗返回时生效。</string>
 			<key>key</key>
 			<string>shadowEnabled</string>
 			<key>label</key>
@@ -94,7 +94,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>调节松手后完成或取消返回动画的时长（0.15–0.6 秒）。越短越跟手，越长越顺滑。（默认原生边缘返回走系统转场不消费此参数；弹窗返回与 QQ/TIM 自定义转场时生效。）</string>
+			<string>调节松手后完成或取消返回动画的时长（0.15–0.6 秒）。越短越跟手，越长越顺滑。（默认原生边缘返回走系统转场不消费此参数；弹窗返回时生效。）</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -224,7 +224,7 @@
 			<key>action</key>
 			<string>toggleDebugLog</string>
 			<key>footnote</key>
-			<string>关（默认）：完全不写日志（最省）。开：记录手势触发/提交/取消，便于定位问题。点按在「开/关」间切换；切换即时生效，回 QQ 做手势即可在「显示调试日志」里看到（此开关此前走系统回调不可靠，现改为直写，确保 toggle 一定落到 tweak 可读的文件）。</string>
+			<string>关（默认）：完全不写日志（最省）。开：记录手势触发/提交/取消，便于定位问题。点按在「开/关」间切换；切换即时生效，回目标 App 做手势即可在「显示调试日志」里看到（此开关此前走系统回调不可靠，现改为直写，确保 toggle 一定落到 tweak 可读的文件）。</string>
 			<key>label</key>
 			<string>调试日志：关</string>
 		</dict>

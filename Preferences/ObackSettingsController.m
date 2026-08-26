@@ -79,7 +79,7 @@ static NSArray *_obRetiredKeys(void) {
               @"shadowOffset", @"shadowRadius", @"shadowOpacity",   // 阴影细节参数（固定为默认）
               @"cardCornerEnabled", @"cardCornerValue",             // 弹窗圆角（与阴影互斥的装饰）
               @"springEnabled",                                      // 弹性收尾（与 duration 耦合）
-              @"commitRatio", @"commitVelocity",                     // 灵敏度（方案A 不消费 + QQ/TIM 被 MAX 夹死）
+              @"commitRatio", @"commitVelocity",                     // 灵敏度（方案A 不消费；弹窗返回按此调节）
               @"doubleReturnDiag", @"diagBanner"];                   // 历史诊断开关
     });
     return a;
@@ -307,7 +307,7 @@ static NSArray *_obRetiredKeys(void) {
                                          NULL, NULL, TRUE);
     UIAlertController *a = [UIAlertController
         alertControllerWithTitle:@"调试日志"
-                         message:@"已请求各 App 显示内存中的调试日志。请切回目标 App（如 QQ/TIM），它回到前台时会自动弹出日志窗口；长按文本框全选复制，发我即可定位文本选择等问题。"
+                         message:@"已请求各 App 显示内存中的调试日志。请切回目标 App（如微信/其他已启用 App），它回到前台时会自动弹出日志窗口；长按文本框全选复制，发我即可定位手势问题。"
                   preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"好"
                                           style:UIAlertActionStyleDefault
@@ -346,7 +346,7 @@ static NSArray *_obRetiredKeys(void) {
     }
     UIAlertController *a = [UIAlertController
         alertControllerWithTitle:@"调试日志"
-                         message:(next ? @"已开启。回 QQ 做几次手势，再用「显示调试日志」查看内存日志。" : @"已关闭。")
+                         message:(next ? @"已开启。回目标 App 做几次手势，再用「显示调试日志」查看内存日志。" : @"已关闭。")
                   preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:a animated:YES completion:nil];

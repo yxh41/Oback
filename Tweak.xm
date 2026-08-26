@@ -58,18 +58,6 @@ static BOOL oback_shouldBackOff(void) {
         // 根除自定义转场 reparent toView 进 containerView 导致的空白 / 导航栏损坏 / scrollView 错位）。
         // 系统默认转场由 _UINavigationInteractiveTransition 驱动，ObackManager 已用
         // handleNavigationTransition: 把 window pan 喂给它做 scrub。
-        if ([ObackManager shared].navPopUseObackAnimator) {
-            // QQ/TIM：自定义交互 nav pop（阴影渐隐，上一页 Identity 天然可见），跟手，
-            // 规避 NTPushPopLib 等自研转场不跟手 scrub。interactionControllerForAnimationController:
-            // 对 ObackAnimator 自动返回 self.interactive，无需额外接线。
-            ObackAnimator *a = [[[ObackAnimator alloc] initWithEdge:[ObackManager shared].currentEdge
-                                                               params:[ObackPreferences params]] autorelease];
-            a.navPop = YES;   // nav pop 模式：纯平移+阴影渐隐，不缩放
-            [ObackManager shared].interactive.animator = a;
-            [ObackManager shared].currentAnimator = a;
-            OBLog(@"nav-anim -> ObackAnimator (QQ/TIM 自定义 nav pop)");
-            return a;
-        }
         OBLog(@"nav-anim -> nil (方案A: 系统原生 pop)");
         return nil;
     }

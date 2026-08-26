@@ -1,59 +1,14 @@
 #import "ObackTransition.h"
 #import "ObackManager.h"   // 读取松手速度/进度做动量继承（ObackManager.h 已 import ObackTransition.h，无循环依赖）
-#import <objc/runtime.h>   // [2026-08-26 P13] method_setImplementation / class_getInstanceMethod（治本 swizzle）
 
 // 核心：根据百分比把"当前页"和"上一页"摆到位，模拟 OPPO 风格边缘返回
 // 弹窗 dismiss 方案B：只动被 dismiss 的 fromView(sheet 滑出+轻微缩小)，
 // 绝不碰底层 presenting(toView)（黑屏根因），也不加深遮罩（避免已可见背景闪暗）。
 
-// [2026-08-26 T3] 顶部空白自愈器(ObackTopBlankHealer)已退役——P13 的 setFrame: swizzle 在 QQ 把高度
-// 设成≈0 的那一次调用里即改回基线，覆盖更广且无常驻 timer。调试日志统一走 ObackManager.m 的 OBLog
+// [2026-08-26 T3] 顶部空白自愈器(ObackTopBlankHealer)已退役；调试日志统一走 ObackManager.m 的 OBLog
 // （含 >1MB 自动截断），不再有独立的 trace 落盘路径（_obHealTracePath / _obHealTraceAppend 已删除）。
-
-// [2026-08-16] QQ 圆角导航栏背景(QQCornerRadiusNavBarBgView)基线高度缓存——首次正常返回时记录，
-// 后续塌缩时用它把 frame 高度重设回去（自适应机型/页面，不硬编码 151）。
-static CGFloat g_obackNavBgBaselineH = 0.0;
-
-// [2026-08-26 P13] 顶部空白治本（方向 A）：日志(38)证明 P10 自愈器 4818 行 0 次成功——
-// 那些页要么无高度约束可钉、要么栏在内嵌 Kuikly/小程序内容里原生层根本没有 QQCornerRadiusNavBarBgView。
-// 对「有该类但被 QQ 把高度算成 0」的页（社区/频道等原生导航栏），最稳的修法不是在定时器里抢 frame，
-// 而是在 QQ 主动 setFrame: 把高度设成 ≈0 的那一次调用里就改回基线——时序无关、无递归、零常驻 timer。
-// 机制：运行时 swizzle 该私有类的 setFrame:（NSClassFromString 取类，遵守私有类铁律）；
-// 保存原 IMP 直接调用（不经 msgSend，避免原函数内部再调 setFrame: 造成的重入）；
-// 高度>8 时记录基线（自适应机型），高度<1 且基线有效时把 f.size.height 改回基线再传给原实现。
-// 天然隔离：该类仅 QQ/TIM 有，其他 App NSClassFromString 返回 nil → 不安装、零副作用。
-// MRC 安全：无对象持有，纯标量/函数指针；不调用 [self setFrame:]（用保存的原 IMP 直接调）。
-static void (*ob_origQQNavBarBgSetFrame)(UIView *, SEL, CGRect) = NULL;
-
-static void ob_qqNavBarBgSetFrame(UIView *self, SEL _cmd, CGRect f) {
-    if (!ob_origQQNavBarBgSetFrame) return;
-    if ([ObackPreferences isAllowed]) {
-        CGFloat h = f.size.height;
-        if (h > 8.0) {
-            g_obackNavBgBaselineH = h;                  // 正常态：记录基线（自适应机型/状态栏）
-        } else if (g_obackNavBgBaselineH > 8.0 && h < 1.0) {
-            f.size.height = g_obackNavBgBaselineH;      // 异常（被 QQ 算成 0）→ 兜底回基线，视觉无空白
-        }
-    }
-    ob_origQQNavBarBgSetFrame(self, _cmd, f);
-}
-
-void ObackInstallNavBarBgFrameGuard(void) {
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        Class cls = NSClassFromString(@"QQCornerRadiusNavBarBgView");
-        if (!cls) return;                               // 非 QQ/TIM 进程不安装
-        SEL sel = @selector(setFrame:);
-        Method m = class_getInstanceMethod(cls, sel);
-        if (!m) return;
-        ob_origQQNavBarBgSetFrame = (void (*)(UIView *, SEL, CGRect))method_getImplementation(m);
-        method_setImplementation(m, (IMP)ob_qqNavBarBgSetFrame);
-    });
-}
-
-// [2026-08-26 T3] ObackTopBlankHealer（含 _obFindBarBgInView / _obFindHeightConstraintFor）已退役，
-// 由上方 ObackInstallNavBarBgFrameGuard 的 setFrame: swizzle 取代。删除后减少 ~110 行死代码与
-// 转场后 4s 常驻 timer + 递归搜视图开销；顶部空白纠正改在源头（QQ 设高度的那次 setFrame:）完成。
+// [2026-08-23 T4] QQ/TIM 已内置排除（不再注入），其专用的顶部空白治本 guard
+// (QQCornerRadiusNavBarBgView.setFrame: swizzle) 与基线缓存一并移除。
 
 // 注：自定义 nav 视差（实验）功能已移除——nav pop 一律走系统原生转场（方案A），不再经本文件自定义动画。
 static void OBApplyParallax(CGFloat percent,
