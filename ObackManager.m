@@ -20,7 +20,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"T4-noqq"
+#define OBACK_BUILD_TAG @"T4-noqq-t2"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -731,18 +731,30 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
         [self _enumerateNavControllersFrom:vc.presentedViewController block:block];
 }
 
+// T2 去重：edge / scrollPan / pan 三个视图树枚举器同构（深度护栏 + subviews 递归），
+// 统一为泛型 _enumerateGestureViewsIn:depth:predicate:emit:，下方三个公开方法仅提供各自的过滤谓词与类型转换。
+// 深度护栏(>40 防爆栈)与递归骨架只在一处维护。
+- (void)_enumerateGestureViewsIn:(UIView *)view depth:(NSUInteger)depth
+			       predicate:(BOOL(^)(UIView *v, UIGestureRecognizer *g))pred
+			           emit:(void(^)(UIGestureRecognizer *g))emit {
+	if (!view || !emit || depth > 40) return;
+	for (UIGestureRecognizer *g in view.gestureRecognizers) {
+		if (pred(view, g)) emit(g);
+	}
+	for (UIView *sub in view.subviews)
+		[self _enumerateGestureViewsIn:sub depth:depth + 1 predicate:pred emit:emit];
+}
+
 // 递归收集窗口视图树里所有 UIScreenEdgePanGestureRecognizer（含 App/插件自定义的左边缘返回手势）。
 // 注意：我们的 window pan 现在本身就是 UIScreenEdgePanGestureRecognizer 子类，故枚举时会包含它们；
 // 在链接处通过 g.delegate == self 跳过自身（避免 requireGestureRecognizerToFail 自引用），无需在此排除。
-// 深度护栏避免超大视图树爆栈。
 - (void)_enumerateEdgeGesturesInView:(UIView *)view depth:(NSUInteger)depth
-                               block:(void(^)(UIScreenEdgePanGestureRecognizer *g))block {
-    if (!view || !block || depth > 40) return;
-    for (UIGestureRecognizer *g in view.gestureRecognizers) {
-        if ([g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) block((UIScreenEdgePanGestureRecognizer *)g);
-    }
-    for (UIView *sub in view.subviews)
-        [self _enumerateEdgeGesturesInView:sub depth:depth + 1 block:block];
+			                               block:(void(^)(UIScreenEdgePanGestureRecognizer *g))block {
+	[self _enumerateGestureViewsIn:view depth:depth
+			                 predicate:^BOOL(UIView *v, UIGestureRecognizer *g){
+			                     return [g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]];
+			                 }
+			                     emit:^(UIGestureRecognizer *g){ block((UIScreenEdgePanGestureRecognizer *)g); }];
 }
 
 // 递归收集窗口视图树里所有 UIScrollView 的 pan 手势（横向 + 纵向皆含）。
@@ -752,26 +764,23 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
 // 让「所有」scrollView 的 pan 失败于 ourPan：从边缘起滑时 ourPan 优先接管返回（无论横/纵 scroll），
 // 从中间滑动时 ourPan 本就不 begin → 放行给滚动，互不干扰。完全匹配 OPPO 行为（极端边缘=返回）。
 - (void)_enumerateScrollPansInView:(UIView *)view depth:(NSUInteger)depth
-                              block:(void(^)(UIPanGestureRecognizer *g))block {
-    if (!view || !block || depth > 40) return;
-    if ([view isKindOfClass:[UIScrollView class]]) {
-        UIScrollView *sv = (UIScrollView *)view;
-        if (sv.panGestureRecognizer) block(sv.panGestureRecognizer);
-    }
-    for (UIView *sub in view.subviews)
-        [self _enumerateScrollPansInView:sub depth:depth + 1 block:block];
+			                              block:(void(^)(UIPanGestureRecognizer *g))block {
+	[self _enumerateGestureViewsIn:view depth:depth
+			                 predicate:^BOOL(UIView *v, UIGestureRecognizer *g){
+			                     return [v isKindOfClass:[UIScrollView class]] && g == ((UIScrollView *)v).panGestureRecognizer;
+			                 }
+			                     emit:^(UIGestureRecognizer *g){ block((UIPanGestureRecognizer *)g); }];
 }
 
 // 收集窗口视图树里所有 UIPanGestureRecognizer（含 plain / 屏幕边缘 / 滚动），用于让"对手手势"
 // 失败于我们的右缘 pan（Oback 独占右缘返回）。排除我们自己的 pan（delegate==self）。
 - (void)_enumeratePansInView:(UIView *)view depth:(NSUInteger)depth
-                        block:(void(^)(UIPanGestureRecognizer *g))block {
-    if (!view || !block || depth > 40) return;
-    for (UIGestureRecognizer *g in view.gestureRecognizers) {
-        if ([g isKindOfClass:[UIPanGestureRecognizer class]]) block((UIPanGestureRecognizer *)g);
-    }
-    for (UIView *sub in view.subviews)
-        [self _enumeratePansInView:sub depth:depth + 1 block:block];
+			                        block:(void(^)(UIPanGestureRecognizer *g))block {
+	[self _enumerateGestureViewsIn:view depth:depth
+			                 predicate:^BOOL(UIView *v, UIGestureRecognizer *g){
+			                     return [g isKindOfClass:[UIPanGestureRecognizer class]];
+			                 }
+			                     emit:^(UIGestureRecognizer *g){ block((UIPanGestureRecognizer *)g); }];
 }
 
 // 从 pan 解析出真正的 UIWindow：nav pop 的边缘 pan 挂在 nav.view 上（pan.view 是 UIView 非 window），
