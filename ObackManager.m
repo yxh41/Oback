@@ -2,6 +2,9 @@
 #import "ObackPreferences.h"
 #import <objc/runtime.h>
 
+// [2026-08-26 P13] 顶部空白治本 guard 的前向声明（实现在 ObackTransition.m，复用其全局基线标量）。
+void ObackInstallNavBarBgFrameGuard(void);
+
 // [v11] 私有方法前向声明：obShowLogCallback 是 C 函数，需显式声明否则 -Werror 报方法找不到
 @interface ObackManager ()
 - (void)_armShowLogOnForeground;
@@ -20,7 +23,7 @@
 
 // [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
 // （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"P12-healtrace-gated"
+#define OBACK_BUILD_TAG @"P13-navbar-frame-guard"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -611,6 +614,9 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
         OBLog(@"start: isAllowed=NO (bid=%@)，Oback 完全不注入（黑白名单排除生效）", NSBundle.mainBundle.bundleIdentifier);
         return;
     }
+    // [2026-08-26 P13] 顶部空白治本 guard：运行时 swizzle QQCornerRadiusNavBarBgView.setFrame:，
+    // 在 QQ 把导航栏背景高度算成 0 的那一次调用里就改回基线。仅 QQ/TIM 有该类才安装，零副作用。
+    ObackInstallNavBarBgFrameGuard();
     // 扩展进程(分享/动作/键盘等 appex)内无边缘返回需求，且常为 _UIHostedWindow / keyWindow=null，
     // 直接跳过挂载，避免无意义的手势注入与日志噪声（如 com.tencent.xin.sharetimeline）。
     if ([[[NSBundle mainBundle] infoDictionary] objectForKey:@"NSExtension"]) {
