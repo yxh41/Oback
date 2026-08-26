@@ -6,43 +6,9 @@
 // 弹窗 dismiss 方案B：只动被 dismiss 的 fromView(sheet 滑出+轻微缩小)，
 // 绝不碰底层 presenting(toView)（黑屏根因），也不加深遮罩（避免已可见背景闪暗）。
 
-// 自愈器直接落盘 trace 用的日志路径（与 OBLog 同策略：优先 /var/mobile 共享路径）
-static NSString *_obHealTracePath(void) {
-    if ([[NSFileManager defaultManager] isWritableFileAtPath:@"/var/mobile"]) {
-        return @"/var/mobile/oback_debug.log";
-    }
-    // 兜底：沙盒内 Documents。注意函数名是 ...InDomains（不是 ForDomains——写错会触发
-    // -Werror,-Wimplicit-function-declaration 直接编译失败）。与 ObackManager.m 的 OBLog 路径同策略。
-    NSString *dir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
-                                                         NSUserDomainMask, YES) firstObject];
-    return dir ? [dir stringByAppendingPathComponent:@"oback_debug.log"]
-               : @"/var/mobile/oback_debug.log";
-}
-
-// [2026-08-26 P12] 自愈器 trace 落盘：受「调试日志」开关控制（debugLogEnabledLive，开关即时生效），
-// 且文件 >1MB 自动截断，防无限增长。此前该 trace 无条件写盘，导致关了日志仍刷满 oback_debug.log。
-static void _obHealTraceAppend(NSString *line) {
-    @try {
-        // 热路径微缓存：开关状态缓存 0.3s，避免每 tick 都读盘（与 OBLog 同策略）
-        static BOOL __healEnabledCache = NO;
-        static NSTimeInterval __healCacheTS = 0;
-        NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-        BOOL enabled;
-        if ((now - __healCacheTS) < 0.3) enabled = __healEnabledCache;
-        else { enabled = [ObackPreferences debugLogEnabledLive]; __healEnabledCache = enabled; __healCacheTS = now; }
-        if (!enabled) return;   // 调试日志关 → 完全不写
-        NSString *lp = _obHealTracePath();
-        NSFileManager *fm = [NSFileManager defaultManager];
-        NSDictionary *attrs = [fm attributesOfItemAtPath:lp error:nil];
-        if (attrs && [attrs fileSize] > (1024ULL * 1024ULL)) {  // >1MB 截断，防无限增长
-            NSFileHandle *tfh = [NSFileHandle fileHandleForWritingAtPath:lp];
-            if (tfh) { [tfh truncateFileAtOffset:0]; [tfh closeFile]; }
-        }
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:lp];
-        if (fh) { [fh seekToEndOfFile]; [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; }
-        else { [line writeToFile:lp atomically:NO encoding:NSUTF8StringEncoding error:nil]; }
-    } @catch (NSException *e) {}
-}
+// [2026-08-26 T3] 顶部空白自愈器(ObackTopBlankHealer)已退役——P13 的 setFrame: swizzle 在 QQ 把高度
+// 设成≈0 的那一次调用里即改回基线，覆盖更广且无常驻 timer。调试日志统一走 ObackManager.m 的 OBLog
+// （含 >1MB 自动截断），不再有独立的 trace 落盘路径（_obHealTracePath / _obHealTraceAppend 已删除）。
 
 // [2026-08-16] QQ 圆角导航栏背景(QQCornerRadiusNavBarBgView)基线高度缓存——首次正常返回时记录，
 // 后续塌缩时用它把 frame 高度重设回去（自适应机型/页面，不硬编码 151）。
@@ -85,61 +51,9 @@ void ObackInstallNavBarBgFrameGuard(void) {
     });
 }
 
-// [2026-08-20] 顶部空白自愈 observer（方案C）前向声明。
-// 转场收尾后启动短期观察者窗口，重复检查 QQ 自定义圆角导航栏背景(QQCornerRadiusNavBarBgView)高度，
-// 一旦被 QQ 按来源页栏样式塌缩(<20)即立即纠正回基线（重设 frame 高度 + 列表回顶），时序无关——
-// 无论 QQ 在转场后多久清零都被纠正，克服旧版 0.5s 快照 heal 的时序漏网。窗口结束后自动 stop 释放，
-// 无常驻开销。遵守私有类铁律(NSClassFromString + isKindOfClass)。
-// MRC：禁用 __weak，_timer 用 assign（不 retain timer）避免 timer<->healer 循环引用；
-// timer 在 scheduledTimer 时 retain self，stop 中 invalidate 后 timer release self -> healer 自动 dealloc。
-@interface ObackTopBlankHealer : NSObject {
-    NSTimer *_timer;        // assign：不 retain，避免循环引用
-    UIView  *_toView;       // retain
-    UIView  *_fromView;     // retain（来源页视图，保留引用以延长其生命周期，自愈窗口内不释放）
-    UIView  *_barBg;        // retain：[2026-08-20 P10] 命中后缓存栏背景视图，后续 tick 免重复递归搜索
-    Class    _barBgClass;   // assign（类对象无需 retain）
-    CGFloat  _baseline;
-    int      _ticks;
-    int      _maxTicks;
-}
-- (void)startWithToView:(UIView *)toView fromView:(UIView *)fromView;
-- (void)stop;
-- (BOOL)healOnce;
-@end
-
-// [2026-08-20 P10] 深度受限递归查找 QQ 栏背景视图。
-// 旧版只认 toView.subviews.firstObject —— 从「社区/频道」返回时 QQ 把 QQCornerRadiusNavBarBgView
-// 塞进中间容器（不是 toView 的首个子视图），导致 healOnce 第一行就 return NO，自愈完全不生效。
-// 深度上限 3 且逐层广度优先：命中概率高的浅层先扫，避免遍历 QQ 巨大视图树造成主线程开销。
-static UIView *_obFindBarBgInView(UIView *root, Class cls, int depth) {
-    if (!root || !cls || depth < 0) return nil;
-    for (UIView *v in root.subviews) {
-        if ([v isKindOfClass:cls]) return v;
-    }
-    if (depth == 0) return nil;
-    for (UIView *v in root.subviews) {
-        UIView *r = _obFindBarBgInView(v, cls, depth - 1);
-        if (r) return r;
-    }
-    return nil;
-}
-
-// [2026-08-20 P10] 高度约束查找：旧版只看 view.constraints 与 superview.constraints。
-// QQ 的高度约束可能挂在更上层容器上（约束由 addConstraint 的那个 view 持有，不一定是被约束者本身），
-// 故沿 superview 链向上最多 4 层查找；优先取「常量高度」约束(secondItem==nil)，其次任意 Height 约束。
-static NSLayoutConstraint *_obFindHeightConstraintFor(UIView *v) {
-    NSLayoutConstraint *loose = nil;
-    UIView *scan = v;
-    for (int lv = 0; lv < 4 && scan; lv++) {
-        for (NSLayoutConstraint *c in scan.constraints) {
-            if (c.firstItem != v || c.firstAttribute != NSLayoutAttributeHeight) continue;
-            if (c.secondItem == nil) return c;   // 常量高度：改 constant 即治本
-            if (!loose) loose = c;
-        }
-        scan = scan.superview;
-    }
-    return loose;
-}
+// [2026-08-26 T3] ObackTopBlankHealer（含 _obFindBarBgInView / _obFindHeightConstraintFor）已退役，
+// 由上方 ObackInstallNavBarBgFrameGuard 的 setFrame: swizzle 取代。删除后减少 ~110 行死代码与
+// 转场后 4s 常驻 timer + 递归搜视图开销；顶部空白纠正改在源头（QQ 设高度的那次 setFrame:）完成。
 
 // 注：自定义 nav 视差（实验）功能已移除——nav pop 一律走系统原生转场（方案A），不再经本文件自定义动画。
 static void OBApplyParallax(CGFloat percent,
@@ -413,6 +327,9 @@ static void OBApplyParallax(CGFloat percent,
         // 杜绝 dispatch_after/异常路径下 toView 残留缩放态（scrollView 错位/空白）。
         toView.transform = CGAffineTransformIdentity;
         // [2026-08-16 诊断增强] 顶部空白排查：转场收尾记录 toView + 导航栏关键状态，供下次日志定位
+        // [2026-08-26 T3] 加开关前置守卫：OBLog 是真函数，其十余个 NSStringFrom* 参数在调用前就已求值，
+        // 关了调试日志也照跑。故整块先判 debugLogEnabledLive，关则完全跳过（消除常态字符串格式化开销）。
+        if ([ObackPreferences debugLogEnabledLive])
         {
             UINavigationController *diagNav = [toVC navigationController] ?: [fromVC navigationController];
             UINavigationBar *dnb = diagNav.navigationBar;
@@ -444,16 +361,7 @@ static void OBApplyParallax(CGFloat percent,
             OBLog(@"forceComplete completeTransition CRASH: %@", exception.reason);
         }
         if (toView) toView.hidden = NO;   // 还原真实底页可见
-        // [2026-08-20] 顶部空白自愈（方案C）：启动短期自愈 observer 代替旧版「0.5s 快照 heal」。
-        // 转场收尾瞬间先同步校正一次，再启动 ~2s 窗口的重复校正——QQ 任意时刻把栏背景高度清零都会被
-        // 立即纠正，时序无关，克服 0.5s 快照 heal 的漏网。observer 窗口结束自动 stop 释放，无常驻开销。
-        // 根因：Oback 自定义 nav 转场不协调 QQ 私有导航栏，从频道/群首页返回时 QQ 按来源页栏样式把
-        // QQCornerRadiusNavBarBgView 高度算成 0 → 顶部留白（聊天返回栏样式一致故正常）。
-        {
-            ObackTopBlankHealer *healer = [[ObackTopBlankHealer alloc] init];
-            [healer startWithToView:toView fromView:fromView];
-            // healer 由内部 NSTimer retain 保活，窗口结束自动 stop 并释放，此处不额外 retain。
-        }
+        // [2026-08-26 T3] 顶部空白自愈器已退役，纠正改由 setFrame: swizzle 在源头完成（见 ObackInstallNavBarBgFrameGuard）。
         // 显式清理所有非 from/to 子视图（遮罩等）
         NSArray *subs = [[container.subviews copy] autorelease];
         for (UIView *sub in subs) {
@@ -477,13 +385,7 @@ static void OBApplyParallax(CGFloat percent,
             OBLog(@"forceComplete completeTransition CRASH (dispatch_after): %@", exception.reason);
         }
         if (toView) toView.hidden = NO;   // 还原真实底页可见
-        // [2026-08-20 P10] 兜底收尾路径同样启动顶部空白自愈器。
-        // 旧版只在上面的 UIView completion 块启动 healer；一旦动画 completion 未触发而走到这里
-        // （异常/被打断/duration 调大），自愈完全缺席 -> 顶部空白无人纠正。此处补齐。
-        {
-            ObackTopBlankHealer *healer = [[ObackTopBlankHealer alloc] init];
-            [healer startWithToView:toView fromView:fromView];
-        }
+        // [2026-08-26 T3] 同上，顶部空白自愈器已退役，源头 swizzle 负责纠正。
         NSArray *subs = [[container.subviews copy] autorelease];
         for (UIView *sub in subs) {
             if (sub != fromView && sub != toView) [sub removeFromSuperview];
@@ -495,6 +397,8 @@ static void OBApplyParallax(CGFloat percent,
     });
 
     // [2026-08-16] 顶部空白二次诊断：完成 0.5s 后抓一次，捕捉"完成瞬间正常、随后留白"的竞态
+    // [2026-08-26 T3] 同上加开关守卫，并把守卫放在 dispatch_after 之前——调试关时连这次延迟派发都不排队。
+    if ([ObackPreferences debugLogEnabledLive]) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         @try {
@@ -521,6 +425,7 @@ static void OBApplyParallax(CGFloat percent,
             OBLog(@"topblank-diag2 error: %@", e.reason);
         }
     });
+    }
 }
 
 - (void)dealloc {
@@ -601,102 +506,4 @@ static void OBApplyParallax(CGFloat percent,
 
 @end
 
-#pragma mark - 顶部空白自愈 observer（方案C）
-
-@implementation ObackTopBlankHealer
-
-- (void)startWithToView:(UIView *)toView fromView:(UIView *)fromView {
-    _toView    = [toView retain];
-    _fromView  = [fromView retain];
-    static Class barBgCls; static dispatch_once_t once;
-    dispatch_once(&once, ^{ barBgCls = NSClassFromString(@"QQCornerRadiusNavBarBgView"); });
-    _barBgClass = barBgCls;   // 私有类铁律：NSClassFromString + isKindOfClass（startWithToView 每次转场一次，缓存免重复查表）
-    _baseline  = (g_obackNavBgBaselineH > 20.0) ? g_obackNavBgBaselineH : 0.0;   // 用已记录的基线（自适应机型）
-    _ticks     = 0;
-    // [2026-08-20 P10] 窗口 2.0s -> 4.0s：实测「从社区/频道返回」时 QQ 会在转场后较晚(>2s)
-    // 才按来源页栏样式把高度算成 0，2s 窗口漏网（用户线索：需下拉小程序再拉回触发 relayout 才恢复）。
-    // 命中缓存后每 tick 仅一次 frame 高度比较，4s 内 40 次，开销可忽略。
-    _maxTicks  = 40;   // ~4.0s @0.1s
-    [self healOnce];   // 收尾瞬间若已塌缩，先同步校正一次
-    // timer retain self(healer)；healer 不 retain timer（assign）-> 无循环引用。
-    _timer = [NSTimer scheduledTimerWithTimeInterval:0.1
-                                              target:self
-                                            selector:@selector(check:)
-                                            userInfo:nil
-                                             repeats:YES];
-}
-
-- (void)check:(NSTimer *)t {
-    _ticks++;
-    // 每个 tick 都尝试校正：约束修复后 QQ 若再次清零，仍能兜底重设，直到窗口耗尽。
-    [self healOnce];
-    if (_ticks >= _maxTicks) {
-        [self stop];
-    }
-}
-
-- (BOOL)healOnce {
-    if (!_toView || !_barBgClass) return NO;
-    // [2026-08-20 P10] 先用缓存；未命中则「首个子视图快路径 + 深度<=3 递归」两级查找。
-    UIView *first = _barBg;
-    if (!first || !first.superview) {
-        UIView *fast = _toView.subviews.firstObject;
-        if (fast && [fast isKindOfClass:_barBgClass]) first = fast;
-        else first = _obFindBarBgInView(_toView, _barBgClass, 3);
-        if (first) { [first retain]; [_barBg release]; _barBg = first; }
-    }
-    if (!first) {
-        // [2026-08-20 P10] 诊断：栏背景视图完全找不到（深度<=3 未命中）。只在首个 tick 落一行，
-        // 避免刷日志；便于下次实机日志判断「是找不到视图」还是「找到但没塌缩」。
-        if (_ticks == 0) {
-                UIView *f0 = _toView.subviews.firstObject;
-                NSString *line = [NSString stringWithFormat:@"[topblank-heal@] barBg NOT FOUND in to=%@ subs=%d first=%@\n",
-                                  NSStringFromClass([_toView class]), (int)_toView.subviews.count,
-                                  f0 ? NSStringFromClass([f0 class]) : @"nil"];
-                _obHealTraceAppend(line);   // [2026-08-26 P12] 受调试日志开关控制
-        }
-        return NO;
-    }
-    CGFloat h = CGRectGetHeight(first.frame);
-    if (h > 20.0) {
-        g_obackNavBgBaselineH = h;   // 正常高度则更新基线（自适应机型/页面）
-        return NO;
-    }
-    // 塌缩：QQ 用 Auto Layout 管背景高度，直接设 frame 会被下一轮 layout 按旧约束(高度0)覆盖回去
-    // -> 改高度约束常量（治本），再兜底设 frame（治标：当下可见），最后让 layout 按新约束重排。
-    CGFloat baseline = (_baseline > 20.0) ? _baseline
-        : (CGRectGetMinY(first.frame) > 0.5 ? CGRectGetMinY(first.frame)
-            : (g_obackNavBgBaselineH > 20.0 ? g_obackNavBgBaselineH : 151.0));
-    NSLayoutConstraint *hc = _obFindHeightConstraintFor(first);
-    if (hc) { hc.constant = baseline; }
-    CGRect bf = first.frame; bf.size.height = baseline; first.frame = bf;
-    first.hidden = NO;
-    @try { [first.superview setNeedsLayout]; [first.superview layoutIfNeeded]; } @catch (NSException *e) {}
-    // [2026-08-20 P10] 追加一次「整页 relayout」：用户线索——手动下拉小程序再拉回即可恢复，
-    // 说明 QQ 自身走一遍完整 layout 就会把栏背景算回正常高度。仅 superview 局部 layout 有时不足以
-    // 让上层容器重新下发约束，故对 toView 再触发一次（每 tick 仅在确实塌缩时执行，不构成常态开销）。
-    @try { [_toView setNeedsLayout]; [_toView layoutIfNeeded]; } @catch (NSException *e) {}
-    // 注意：绝不在此触碰列表滚动位置（删除原 setContentOffset:CGPointZero 回顶逻辑——
-    // 每个 tick 强行回顶会在用户滑动中把 QQ 列表拽回顶部，见 2026-08-22 修复）。
-    OBLog(@"[topblank-heal] QQ 栏背景塌缩=%.1f, 重设高度=%.1f (baseline=%.1f tick=%d constraint=%@)", h, baseline, _baseline, _ticks, hc?@"Y":@"N");
-    // [2026-08-26 P12] 落盘 trace 改走 _obHealTraceAppend（受「调试日志」开关控制 + >1MB 自动截断）。
-    // 原注释称 release 下 OBLog 格式串会被剥——不实：OBLog 是真实函数，本就 gate 在 debugLogEnabledLive；
-    // 无条件直接写盘才是 P10 引入的噪声源，现已 gate，调试关即静默。
-    _obHealTraceAppend([NSString stringWithFormat:@"[topblank-heal@] collapsed=%.1f -> baseline=%.1f tick=%d constraint=%@\n", h, baseline, _ticks, hc?@"Y":@"N"]);
-    return YES;
-}
-
-- (void)stop {
-    if (_timer) { [_timer invalidate]; _timer = nil; }
-    // timer 已从 runloop 移除并 release self -> healer 在此之后可能被 dealloc。
-}
-
-- (void)dealloc {
-    if (_toView)   [_toView release];
-    if (_fromView) [_fromView release];
-    if (_barBg)    [_barBg release];   // [2026-08-20 P10] 缓存的栏背景视图（retain）须释放
-    // _timer 为 assign 且 stop 中已 invalidate+nil，无需 release（避免重复释放）。
-    [super dealloc];
-}
-
-@end
+// [2026-08-26 T3] ObackTopBlankHealer @implementation 已删除（见上方 swizzle 取代说明）。

@@ -21,9 +21,10 @@ void ObackInstallNavBarBgFrameGuard(void);
 @property (nonatomic, retain) UIActivityViewController *logActivityVC;  // [v11c] retain 防活动视图控制器提前释放(MRC 陷阱)
 @end
 
-// [构建标记] 每次诊断推送改这个串；日志开启时打印，用于一锤定音确认装的是哪个代码版本
-// （解决"装的是不是最新/日志开关是否生效"的争议）。当前: DIAG4 = shouldRequireFailureOf 全量选类诊断。
-#define OBACK_BUILD_TAG @"P13-navbar-frame-guard"
+// [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
+// "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
+// 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
+#define OBACK_BUILD_TAG @"T3-slim"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -79,6 +80,16 @@ void OBLog(NSString *fmt, ...) {
             if (sfh) { [sfh seekToEndOfFile]; [sfh writeData:[sep dataUsingEncoding:NSUTF8StringEncoding]]; [sfh closeFile]; }
         }
         return;   // 调试日志关闭 → 完全不写正常日志（最省）
+    }
+    // [2026-08-26 T3] 日志文件 >1MB 自动截断，防无限增长（此前该上限只活在已退役的自愈器 trace 里）。
+    // 截断放在写盘前，确保本函数所有落盘（含下方开关分隔行）都进有界文件。
+    {
+        NSFileManager *cfm = [NSFileManager defaultManager];
+        NSDictionary *cattrs = [cfm attributesOfItemAtPath:OBLogPath() error:nil];
+        if (cattrs && [cattrs fileSize] > (1024ULL * 1024ULL)) {
+            NSFileHandle *tfh = [NSFileHandle fileHandleForWritingAtPath:OBLogPath()];
+            if (tfh) { [tfh truncateFileAtOffset:0]; [tfh closeFile]; }
+        }
     }
     // 开关从「关→开」翻转：追加一行分隔，明确标识「以下为开关生效后日志」，
     // 消除「这份日志到底是开关开还是关时写的」困惑（配合抓前删旧日志，分析更准）。
@@ -2449,8 +2460,8 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 
     // [运行时探测切换] 左缘 nav pop：首次横向拖动实测系统交互转场是否真进入 interactive 态。
     // 关键修复：原探测错误地嵌在 `if(!_transitionTriggered)` 内——而左缘 nav 路径在 begin 已置
-    // _transitionTriggered=YES（driveSystemNavPopBeginWithPan 第1190行），导致探测永不执行、
-    // _navPopProbeFailed 恒为 NO、微信等自定义 nav 永远走方案A 而失效。现改用 _navPopProbed 单独门控，
+    // _transitionTriggered=YES（driveSystemNavPopBeginWithPan 第1190行），导致探测永不执行（旧实现下
+    // _navPopProbeFailed 恒为 NO）、微信等自定义 nav 永远走方案A 而失效。现改用 _navPopProbed 单独门控，
     // 确保首次横向拖动必跑一次。标准 nav → interactive=YES 继续方案A 跟手；微信等自定义 nav →
     // 永不 interactive，当场切非交互 popViewControllerAnimated:（永不失效，代价不跟手）。
     // 探测仅用于方案A 识别微信等自定义 nav（系统原生交互转场能否启动）。nav 视差实验走自定义转场，
@@ -2482,7 +2493,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 
     _currentPercent = p;
     if (self.currentParallaxToView && (self.currentEdge == ObackEdgeRight)) {
-        // 实验：自定义 nav 视差 scrub（同 modal 方案B 机制，驱动 animator 的 fractionComplete）
+        // 右缘视差：自定义 nav 转场 scrub（同 modal 方案B 机制，驱动 animator 的 fractionComplete）
         if (self.interactive) [self.interactive updateWithPercent:p];
     } else if (self.currentParallaxToView) {
         // 方案 A：nav pop 用系统原生交互转场，直接把当前 pan 喂给 handleNavigationTransition: 做 scrub。
