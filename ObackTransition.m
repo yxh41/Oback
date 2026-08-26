@@ -18,6 +18,31 @@ static NSString *_obHealTracePath(void) {
                : @"/var/mobile/oback_debug.log";
 }
 
+// [2026-08-26 P12] 自愈器 trace 落盘：受「调试日志」开关控制（debugLogEnabledLive，开关即时生效），
+// 且文件 >1MB 自动截断，防无限增长。此前该 trace 无条件写盘，导致关了日志仍刷满 oback_debug.log。
+static void _obHealTraceAppend(NSString *line) {
+    @try {
+        // 热路径微缓存：开关状态缓存 0.3s，避免每 tick 都读盘（与 OBLog 同策略）
+        static BOOL __healEnabledCache = NO;
+        static NSTimeInterval __healCacheTS = 0;
+        NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+        BOOL enabled;
+        if ((now - __healCacheTS) < 0.3) enabled = __healEnabledCache;
+        else { enabled = [ObackPreferences debugLogEnabledLive]; __healEnabledCache = enabled; __healCacheTS = now; }
+        if (!enabled) return;   // 调试日志关 → 完全不写
+        NSString *lp = _obHealTracePath();
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSDictionary *attrs = [fm attributesOfItemAtPath:lp error:nil];
+        if (attrs && [attrs fileSize] > (1024ULL * 1024ULL)) {  // >1MB 截断，防无限增长
+            NSFileHandle *tfh = [NSFileHandle fileHandleForWritingAtPath:lp];
+            if (tfh) { [tfh truncateFileAtOffset:0]; [tfh closeFile]; }
+        }
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:lp];
+        if (fh) { [fh seekToEndOfFile]; [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; }
+        else { [line writeToFile:lp atomically:NO encoding:NSUTF8StringEncoding error:nil]; }
+    } @catch (NSException *e) {}
+}
+
 // [2026-08-16] QQ 圆角导航栏背景(QQCornerRadiusNavBarBgView)基线高度缓存——首次正常返回时记录，
 // 后续塌缩时用它把 frame 高度重设回去（自适应机型/页面，不硬编码 151）。
 static CGFloat g_obackNavBgBaselineH = 0.0;
@@ -586,15 +611,11 @@ static void OBApplyParallax(CGFloat percent,
         // [2026-08-20 P10] 诊断：栏背景视图完全找不到（深度<=3 未命中）。只在首个 tick 落一行，
         // 避免刷日志；便于下次实机日志判断「是找不到视图」还是「找到但没塌缩」。
         if (_ticks == 0) {
-            @try {
                 UIView *f0 = _toView.subviews.firstObject;
                 NSString *line = [NSString stringWithFormat:@"[topblank-heal@] barBg NOT FOUND in to=%@ subs=%d first=%@\n",
                                   NSStringFromClass([_toView class]), (int)_toView.subviews.count,
                                   f0 ? NSStringFromClass([f0 class]) : @"nil"];
-                NSString *lp = _obHealTracePath();
-                NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:lp];
-                if (fh) { [fh seekToEndOfFile]; [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; }
-            } @catch (NSException *e) {}
+                _obHealTraceAppend(line);   // [2026-08-26 P12] 受调试日志开关控制
         }
         return NO;
     }
@@ -620,14 +641,10 @@ static void OBApplyParallax(CGFloat percent,
     // 注意：绝不在此触碰列表滚动位置（删除原 setContentOffset:CGPointZero 回顶逻辑——
     // 每个 tick 强行回顶会在用户滑动中把 QQ 列表拽回顶部，见 2026-08-22 修复）。
     OBLog(@"[topblank-heal] QQ 栏背景塌缩=%.1f, 重设高度=%.1f (baseline=%.1f tick=%d constraint=%@)", h, baseline, _baseline, _ticks, hc?@"Y":@"N");
-    // 直接落盘 trace（绕过 OBLog，release 下 OBLog 格式串会被剥，故此处直接写以可验证自愈器确实跑过）
-    @try {
-        NSString *lp = _obHealTracePath();
-        NSString *line = [NSString stringWithFormat:@"[topblank-heal@] collapsed=%.1f -> baseline=%.1f tick=%d constraint=%@\n", h, baseline, _ticks, hc?@"Y":@"N"];
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:lp];
-        if (fh) { [fh seekToEndOfFile]; [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; }
-        else { [line writeToFile:lp atomically:NO encoding:NSUTF8StringEncoding error:nil]; }
-    } @catch (NSException *e) {}
+    // [2026-08-26 P12] 落盘 trace 改走 _obHealTraceAppend（受「调试日志」开关控制 + >1MB 自动截断）。
+    // 原注释称 release 下 OBLog 格式串会被剥——不实：OBLog 是真实函数，本就 gate 在 debugLogEnabledLive；
+    // 无条件直接写盘才是 P10 引入的噪声源，现已 gate，调试关即静默。
+    _obHealTraceAppend([NSString stringWithFormat:@"[topblank-heal@] collapsed=%.1f -> baseline=%.1f tick=%d constraint=%@\n", h, baseline, _ticks, hc?@"Y":@"N"]);
     return YES;
 }
 
