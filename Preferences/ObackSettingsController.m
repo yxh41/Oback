@@ -25,18 +25,10 @@
 - (void)setProperty:(id)property forKey:(NSString *)key;
 @end
 
-// PSListController 头未声明 reloadSpecifier:/cellForSpecifier:/indexPathForSpecifier:，补前向声明让刷新按钮标题在 -Werror 下编译通过
-@interface PSListController (ObackCellRefresh)
-- (void)reloadSpecifier:(PSSpecifier *)specifier;
-- (UITableViewCell *)cellForSpecifier:(PSSpecifier *)specifier;
-- (NSIndexPath *)indexPathForSpecifier:(PSSpecifier *)specifier;
-@end
-
-// [2026-08-23 精简] 原「弹窗返回增强设置」折叠机制已随面板精简整体移除：
-// 阴影三滑块(shadowOffset/Radius/Opacity)、弹窗圆角(cardCornerEnabled/Value)、
-// 弹性收尾(springEnabled)、返回灵敏度(commitRatio/commitVelocity)已从 Root.plist 删除
-// （值仍由 ObackParams defaults 提供，行为与旧默认完全一致），故不再需要按开关显隐。
+// 方案B（弹窗/sheet 下拉返回）专属设置项——关掉「弹窗返回增强设置」开关时整体隐藏，
+// 避免用户在日常用方案A（原生 nav pop）时误调这些"调了无变化"的滑块。
 @interface ObackSettingsController ()
+@property (nonatomic, strong) NSMutableArray *allSpecifiers;   // 完整 specifier 列表（过滤前），供按开关显隐方案B 项
 @end
 
 // ── 每个滑块 key 对应的单位后缀 ──────────────────────────────
@@ -47,6 +39,8 @@ static NSDictionary *_obSliderUnits(void) {
         d = @{
             @"triggerWidth":    @" pt",
             @"duration":        @" s",
+            @"commitRatio":     @"",
+            @"commitVelocity":  @"",
         };
     });
     return d;
@@ -68,43 +62,6 @@ static NSDictionary *_obSliderUnits(void) {
     if (key) oback_setGlobalPref(key, value);
 }
 
-// [2026-08-23 精简] 面板已删除的废弃 key：这些项曾可调，旧用户的全局 plist / suite 里可能残留
-// 自定义值，而 tweak 侧 ObackPreferences 仍会读取它们（例如残留 commitRatio=0.15 会继续覆盖默认 0.30）。
-// 面板里已没有控件可改回去 → 必须在打开设置页时主动清除，让行为回落到 ObackParams defaults。
-static NSArray *_obRetiredKeys(void) {
-    static NSArray *a = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        a = @[@"sheetEnhanceEnabled",   // 折叠元开关（机制已移除）
-              @"shadowOffset", @"shadowRadius", @"shadowOpacity",   // 阴影细节参数（固定为默认）
-              @"cardCornerEnabled", @"cardCornerValue",             // 弹窗圆角（与阴影互斥的装饰）
-              @"springEnabled",                                      // 弹性收尾（与 duration 耦合）
-              @"commitRatio", @"commitVelocity",                     // 灵敏度（方案A 不消费；弹窗返回按此调节）
-              @"doubleReturnDiag", @"diagBanner"];                   // 历史诊断开关
-    });
-    return a;
-}
-
-// 清理废弃 key（全局文件 + suite 两侧）。全局文件一次性读-改-写（避免逐 key 调 oback_setGlobalPref
-// 触发多次全量写盘）；无残留时完全不写，进设置页零额外 IO。
-- (void)_obPurgeRetiredKeys {
-    NSArray *retired = _obRetiredKeys();
-    NSMutableDictionary *g = [NSMutableDictionary dictionaryWithContentsOfFile:kOBGlobalPlist];
-    BOOL gDirty = NO;
-    if (g) {
-        for (NSString *k in retired) {
-            if ([g objectForKey:k]) { [g removeObjectForKey:k]; gDirty = YES; }
-        }
-        if (gDirty) [g writeToFile:kOBGlobalPlist atomically:YES];
-    }
-    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:@"com.zlhkf.oback"];
-    BOOL sDirty = NO;
-    for (NSString *k in retired) {
-        if ([d objectForKey:k]) { [d removeObjectForKey:k]; sDirty = YES; }
-    }
-    if (sDirty) [d synchronize];
-}
-
 // 兜底镜像：每次打开设置页，把各开关/滑块的当前值从「设置」App 自身容器(suite)同步到
 // 跨 App 共享全局文件。roothide 下标准 cell 的写入经 NSUserDefaults(suiteName:) 落「设置」App
 // 容器副本，tweak 注入其它 App 读的是全局文件（ObackPreferences._mergedPrefs 优先全局）；
@@ -114,7 +71,6 @@ static NSArray *_obRetiredKeys(void) {
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     if (!_specifiers) [self specifiers];
-    [self _obPurgeRetiredKeys];   // [2026-08-23] 先清废弃 key，再做镜像，避免把残留值又同步回全局文件
     NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:@"com.zlhkf.oback"];   // ARC bundle：不用 autorelease（会编译失败）
     for (PSSpecifier *spec in _specifiers) {
         NSString *key = [spec propertyForKey:@"key"];
@@ -134,13 +90,13 @@ static NSArray *_obRetiredKeys(void) {
     }
 }
 
-// [2026-08-23 精简] 面板已删除全部「调了看不出/被夹死」的方案B 参数，无需再按开关过滤，
-// 直接返回 Root.plist 的完整列表。
 - (NSArray *)specifiers {
-    if (!_specifiers) {
-        _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
+    if (!_allSpecifiers) {
+        _allSpecifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
     }
-    return _specifiers;
+    // [方案B 清理] 已删除自定义转场及其专属设置；面板即最终列表，始终完整返回。
+    _specifiers = _allSpecifiers;
+    return _allSpecifiers;
 }
 
 #pragma mark - PSSliderCell delegate（端点文字）
@@ -307,7 +263,7 @@ static NSArray *_obRetiredKeys(void) {
                                          NULL, NULL, TRUE);
     UIAlertController *a = [UIAlertController
         alertControllerWithTitle:@"调试日志"
-                         message:@"已请求各 App 显示内存中的调试日志。请切回目标 App（如微信/其他已启用 App），它回到前台时会自动弹出日志窗口；长按文本框全选复制，发我即可定位手势问题。"
+                         message:@"已请求各 App 显示内存中的调试日志。请切回目标 App（如 QQ/TIM），它回到前台时会自动弹出日志窗口；长按文本框全选复制，发我即可定位文本选择等问题。"
                   preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"好"
                                           style:UIAlertActionStyleDefault
@@ -324,29 +280,16 @@ static NSArray *_obRetiredKeys(void) {
     if (g) { id v = [g objectForKey:@"debugLog"]; if (v) cur = [v boolValue]; }
     BOOL next = !cur;
     oback_setGlobalPref(@"debugLog", @(next));
-    // [P11] 刷新「调试日志」按钮标题：仅改 spec.label 不会刷新已显示的 cell（PSButtonCell 在
-    // setSpecifier: 时读 label 作标题，后续不变），故必须 reload 该行或直设 cell.textLabel。
-    // 之前无论开/关都显示「关」即此因——点按后 alert 弹窗盖住旧 cell，关掉后 cell 仍是 plist 静态文案。
-    NSString *newTitle = (next ? @"调试日志：开" : @"调试日志：关");
+    // 刷新标题（下次进设置页也会由 viewWillAppear 同步）
     for (PSSpecifier *spec in _specifiers) {
         if ([[spec propertyForKey:@"action"] isEqualToString:@"toggleDebugLog"]) {
-            [spec setProperty:newTitle forKey:@"label"];
+            [spec setProperty:(next ? @"调试日志：开" : @"调试日志：关") forKey:@"label"];
             break;
         }
     }
-    // [P14] 整表重建以刷新 PSButtonCell 标题。PSButtonCell 的标题渲染在内部按钮(_button)上，
-    // 本 roothide PreferenceLoader 下 reloadSpecifier:/cellForSpecifier:/indexPathForSpecifier:
-    // 均不更新按钮标题（P11/P13 实测无效），且 self.tableView 不返回真实 tableView。唯一可靠路径是
-    // 直接 reload 整个 UITableView，重建所有 cell 重走 setSpecifier: 从已改的 spec.label 读新标题。
-    // 设置页 specifier 数量极少，整表重建无性能/视觉负担。
-    UITableView *tv = nil;
-    @try { tv = [self valueForKey:@"table"]; } @catch (NSException *e) { tv = nil; }
-    if (tv && [tv respondsToSelector:@selector(reloadData)]) {
-        [tv reloadData];
-    }
     UIAlertController *a = [UIAlertController
         alertControllerWithTitle:@"调试日志"
-                         message:(next ? @"已开启。回目标 App 做几次手势，再用「显示调试日志」查看内存日志。" : @"已关闭。")
+                         message:(next ? @"已开启。回 QQ 做几次手势，再用「显示调试日志」查看内存日志。" : @"已关闭。")
                   preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:a animated:YES completion:nil];
@@ -402,9 +345,6 @@ static NSArray *_obRetiredKeys(void) {
     _valueLabels = [NSMutableDictionary dictionary];
 
     // 重建 specifiers 并刷新表格：所有开关/滑块回到 Root.plist 的 <default>
-    // [2026-08-23] 显式清空缓存——本类 specifiers 有 `if (!_specifiers)` 缓存，
-    // 若 reloadSpecifiers 未内部置 nil，会拿到旧列表导致重置后表格不回默认。
-    _specifiers = nil;
     [self reloadSpecifiers];
 }
 

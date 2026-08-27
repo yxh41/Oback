@@ -28,15 +28,8 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 @property (nonatomic, assign) BOOL    leftEnabled;       // 左边缘返回
 @property (nonatomic, assign) BOOL    rightEnabled;      // 右边缘返回
 @property (nonatomic, assign) BOOL    hapticEnabled;     // 触感反馈
-@property (nonatomic, assign) CGFloat shadowOffset;   // 阴影水平偏移(pt)，控制"抬起"纵深感（0~20）
-@property (nonatomic, assign) CGFloat shadowRadius;    // 阴影模糊半径(pt)，控制柔和度（0~40）
-@property (nonatomic, assign) BOOL    shadowEnabled;     // 当前页阴影
-@property (nonatomic, assign) CGFloat shadowOpacity;     // 阴影浓度
-@property (nonatomic, assign) NSTimeInterval duration;   // 释放后补间时长 (s)
+@property (nonatomic, assign) NSTimeInterval duration;   // 释放后补间时长 (s)（控制胶囊淡出/弹回动画）
 @property (nonatomic, assign) CGFloat commitRatio;       // 提交返回的最小位移比例
 @property (nonatomic, assign) CGFloat commitVelocity;    // 提交返回的最小速度 (pt/s)
-@property (nonatomic, assign) BOOL    springEnabled;     // 释放后弹性补间(动量继承)，默认开
-@property (nonatomic, assign) BOOL    cardCornerEnabled; // 弹窗下拉时卡片圆角(模拟 iOS sheet 下拉)，默认关
-@property (nonatomic, assign) CGFloat cardCornerValue;   // 弹窗圆角最大值 (pt)
 + (instancetype)defaults;
 @end

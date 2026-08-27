@@ -15,10 +15,6 @@
     p.leftEnabled      = YES;
     p.rightEnabled     = YES;
     p.hapticEnabled    = YES;
-    p.shadowOffset   = 6.0;
-    p.shadowRadius   = 12.0;
-    p.shadowEnabled    = YES;
-    p.shadowOpacity    = 0.25;
     p.duration         = 0.32;
     // 提交阈值：偏灵敏（贴近 OPPO/系统边缘返回手感）。
     // 旧值 commitRatio=0.40 太严 —— 真机日志显示用户自然内滑大多只到
@@ -26,12 +22,6 @@
     // commitVelocity 同步下调到 400，让一般甩动(flick)也能可靠提交。
     p.commitRatio      = 0.30;
     p.commitVelocity   = 400.0;
-    // 弹性补间：默认开。松手收尾按释放速度动态调制时长（动量等效）——快甩更快归位、更跟手；
-    // 关闭或系统减弱动态时降级为固定 0.22s 线性 easeOut。
-    p.springEnabled    = YES;
-    // 弹窗下拉卡片圆角：默认关（方案B 保守路径；开启后下拉 sheet 时渐进圆角，更贴近 iOS 原生 sheet）。
-    p.cardCornerEnabled = NO;
-    p.cardCornerValue   = 12.0;
     return p;
 }
 @end

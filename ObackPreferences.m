@@ -58,19 +58,12 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     NSDictionary *d = [self _mergedPrefs];
     id v;
     if ((v = [d objectForKey:@"triggerWidth"]))     p.triggerWidth     = [v doubleValue];
-    if ((v = [d objectForKey:@"shadowOffset"]))   p.shadowOffset   = [v doubleValue];
-    if ((v = [d objectForKey:@"shadowRadius"]))   p.shadowRadius  = [v doubleValue];
-    if ((v = [d objectForKey:@"shadowEnabled"]))    p.shadowEnabled    = [v boolValue];
-    if ((v = [d objectForKey:@"shadowOpacity"]))    p.shadowOpacity    = [v doubleValue];
     if ((v = [d objectForKey:@"duration"]))         p.duration         = [v doubleValue];
     if ((v = [d objectForKey:@"commitRatio"]))      p.commitRatio      = [v doubleValue];
     if ((v = [d objectForKey:@"commitVelocity"]))   p.commitVelocity   = [v doubleValue];
     if ((v = [d objectForKey:@"leftEnabled"]))      p.leftEnabled      = [v boolValue];
     if ((v = [d objectForKey:@"rightEnabled"]))      p.rightEnabled     = [v boolValue];
     if ((v = [d objectForKey:@"hapticEnabled"]))    p.hapticEnabled    = [v boolValue];
-    if ((v = [d objectForKey:@"springEnabled"]))    p.springEnabled    = [v boolValue];
-    if ((v = [d objectForKey:@"cardCornerEnabled"])) p.cardCornerEnabled = [v boolValue];
-    if ((v = [d objectForKey:@"cardCornerValue"]))  p.cardCornerValue  = [v doubleValue];
     return p;
 }
 
