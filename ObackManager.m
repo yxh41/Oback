@@ -358,7 +358,6 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
     CGFloat _indicatorTargetScale; // 胶囊目标缩放
     CGFloat _flowSpeed;          // 流光跟手：当前平滑流速（1=正常 5.5s 循环，>1 更快更 energetic）
     CGFloat _flowTargetSpeed;    // 流光跟手：目标流速（由手指横向速度映射，手指暂停时缓回 1.0）
-    ObackAnimator *_watchAnimator; // MRC 强引用：兜底收尾定时器期间持有动画器，避免 UIKit 释放成野指针
     id     _navPopTarget;        // 方案A: 系统原生 nav pop 的私有 target(_UINavigationInteractiveTransition)，
                                  // 驱动 handleNavigationTransition: 用（assign，由 nav 内部持有，转场期间有效）
     BOOL   _navPopProbeFailed;   // 运行时探测: 方案A 系统交互转场未启动(自定义nav不配合)→ YES, 已切非交互 pop
@@ -1355,8 +1354,14 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
                     }
                     if (nav) nav.interactivePopGestureRecognizer.enabled = NO;  // 接管前禁用系统 interactivePop 防双触发
                     BOOL stdNav = [self _navPopShouldDriveSystemNav:nav];  // 标准nav=YES(方案A) / 微信等=NO(rightSimplePop)
-                    self.currentParallaxToView = stdNav;
-                    self.rightSimplePop = !stdNav;
+                    if (rightSide) {
+                        // 右缘：方案B 统一非交互 pop（动画交还系统），不进自定义转场
+                        self.currentParallaxToView = NO;
+                        self.rightSimplePop = YES;
+                    } else {
+                        self.currentParallaxToView = stdNav;
+                        self.rightSimplePop = !stdNav;
+                    }
                     self.currentEdge = rightSide ? ObackEdgeRight : ObackEdgeLeft;
                     [self beginTransition:pan];   // 驱动 nav pop + 显示胶囊（复用已验证转场链路）
                 }
@@ -1407,48 +1412,20 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
     }
     self.interacting = NO;
     _globalDriven = NO;
-    // [2026-08-22 P9 根治「返回按钮+手势同时失效」] 必须先让真正持有转场 context 的 currentAnimator
-    // 收尾，再置 nil。此前直接 self.currentAnimator = nil（下方）会把持有 context 的 ObackAnimator
-    // 丢弃而从不调 completeTransition → nav 永久卡在 isTransitioning=YES →
-    // popViewControllerAnimated: 被 UIKit 忽略（返回按钮点了没反应）且新转场起不来（手势也没反应），
-    // 只能杀进程恢复。QQ/TIM 自定义 nav pop 走 currentAnimator，而 _watchAnimator/_navPopTarget
-    // 在该路径为 nil（_scheduleNavPopWatchdog 只服务方案A），故此前两处强收尾对 QQ 完全空转。
-    // currentAnimator 是 assign（见 ObackManager.h:15），调用它不影响 MRC 引用计数，安全。
-    if (self.currentAnimator) {
-        OBLog(@"[P9] 强制收尾 currentAnimator（治 nav 卡 isTransitioning：返回按钮+手势同时失效）");
-        // 中断态语义=取消回弹（未收到 Ended 说明用户没提交），避免意外把页面 pop 掉
-        self.currentAnimator.interactiveCancelled = YES;
-        @try { [self.currentAnimator forceFinishIfNeeded]; } @catch (NSException *e) { OBLog(@"[P9] forceFinish(currentAnimator) fail: %@", e); }
-    }
-    // 交互控制器持有的 animator 若与 currentAnimator 不是同一实例（装配错配的极端情形），一并收尾。
-    // forceFinishIfNeeded 内部 _completed 守卫保证同一实例不会重复 completeTransition。
-    if (self.interactive && self.interactive.animator && self.interactive.animator != self.currentAnimator) {
-        OBLog(@"[P9] 强制收尾 interactive.animator（与 currentAnimator 不同实例）");
-        self.interactive.animator.interactiveCancelled = YES;
-        @try { [self.interactive.animator forceFinishIfNeeded]; } @catch (NSException *e) { OBLog(@"[P9] forceFinish(interactive.animator) fail: %@", e); }
-    }
-    // 强制完成挂起的转场动画（视图归位静止），复用既有 forceFinishIfNeeded 收尾路径
-    if (_watchAnimator) {
-        @try { [_watchAnimator forceFinishIfNeeded]; } @catch (NSException *e) { OBLog(@"[P8] forceFinish(_watchAnimator) fail: %@", e); }
-        [_watchAnimator release];
-        _watchAnimator = nil;
-    }
-    // 方案A 系统交互动画器若仍卡 interactive 态，同样强制收尾（参考 _scheduleNavPopWatchdog 防御性复位）
+    // [方案B] 自定义转场(ObackAnimator / ObackInteractiveTransition)已整体移除，不再有持有转场 context 的
+    // 自定义动画器需要强制收尾。进后台/失活时仅对方案A 系统原生交互转场兜底 finishInteractiveTransition
+    // （参考 _scheduleNavPopWatchdog 防御性复位），避免系统交互转场卡在 interactive 态导致界面冻结。
     if (_navPopTarget && [_navPopTarget respondsToSelector:@selector(finishInteractiveTransition)]) {
         @try { [_navPopTarget finishInteractiveTransition]; } @catch (NSException *e) { OBLog(@"[P8] finish(_navPopTarget) fail: %@", e); }
     }
     _navPopTarget = nil;
-    self.currentAnimator = nil;
-    self.interactive = nil;
     _currentPercent = 0;
     _transitionTriggered = NO;
     [self dismissIndicatorSafety];              // 收起胶囊（interacting 已置 NO，会执行）
 }
 
 - (void)beginTransition:(UIPanGestureRecognizer *)pan {
-    // 新手势开始：清空上一次松手速度/进度，避免遗留值串入本次动画
-    self.releaseVelocity = 0;
-    self.releasePercent  = 0;
+    // 新手势开始
     // 诊断：确认本次手势是否真正进入 beginTransition，并打印触发 pan 的身份（window pan / nav pan）。
     // 若一次滑动同时出现两条 beginTransition 且 panView 分别为 UIWindow 与 nav.view，则双返回根因是
     // window pan 与 nav pan 同时开火（二者 delegate 均为 self，shouldRequireFailureOf 会互相跳过而不协调）。
@@ -1468,8 +1445,6 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
     // 手势已进入 Began：取消 shouldBegin 时设的安全兜底定时器（正常生命周期会收起胶囊）
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(dismissIndicatorSafety) object:nil];
 
-    ObackParams *p = [ObackPreferences params];
-    self.interactive = [[[ObackInteractiveTransition alloc] initWithEdge:self.currentEdge params:p] autorelease];
     self.interacting = YES;
     // [2026-07-29 误触修复 v2] 接管型 nav 真实滑动（rightSimplePop）期间吞掉底层触摸：UIKit 向底层 view
     // 及其手势识别器发 touchesCancelled，手指滑过的小程序卡片等不会被误触激活（松手不再 touchUpInside/选中）。
@@ -1540,21 +1515,18 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
               nav.delegate ? NSStringFromClass([nav.delegate class]) : @"(nil)",
               (int)[[nav.delegate class] isSubclassOfClass:_OBCls_obackNavDelegate()]);
         if (self.currentEdge == ObackEdgeRight) {
-            // 右缘固定走自定义镜像转场：真正触发 pop，由 nav delegate(ObackNavDelegate) 返回
-            // ObackAnimator（自定义转场）+ interactionController 返回 self.interactive 接管，
-            // 后续 updateTransition 用 self.interactive updateWithPercent 做 scrub（不再喂
-            // handleNavigationTransition:）。方向由 OBApplyParallax 的 edge 分支处理，正确无误。
-            self.currentParallaxToView = YES;   // 右缘自定义镜像转场走 updateTransition 自定义 scrub 分支(1340)
-            OBLog(@"trigger: nav pop 右缘自定义镜像转场，popViewControllerAnimated");
+            // [方案B] 右缘统一走 rightSimplePop 非交互 pop（updateTransition 早期 return 已在松手时 pop）；
+            // 此处为历史自定义镜像转场分支（已退役，ObackAnimator 已移除），仅保留 pop 触发以防极端路径回退。
+            self.currentParallaxToView = YES;   // 兜底：标记视差（正常右缘不会到达此处）
+            OBLog(@"trigger: nav pop 右缘（方案B 走 rightSimplePop，历史自定义转场已退役）");
             [nav popViewControllerAnimated:YES];
         } else if (self.interacting) {
             // 方案 A：交互 pop 已在 beginTransition 通过 handleNavigationTransition: 启动，
             // 此处不再调用 popViewControllerAnimated:（否则会触发第二次转场/黑屏）。
             OBLog(@"trigger: nav pop 已启动(系统原生交互)，忽略重复 popViewControllerAnimated");
         } else {
-            // 自定义 nav 视差(实验) 或 非交互兜底：真正触发 pop，由 nav delegate(ObackNavDelegate)
-            // 返回 ObackAnimator（自定义转场）+ interactionController 返回 self.interactive 接管 scrub。
-            self.currentParallaxToView = YES;   // 兜底分支走 updateTransition 自定义 scrub 分支(1345)
+            // 非交互兜底：真正触发 pop（自定义 nav 视差实验已退役，方案B 下由系统/App 原生收尾）。
+            self.currentParallaxToView = YES;
             OBLog(@"trigger: nav pop 自定义视差/兜底，popViewControllerAnimated");
             [nav popViewControllerAnimated:YES];
         }
@@ -1797,14 +1769,13 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 
     _currentPercent = p;
     if (self.currentParallaxToView && (self.currentEdge == ObackEdgeRight)) {
-        // 右缘视差：自定义 nav 转场 scrub（同 modal 方案B 机制，驱动 animator 的 fractionComplete）
-        if (self.interactive) [self.interactive updateWithPercent:p];
+        // 右缘：方案B 统一走 rightSimplePop 非交互 pop（updateTransition 早期 return 已处理），此处不再 scrub
     } else if (self.currentParallaxToView) {
         // 方案 A：nav pop 用系统原生交互转场，直接把当前 pan 喂给 handleNavigationTransition: 做 scrub。
         // 探测失败(_navPopProbeFailed)已切非交互 pop，此处不再喂系统转场(避免冲突)，仅保留胶囊反馈。
         if (!_navPopProbeFailed) [self _callSystemNavPop:pan];
     } else {
-        if (self.interactive) [self.interactive updateWithPercent:p];
+        // modal dismiss（方案B：交还系统/App 原生 dismiss，非交互，不 scrub）
     }
     [self updateIndicatorWithPan:pan window:win];
 }
@@ -1852,8 +1823,6 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         // 提交→放大淡出；取消→弹回边缘，与左右边缘行为一致。
         if (_indicator) [self dismissIndicatorCommitted:commit params:p window:win];
         self.interacting = NO;
-        self.interactive = nil;
-        self.currentAnimator = nil;
         _navPopTarget = nil;
         _currentPercent = 0;
         _transitionTriggered = NO;
@@ -1865,13 +1834,6 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     CGFloat dir = (self.currentEdge == ObackEdgeLeft) ? 1.0 : -1.0;
     CGFloat vel = dir * v.x;   // 前向(朝返回方向)为正
 
-    // 记录松手时的前向速度/进度：
-    // - 写回 manager 自身（供诊断 / 下次 beginTransition 清零逻辑参考）
-    // - 同步写入当前动画器（forceFinishIfNeeded 用 OBApplyParallax 做归位动画时可能参考）
-    self.releaseVelocity = vel;
-    self.releasePercent  = _currentPercent;
-    self.currentAnimator.releaseVelocity = vel;
-    self.currentAnimator.releasePercent  = _currentPercent;
 
     // 动量投影：按当前速度再投影约 0.12s 的惯性滑行距离，避免"快滑却因瞬时位移小被取消"。
     // 真机日志显示用户多为快速内滑(percent 仅 0.23~0.37 就松手)，纯位移阈值会误判取消。
@@ -1897,42 +1859,11 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     // 灵敏度滑块只对 modal dismiss(方案B 自定义转场)生效——这是为换取"零冻结/原生手感"的取舍，
     // 不回退到自定义 nav 转场（那曾是导致黑屏/冻结的根因）。
     if (self.currentParallaxToView) {
-        if (self.currentEdge == ObackEdgeRight) {
-            // 实验：自定义 nav 视差收尾（同 modal 方案B 机制，含右缘固定自定义镜像转场；复用已验证的 forceFinishIfNeeded）
-            if (_transitionTriggered) {
-                if (commit) [self.interactive finish];
-                else {
-                    self.currentAnimator.releaseVelocity = 0;  // 取消：温和回弹，不带入前向速度
-                    [self.interactive cancel];
-                }
-            } else if (commit) {
-                // 快滑零位移：自定义转场未启动，走系统非交互 pop（最干净）
-                self.interacting = NO;
-                self.interactive = nil;
-                self.currentAnimator = nil;
-                _navPopTarget = nil;
-                _currentPercent = 0;
-                _transitionTriggered = NO;
-                [self triggerTransitionInWindow:win withPan:pan];
-                return;
-            }
-            [self _scheduleCompletionWatchdog];
-            self.interacting = NO;
-            self.interactive = nil;
-            self.currentAnimator = nil;
-            _navPopTarget = nil;
-            _currentPercent = 0;
-            _transitionTriggered = NO;
-            OBLog(@"endTransition: nav pop 自定义视差收尾 (commit=%d)", commit);
-            return;
-        }
         if (_navPopProbeFailed) {
             // 探测失败已切非交互 pop：此处仅复位状态，不再喂系统转场（避免与已进行的非交互 pop 冲突）
             OBLog(@"endTransition: nav pop 探测失败→非交互返回复位 (commit=%d)", commit);
             self.interacting = NO;
             _navPopTarget = nil;
-            self.interactive = nil;
-            self.currentAnimator = nil;
             _currentPercent = 0;
             _transitionTriggered = NO;
             return;
@@ -1940,66 +1871,33 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         [self _callSystemNavPop:pan];
         self.interacting = NO;
         _navPopTarget = nil;
-        self.interactive = nil;
-        self.currentAnimator = nil;
         _currentPercent = 0;
         _transitionTriggered = NO;
         OBLog(@"endTransition: nav pop 系统原生收尾 (commit=%d)", commit);
         return;
     }
 
-    // ===== 以下为 modal dismiss 路径（方案B），保持不变 =====
-    // 注意：这里不释放 currentTD —— 弹窗若 cancel 仍 present，其 transitioningDelegate(assign)
+    // ===== 以下为 modal dismiss 路径（方案B：交还系统/App 原生 dismiss，非交互，不可中途取消）=====
+    // 注：这里不释放 currentTD —— 弹窗若 cancel 仍 present，其 transitioningDelegate(assign)
     // 仍指向该 td；释放会留下野指针。td 的生命周期由被 dismiss 的 VC 关联对象保证（见 beginTransition）。
-    // 仅当本次手势确实触发了交互转场才 finish/cancel；纯点按未触发则什么都不碰，安全复位。
-    if (_transitionTriggered) {
-        if (commit) [self.interactive finish];   // 提交：forceFinishIfNeeded 做 UIView 动画归位 + completeTransition
-        else {
-            self.currentAnimator.releaseVelocity = 0;  // 取消：温和回弹，不带入前向速度
-            [self.interactive cancel];           // 反向续跑动画器回弹（直接驱动中断式动画器）
-        }
-    } else if (commit) {
+    if (!_transitionTriggered && commit) {
         // 快滑但几乎无净位移（手势 Began→Ended 之间无有效横向移动，p 从未 >0.001），
         // 交互转场未启动；但速度已达提交阈值(commit=1) → 用户意图明确"一滑即回"。
-        // 直接走系统动画 pop/dismiss（非交互，最干净），避免"胶囊飞出却没反应"的困惑。
-        // 实测 oback_debug(10).log 第296行即此场景：percent=0.00 vel=723 projected=0.22 commit=1 triggered=0。
-        // 关键修复：先置 interacting=NO，让 delegate 返回 nil 交互控制器 → 真正非交互转场，
-        // 由系统动画自动完成（最干净），避免"交互控制器已返回却永不 finish"导致停滞冻结。
-        self.currentAnimator = nil;
+        // 直接走系统动画 dismiss（非交互，最干净），避免"胶囊飞出却没反应"的困惑。
         self.interacting = NO;
-        OBLog(@"endTransition: 快滑零位移，非交互直接返回 (vel=%.0f edge=%@)", vel,
+        OBLog(@"endTransition: modal 快滑零位移，原生 dismiss (vel=%.0f edge=%@)", vel,
               self.currentEdge == ObackEdgeLeft ? @"左" : @"右");
         [self triggerTransitionInWindow:win withPan:pan];
-        self.interactive = nil;
         _currentPercent = 0;
         _transitionTriggered = NO;
         return;   // 此路径用系统原生动画，无 ObackAnimator，无需兜底收尾
     }
-    // 兜底收尾：finish/cancel 已直接调 forceFinishIfNeeded（不再走 continueAnimation），
-    // watchdog 仅作为最后一道保险（若 UIView 动画 completion 因极端情况未触发）。
-    [self _scheduleCompletionWatchdog];
+    // 原生 dismiss 已由系统动画自行收尾（首次横拖即触发，不可中途取消），无需 forceFinish/watchdog；仅复位状态。
     self.interacting = NO;
-    self.interactive = nil;
-    self.currentAnimator = nil;   // assign 弱引用，显式清更安全
     _currentPercent = 0;
     _transitionTriggered = NO;
 }
 
-// 兜底收尾定时器：当前 ObackAnimator 在 0.5s 内若仍未自行完成（completed=NO），
-// 强制调 completeTransition，确保转场一定收尾，绝不遗留"卡交互态"冻结。
-// manager 单例常驻 → 定时器回调持有 _watchAnimator（已 retain）安全，无野指针风险。
-- (void)_scheduleCompletionWatchdog {
-    ObackAnimator *a = self.currentAnimator;
-    if (!a) return;
-    [_watchAnimator release];
-    _watchAnimator = [a retain];   // MRC：定时器期间强持，避免 UIKit 释放动画器成野指针
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        [_watchAnimator forceFinishIfNeeded];
-        [_watchAnimator release];
-        _watchAnimator = nil;
-    });
-}
 
 // nav pop 安全看门狗（方案A 专用）：个别 App（如 Filza）会禁用/改造系统原生 interactivePopGestureRecognizer，
 // 导致我们经 handleNavigationTransition: 驱动的系统交互转场在松手后卡在「进行中」态
@@ -2037,8 +1935,6 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         // 防御性复位：即使正常路径已复位，也兜底，防止极端情况下 interacting 残留导致冻结
         if (self.interacting && nav.topViewController == topAtSchedule) {
             self.interacting = NO;
-            self.interactive = nil;
-            self.currentAnimator = nil;
             _navPopTarget = nil;
             _currentPercent = 0;
             _transitionTriggered = NO;
@@ -2054,18 +1950,13 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     // [2026-07-28 崩溃修复] 同 endTransition：手势失败/被取消时 release+nil _simulOpponent
     // (retain 自持语义下交还所有权，杜绝泄漏；同时保证下一轮不会解引用悬空指针)。
     [_simulOpponent release]; _simulOpponent = nil;
-    // 手势意外失败（无明确释放速度）：清速度为 0，让取消动画走温和回弹（不继承动量）
-    self.releaseVelocity = 0;
-    self.releasePercent  = 0;
     OBLog(@"abortTransition (state=%ld)", (long)pan.state);
     UIWindow *win = [self _windowForPan:pan];
     ObackParams *p = [ObackPreferences params];
     if (_indicator) [self dismissIndicatorCommitted:NO params:p window:win];
     if (self.currentParallaxToView) {
         if (self.currentEdge == ObackEdgeRight) {
-            // 实验：自定义 nav 视差取消（同 modal 方案B：含右缘固定自定义镜像转场；驱动 animator 反向回弹 + watchdog 兜底收尾）
-            if (_transitionTriggered && self.interactive) [self.interactive cancel];
-            [self _scheduleCompletionWatchdog];
+            // 右缘：方案B 统一走 rightSimplePop 非交互 pop（abort 即复位，原生转场自行处理）
         } else {
             // 方案 A：nav pop 用系统原生交互转场，把当前 pan(Failed/Cancelled)喂给 handleNavigationTransition:
             // 让系统取消原生 pop；无自定义动画器，无需 watchdog/interactive cancel。
@@ -2075,15 +1966,9 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         // 兜底：若系统 target 取不到导致原生 pop 从未启动（driveSystemNavPopBegin 降级为非交互 pop），
         // 此处 _navPopTarget 为 nil，_callSystemNavPop 为空操作，无需额外处理。
     } else {
-        // 仅当本次手势确实触发了转场才 cancel（直接驱动中断式动画器反向回弹）；
-        // 未触发则什么都不碰，安全复位，避免误调用导致导航卡在交互态。
-        if (_transitionTriggered && self.interactive) [self.interactive cancel];
-        // 兜底收尾：cancel 内部 pa=nil 时早退不会调 completeTransition，此处定时器保证转场仍被收尾（见 _scheduleCompletionWatchdog）
-        [self _scheduleCompletionWatchdog];
+        // modal dismiss（方案B 原生 dismiss 非交互、不可中途取消）：abort 不回滚已触发的 dismiss，仅复位状态。
     }
     self.interacting = NO;
-    self.interactive = nil;
-    self.currentAnimator = nil;   // assign 弱引用，显式清更安全
     _navPopTarget = nil;
     _currentPercent = 0;
     _transitionTriggered = NO;

@@ -51,7 +51,6 @@ static BOOL oback_shouldBackOff(void) {
                                                  toViewController:(UIViewController *)to {
     BOOL interacting = [ObackManager shared].interacting;
     OBLog(@"nav-anim query (op=%ld interacting=%d)", (long)operation, interacting);
-    [ObackManager shared].currentAnimator = nil;   // 先清，避免残留上一轮动画器
     // 仅在我们手势驱动返回时接管 pop 动画；普通返回按钮走 App 原生转场（避免破坏/黑屏）
     if (operation == UINavigationControllerOperationPop && interacting) {
         // 方案 A：返回 nil → 系统原生交互 pop（toView 由 UIKit 原生处理，
@@ -73,8 +72,8 @@ static BOOL oback_shouldBackOff(void) {
                          interactionControllerForAnimationController:(id<UIViewControllerAnimatedTransitioning>)animator {
     BOOL interacting = [ObackManager shared].interacting;
     OBLog(@"nav-intc query (animator=%@ interacting=%d)", NSStringFromClass([animator class]), interacting);
-    if (interacting && [animator isKindOfClass:[ObackAnimator class]])
-        return [ObackManager shared].interactive;
+    // [方案B] 左缘 nav pop 走系统原生交互转场(方案A)，交互控制器由系统 _UINavigationInteractiveTransition 提供；
+    // 不再返回自定义 ObackInteractiveTransition。仅透传 App 原有 delegate。
     if (_original && [_original respondsToSelector:_cmd])
         return [_original navigationController:nav interactionControllerForAnimationController:animator];
     return nil;
@@ -99,24 +98,15 @@ static BOOL oback_shouldBackOff(void) {
 @implementation ObackTransitioningDelegate
 
 - (id<UIViewControllerAnimatedTransitioning>)animationControllerForDismissedController:(UIViewController *)dismissed {
-    [ObackManager shared].currentAnimator = nil;   // 先清，避免残留上一轮动画器
-    // 仅在手势驱动返回时接管 dismiss 动画；普通关闭按钮等系统 dismiss 走 App 原生动画，
-    // 避免对 fullScreen / 系统自带 modal 强行套自定义转场导致黑屏（此前无条件返回是黑屏根因之一）
-    if ([ObackManager shared].interacting) {
-        ObackAnimator *a = [[[ObackAnimator alloc] initWithEdge:[ObackManager shared].currentEdge
-                                                           params:[ObackPreferences params]] autorelease];
-        [ObackManager shared].interactive.animator = a;   // 反向引用，finish/cancel 时改弹簧速度
-        [ObackManager shared].currentAnimator = a;
-        return a;
-    }
+    // [方案B] modal dismiss 交还系统/App 原生动画（不再创建自定义 ObackAnimator）；
+    // 普通关闭按钮等系统 dismiss 亦走 App 原生动画。仅透传 App 原有 delegate（保留其自定义 modal 转场）。
     if (_original && [_original respondsToSelector:_cmd])
         return [_original animationControllerForDismissedController:dismissed];
     return nil;
 }
 
 - (id<UIViewControllerInteractiveTransitioning>)interactionControllerForDismissal:(id<UIViewControllerAnimatedTransitioning>)animator {
-    if ([ObackManager shared].interacting && [animator isKindOfClass:[ObackAnimator class]])
-        return [ObackManager shared].interactive;
+    // [方案B] modal dismiss 退化为原生 dismiss（非交互，不可中途取消），不返回自定义交互控制器
     if (_original && [_original respondsToSelector:_cmd])
         return [_original interactionControllerForDismissal:animator];
     return nil;
