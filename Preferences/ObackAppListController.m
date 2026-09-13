@@ -558,3 +558,193 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 }
 @end
 
+#pragma mark - 左缘·按页排除：VC 类名点选列表（方案A，取代单行文本框）
+
+// 取代原来的单行 PSTextFieldCell：tweak 侧（ObackManager 的 OBRecordVCChain）把左缘遇到的
+// VC 类名写入 /var/mobile/oback_vc_seen.plist；本页列出「检测到的页面」，点按即加入/移出排除，
+// 用户不必开调试日志、不必 Filza 手抄类名，类名多了也能搜索。
+// 沿用 ObackAppListController 已验证稳定的写法：系统原生 PSTitleValueCell + didSelectRow 切换
+// + willDisplayCell 画勾选 + 搜索；⚠️ 绝不自定义 cell 类。
+// 写入走 oback_setGlobalPref（跨 App 真相源）+ suite 兜底，确保 tweak 注入其它 App 读得到。
+
+static NSString *const kOBVCSeeNFile = @"/var/mobile/oback_vc_seen.plist";
+
+// 与 ObackPreferences.isLeftEdgeExcludedVC: 的分隔规则保持一致（逗号/换行 + 去首尾空白）
+static NSArray *_obParseVCNames(id raw) {
+    if ([raw isKindOfClass:[NSArray class]]) {
+        NSMutableArray *o = [NSMutableArray array];
+        for (id e in (NSArray *)raw) {
+            if ([e isKindOfClass:[NSString class]] && [e length]) [o addObject:e];
+        }
+        return o;
+    }
+    if (![raw isKindOfClass:[NSString class]] || ![raw length]) return @[];
+    NSArray *parts = [raw componentsSeparatedByCharactersInSet:
+                      [NSCharacterSet characterSetWithCharactersInString:@",\n"]];
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSString *s in parts) {
+        NSString *t = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (t.length) [out addObject:t];
+    }
+    return out;
+}
+
+@interface ObackVCExcludeListController : PSListController <UISearchResultsUpdating>
+@end
+
+@implementation ObackVCExcludeListController {
+    NSArray *_excluded;    // 已排除的类名
+    NSArray *_seen;        // tweak 记录到的类名（倒序，最近遇到的在前）
+    NSString *_searchText;
+}
+
+- (NSArray *)_excludedNames {
+    id v = oback_globalPrefs()[@"leftEdgeExcludedVCs"];
+    if (!v) {
+        NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+        v = [d objectForKey:@"leftEdgeExcludedVCs"];
+    }
+    return _obParseVCNames(v);
+}
+
+- (NSArray *)_seenNames {
+    NSArray *a = [NSArray arrayWithContentsOfFile:kOBVCSeeNFile];
+    if (![a isKindOfClass:[NSArray class]]) return @[];
+    return [[a reverseObjectEnumerator] allObjects];
+}
+
+- (void)_saveExcluded:(NSArray *)names {
+    NSString *joined = [names componentsJoinedByString:@","];
+    oback_setGlobalPref(@"leftEdgeExcludedVCs", joined);
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    [d setObject:joined forKey:@"leftEdgeExcludedVCs"];
+    [d synchronize];
+}
+
+#pragma mark 搜索
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    UISearchController *sc = [[UISearchController alloc] initWithSearchResultsController:nil];
+    sc.searchResultsUpdater = self;
+    sc.obscuresBackgroundDuringPresentation = NO;
+    sc.searchBar.placeholder = @"搜索类名";
+    self.navigationItem.searchController = sc;
+    self.navigationItem.hidesSearchBarWhenScrolling = NO;
+    self.definesPresentationContext = YES;
+}
+
+- (void)updateSearchResultsForSearchController:(UISearchController *)sc {
+    NSString *t = [sc.searchBar.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] ?: @"";
+    _searchText = t.length ? t : nil;
+    _specifiers = nil;
+    [self reloadSpecifiers];
+}
+
+- (NSArray *)_filter:(NSArray *)arr {
+    if (!_searchText.length) return arr;
+    NSString *q = [_searchText lowercaseString];
+    return [arr filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *s, NSDictionary *b) {
+        return [[s lowercaseString] rangeOfString:q].location != NSNotFound;
+    }]];
+}
+
+#pragma mark 列表构建
+
+- (PSSpecifier *)_nameSpec:(NSString *)name {
+    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name
+                                                  target:self
+                                                     set:nil
+                                                     get:nil
+                                                  detail:nil
+                                                     cell:PSTitleValueCell
+                                                     edit:nil];
+    [s setProperty:name forKey:@"vcName"];
+    return s;
+}
+
+- (PSSpecifier *)_groupSpec:(NSString *)title footer:(NSString *)footer {
+    // ⚠️ 组标题必须用 specifier 的 name（第一个参数），设 label 会导致标题整片空白（与 App 选择器同坑）。
+    PSSpecifier *g = [PSSpecifier preferenceSpecifierNamed:(title ?: @"")
+                                                  target:self
+                                                     set:nil
+                                                     get:nil
+                                                  detail:nil
+                                                     cell:PSGroupCell
+                                                     edit:nil];
+    if (footer.length) [g setProperty:footer forKey:@"footerText"];
+    return g;
+}
+
+- (NSArray *)specifiers {
+    if (!_specifiers) {
+        @try {
+            _excluded = [self _excludedNames];
+            _seen = [self _seenNames];
+            NSSet *exSet = [NSSet setWithArray:_excluded];
+            NSMutableArray *specs = [NSMutableArray array];
+
+            // 组1：已排除（点按移出）
+            [specs addObject:[self _groupSpec:[NSString stringWithFormat:@"已排除 %lu 个", (unsigned long)_excluded.count]
+                                       footer:@"点按可移出排除。命中后该页左缘交还页面自身手势，右缘返回与弹窗不受影响。"]];
+            NSArray *exF = [self _filter:_excluded];
+            if (exF.count) {
+                for (NSString *n in exF) [specs addObject:[self _nameSpec:n]];
+            } else {
+                [specs addObject:[self _groupSpec:@""
+                                           footer:(_excluded.count ? @"（无匹配结果）" : @"（尚未排除任何页面）")]];
+            }
+
+            // 组2：检测到的页面（点按加入）
+            NSMutableArray *cand = [NSMutableArray array];
+            for (NSString *n in _seen) if (![exSet containsObject:n]) [cand addObject:n];
+            [specs addObject:[self _groupSpec:[NSString stringWithFormat:@"检测到的页面 %lu 个", (unsigned long)cand.count]
+                                       footer:@"在目标页面从屏幕左缘滑一下，其 VC 类名会自动出现在这里，点按即加入排除（子串匹配、大小写不敏感）。"]];
+            NSArray *candF = [self _filter:cand];
+            if (candF.count) {
+                for (NSString *n in candF) [specs addObject:[self _nameSpec:n]];
+            } else {
+                [specs addObject:[self _groupSpec:@""
+                                           footer:(_seen.count ? @"（已全部排除，或无匹配结果）"
+                                                               : @"（暂无记录：去目标页面从屏幕左缘滑一下即可）")]];
+            }
+            _specifiers = specs;
+        } @catch (NSException *e) {
+            (void)e;
+            _specifiers = [NSMutableArray array];
+        }
+    }
+    return _specifiers;
+}
+
+#pragma mark 勾选与点按
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    // ⚠️ 不调 super：本环境 PSListController 未实现该方法，super 调用会 unrecognized selector 闪退（崩溃日志实测）。
+    PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
+    NSString *name = [spec propertyForKey:@"vcName"];
+    if (name.length) {
+        cell.accessoryType = [[self _excludedNames] containsObject:name]
+            ? UITableViewCellAccessoryCheckmark
+            : UITableViewCellAccessoryNone;
+    }
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
+    NSString *name = [spec propertyForKey:@"vcName"];
+    if (name.length) {
+        NSMutableArray *arr = [[self _excludedNames] mutableCopy];
+        if ([arr containsObject:name]) [arr removeObject:name];
+        else [arr addObject:name];
+        [self _saveExcluded:arr];
+        _specifiers = nil;   // 触发重建：两个分组随之刷新
+        [self reloadSpecifiers];
+    } else if ([super respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
+        [super tableView:tableView didSelectRowAtIndexPath:indexPath];
+    }
+}
+
+@end
+

@@ -121,6 +121,70 @@ void OBLog(NSString *fmt, ...) {
     [msg release];
 }
 
+#pragma mark - [方案A] VC 类名记录（供设置页「按页排除」点选，免手抄类名）
+
+// 左缘起滑时把当前页面 VC 及其父链的类名去重写入共享文件，设置页「排除的 VC 类名」子页面
+// 读取该文件列出「检测到的页面」，用户点一下即加入排除——不必开调试日志、不必 Filza 手抄。
+// 写入策略：内存 Set 去重 → 仅【新出现的类名】才 read-modify-write 一次（每个类名基本只写一次），
+// 故即便每次左缘起滑都调用，实际磁盘 IO 次数 ≈ 见过的不同类名个数，开销可忽略。
+static NSString *OBVCSeeNPath(void) {
+    if ([[NSFileManager defaultManager] isWritableFileAtPath:@"/var/mobile"])
+        return @"/var/mobile/oback_vc_seen.plist";
+    NSString *dir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+    return dir ? [dir stringByAppendingPathComponent:@"oback_vc_seen.plist"] : @"/var/mobile/oback_vc_seen.plist";
+}
+static const NSUInteger kOBVCSeeNMax = 300;   // 上限：防文件无限增长
+static NSMutableSet *__obVCSeeNSet = nil;
+
+static void OBRecordVCClasses(NSArray *names) {
+    if (!names.count) return;
+    @autoreleasepool {
+        if (!__obVCSeeNSet) {
+            // 首次：把文件已有内容装入内存 Set，避免已存在类名重复触发写盘
+            NSArray *existing = [NSArray arrayWithContentsOfFile:OBVCSeeNPath()];
+            __obVCSeeNSet = [[NSMutableSet alloc] initWithArray:
+                             ([existing isKindOfClass:[NSArray class]] ? existing : @[])];
+        }
+        NSMutableArray *fresh = [NSMutableArray array];
+        for (id n in names) {
+            if (![n isKindOfClass:[NSString class]] || ![n length]) continue;
+            if ([__obVCSeeNSet containsObject:n]) continue;
+            [__obVCSeeNSet addObject:n];
+            [fresh addObject:n];
+        }
+        if (!fresh.count) return;
+        // 多进程各自独立（tweak 注入各 App），以文件为真相源做 read-modify-write
+        NSMutableArray *all = [NSMutableArray array];
+        NSArray *raw = [NSArray arrayWithContentsOfFile:OBVCSeeNPath()];
+        if ([raw isKindOfClass:[NSArray class]]) [all addObjectsFromArray:raw];
+        for (NSString *n in fresh) if (![all containsObject:n]) [all addObject:n];
+        if (all.count > kOBVCSeeNMax) {
+            [all setArray:[all subarrayWithRange:NSMakeRange(all.count - kOBVCSeeNMax, kOBVCSeeNMax)]];
+            [__obVCSeeNSet removeAllObjects];
+            [__obVCSeeNSet addObjectsFromArray:all];
+        }
+        [all writeToFile:OBVCSeeNPath() atomically:YES];
+    }
+}
+
+// 记录某 VC 及其父链（parentViewController / presentingViewController）的类名。
+// 记录父链：容器 VC（nav/tab/自定义容器）也会被列出，用户排除整个容器更省力。
+static void OBRecordVCChain(UIViewController *vc) {
+    if (!vc) return;
+    NSMutableArray *names = [NSMutableArray array];
+    UIViewController *cur = vc;
+    NSUInteger guard = 0;
+    while (cur && guard++ < 20) {   // 深度护栏：防异常父链（循环引用）死循环
+        NSString *cn = NSStringFromClass([cur class]);
+        if (cn.length) [names addObject:cn];
+        UIViewController *nxt = cur.parentViewController;
+        if (!nxt) nxt = cur.presentingViewController;
+        if (nxt == cur) break;
+        cur = nxt;
+    }
+    OBRecordVCClasses(names);
+}
+
 #pragma mark - [P6] 诊断日志宏（编译期收敛）
 
 // 所有 [diag-*] 诊断日志统一走本宏。当前在 Makefile 定义 OBACK_DIAG=1（真机调试需要），故照常输出；
@@ -1096,6 +1160,14 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
         OBLog(@"shouldBegin=NO (该边缘未启用/超宽: pan.edges=%ld x=%.1f w=%.1f triggerW=%.1f left=%d right=%d kind=%@)",
               (long)pan.edges, loc.x, w, p.triggerWidth, p.leftEnabled, p.rightEnabled, kind);
         return NO;
+    }
+
+    // [方案A] 记录本次左缘起滑所在页面的 VC 类名（含父链），供设置页「按页排除」子页面点选，
+    // 让用户不必开调试日志、不必 Filza 手抄类名。
+    // ⚠️ 必须放在 ① 横向滚动让路【之前】：带轮播/横滑的页面恰恰是用户最想按页排除的目标，
+    // 若放在 ① 之后，这类页面会在 ① 提前 return NO、永远进不到记录，列表里就永远看不到它们。
+    if (edge == ObackEdgeLeft) {
+        OBRecordVCChain([self topMost:win.rootViewController]);
     }
 
     // [优化①] 横向滚动优先：触摸点下是横向可滚/分页 scrollView（微信/小红书图片查看器、Safari 图片、地图）
