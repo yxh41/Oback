@@ -129,32 +129,21 @@ static NSDictionary *_obSliderUnits(void) {
  */
 
 - (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
-    // 滑块行保留原路径（不调 super，避免破坏右侧自定义数值标签）；非滑块行（文本框/开关/链接/按钮）走 super 完成标准配置。
-    // 关键修复：「排除的 VC 类名」文本框（PSTextFieldCell）此前按了没反应、键盘弹不出、填不进去——
-    // 根因是早期「非滑块行直接 return 不调 super」，而 PSListController 的 willDisplayCell 负责把
-    // PSTextFieldCell 的 UITextField 置为可编辑并接好 delegate/保存链路；跳过它使文本框处于 disabled，故无法输入。
-    // 对 super 实现做 respondsToSelector 防护：正常 PSListController 已实现该方法，文本框即恢复可编辑/可保存；
-    // 万一某版本未实现也不闪退（文本框再走兜底启用逻辑，至少可点出键盘）。
+    // ⚠️ 铁律（勿改回）：**绝不**调 [super tableView:willDisplayCell:forRowAtIndexPath:]。
+    // 本环境（roothide / iOS 16.4.1）的 PSListController【未实现】该方法，调用即 doesNotRecognizeSelector 闪退。
+    // 实证：2026-09-14 设置 App 崩溃日志 SIGABRT，栈帧为
+    //   [UIResponder doesNotRecognizeSelector:] ← ___forwarding___ ← ObackSettings ←
+    //   -[UITableView _notifyWillDisplayCell:forIndexPath:]
+    // ⚠️ 且 [super respondsToSelector:@selector(...)] **挡不住这个坑**：给 super 发消息时 receiver 仍是 self，
+    // NSObject 的 respondsToSelector: 从 receiver 的【实际类】（即本子类）开始查找，而本子类自己实现了该方法
+    // → 恒返回 YES → 照样调父类不存在的实现 → 崩。判断父类是否实现须用
+    //   [[self superclass] instancesRespondToSelector:@selector(...)]
+    // （注意：tableView:didSelectRowAtIndexPath: 与之不同——PSListController 确实实现了它，黑白名单页长期稳定即实证。）
     PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
     if (!spec) return;
 
     NSString *key = [spec propertyForKey:@"key"];
-    if (!_obSliderUnits()[key]) {
-        // PSTextFieldCell 兜底：roothide 下若 super 未接管，直接取出 UITextField 启用，确保可点出键盘。
-        // （PSListController 通常已用 super 完成配置，这里仅作双保险，避免任何版本下文本框仍 disabled。）
-        if ([[spec propertyForKey:@"cell"] isEqualToString:@"PSTextFieldCell"]) {
-            UITextField *tf = nil;
-            @try { tf = [cell valueForKey:@"textField"]; } @catch (NSException *e) { tf = nil; }
-            if ([tf isKindOfClass:[UITextField class]]) {
-                tf.enabled = YES;
-                tf.userInteractionEnabled = YES;
-            }
-        }
-        if ([super respondsToSelector:@selector(tableView:willDisplayCell:forRowAtIndexPath:)]) {
-            [super tableView:tableView willDisplayCell:cell forRowAtIndexPath:indexPath];
-        }
-        return;
-    }
+    if (!_obSliderUnits()[key]) return;   // 非滑块行，跳过（不调 super）
 
     // ── 在 PSSliderCell 内部找到 UISlider ──
     UISlider *slider = nil;
