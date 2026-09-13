@@ -623,52 +623,84 @@ static NSArray *_obParseVCNames(id raw) {
     return [[out reverseObjectEnumerator] allObjects];
 }
 
-#pragma mark bid → App 显示名（扫描 .app 的 Info.plist，一次性缓存）
+#pragma mark bid 备注（用户自定义别名，替代全量 App 扫描 —— 零开销）
 
-- (void)_addBidNameFromPath:(NSString *)appPath toMap:(NSMutableDictionary *)m {
-    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
-                          [appPath stringByAppendingPathComponent:@"Info.plist"]];
-    if (![info isKindOfClass:[NSDictionary class]]) return;
-    NSString *bid = [info objectForKey:@"CFBundleIdentifier"];
-    if (![bid isKindOfClass:[NSString class]] || ![bid length]) return;
-    NSString *name = [info objectForKey:@"CFBundleDisplayName"];
-    if (![name isKindOfClass:[NSString class]] || ![name length])
-        name = [info objectForKey:@"CFBundleName"];
-    if (![name isKindOfClass:[NSString class]] || ![name length]) name = bid;
-    [m setObject:name forKey:bid];
+// 备注存在 vcBidNotes（bid → 备注）。不再扫描 /var/containers/Bundle/Application 下所有 .app 的
+// Info.plist（那要读上百个文件、首次进页面会卡顿），可读性改由用户自己的备注保证。
+- (NSDictionary *)_notes {
+    id v = oback_globalPrefs()[@"vcBidNotes"];
+    if (!v) {
+        NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+        v = [d objectForKey:@"vcBidNotes"];
+    }
+    return [v isKindOfClass:[NSDictionary class]] ? v : @{};
 }
 
-- (NSDictionary *)_bidNameMap {
-    static NSDictionary *map = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        NSMutableDictionary *m = [NSMutableDictionary dictionary];
-        NSFileManager *fm = [NSFileManager defaultManager];
-        for (NSString *base in @[@"/var/containers/Bundle/Application", @"/Applications"]) {
-            for (NSString *e in [fm contentsOfDirectoryAtPath:base error:nil]) {
-                NSString *p = [base stringByAppendingPathComponent:e];
-                BOOL isDir = NO;
-                if (![fm fileExistsAtPath:p isDirectory:&isDir] || !isDir) continue;
-                if ([base isEqualToString:@"/var/containers/Bundle/Application"]) {
-                    // 该目录下还有一层 UUID
-                    for (NSString *sub in [fm contentsOfDirectoryAtPath:p error:nil]) {
-                        if ([sub hasSuffix:@".app"])
-                            [self _addBidNameFromPath:[p stringByAppendingPathComponent:sub] toMap:m];
-                    }
-                } else if ([e hasSuffix:@".app"]) {
-                    [self _addBidNameFromPath:p toMap:m];
-                }
-            }
-        }
-        map = [m copy];
-    });
-    return map ?: @{};
+- (void)_saveNotes:(NSDictionary *)n {
+    oback_setGlobalPref(@"vcBidNotes", n);
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    [d setObject:n forKey:@"vcBidNotes"];
+    [d synchronize];
 }
 
+// 分组标题：有备注显示备注，否则回退显示 bid
 - (NSString *)_displayNameForBid:(NSString *)bid {
     if (![bid isKindOfClass:[NSString class]] || !bid.length) return @"未知来源";
-    NSString *n = [[self _bidNameMap] objectForKey:bid];
-    return ([n isKindOfClass:[NSString class]] && n.length) ? n : bid;
+    NSString *note = [[self _notes] objectForKey:bid];
+    return ([note isKindOfClass:[NSString class]] && note.length) ? note : bid;
+}
+
+// 备注编辑：用 UIAlertController 的文本框（标准 UIKit，必定可用）——
+// 不用 PSTextFieldCell：本环境 PreferenceLoader 的文本框 cell 存在填不进去的问题。
+- (void)_editNoteForBid:(NSString *)bid {
+    NSString *cur = [[self _notes] objectForKey:bid];
+    if (![cur isKindOfClass:[NSString class]]) cur = @"";
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"备注"
+                                                               message:[NSString stringWithFormat:@"给 %@ 起个好认的名字，显示在分组标题上。", bid]
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    [a addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = cur;
+        tf.placeholder = @"例如：拼多多商家版";
+        tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+    }];
+    [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [a addAction:[UIAlertAction actionWithTitle:@"清空" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *act) {
+        NSMutableDictionary *n = [[self _notes] mutableCopy];
+        [n removeObjectForKey:bid];
+        [self _saveNotes:n];
+        _specifiers = nil;
+        [self reloadSpecifiers];
+    }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
+        NSString *t = @"";
+        UITextField *tf = [[a textFields] firstObject];
+        if (tf) {
+            t = [tf.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (!t) t = @"";
+        }
+        NSMutableDictionary *n = [[self _notes] mutableCopy];
+        if (t.length) [n setObject:t forKey:bid]; else [n removeObjectForKey:bid];
+        [self _saveNotes:n];
+        _specifiers = nil;
+        [self reloadSpecifiers];
+    }]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+- (PSSpecifier *)_noteSpec:(NSString *)bid {
+    NSString *note = [[self _notes] objectForKey:bid];
+    BOOL has = ([note isKindOfClass:[NSString class]] && note.length);
+    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:(has ? [NSString stringWithFormat:@"备注：%@", note] : @"＋ 添加备注")
+                                                  target:self
+                                                     set:nil
+                                                     get:nil
+                                                  detail:nil
+                                                     cell:PSTitleValueCell
+                                                     edit:nil];
+    [s setProperty:bid forKey:@"vcBidNote"];
+    return s;
 }
 
 - (void)_saveExcluded:(NSArray *)names {
@@ -783,6 +815,7 @@ static NSArray *_obParseVCNames(id raw) {
                                    (unsigned long)f.count,
                                    (cCnt ? [NSString stringWithFormat:@"，%lu 个冲突", (unsigned long)cCnt] : @"")];
                 [specs addObject:[self _groupSpec:title footer:@""]];
+                [specs addObject:[self _noteSpec:bid]];   // 备注行：点按可给该 App 起别名
                 for (NSDictionary *e in f) [specs addObject:[self _entrySpec:e]];
             }
 
@@ -805,6 +838,16 @@ static NSArray *_obParseVCNames(id raw) {
 - (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
     // ⚠️ 不调 super：本环境 PSListController 未实现该方法，super 调用会 unrecognized selector 闪退（崩溃日志实测）。
     PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
+    // 备注行（App 别名）：不打勾，次要色
+    if ([spec propertyForKey:@"vcBidNote"]) {
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        if (@available(iOS 13.0, *)) {
+            cell.textLabel.textColor = [UIColor secondaryLabelColor];
+        } else {
+            cell.textLabel.textColor = [UIColor grayColor];
+        }
+        return;
+    }
     NSString *name = [spec propertyForKey:@"vcName"];
     if (name.length) {
         cell.accessoryType = [[self _excludedNames] containsObject:name]
@@ -827,6 +870,12 @@ static NSArray *_obParseVCNames(id raw) {
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
+    // 备注行 → 弹输入框编辑 App 别名
+    NSString *bid = [spec propertyForKey:@"vcBidNote"];
+    if (bid) {
+        [self _editNoteForBid:bid];
+        return;
+    }
     NSString *name = [spec propertyForKey:@"vcName"];
     if (name.length) {
         NSMutableArray *arr = [[self _excludedNames] mutableCopy];
