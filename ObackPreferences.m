@@ -150,6 +150,33 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     return [self _bid:bid matchesList:list];
 }
 
+// [优化③] 左缘按页（VC）排除：在已允许左缘返回的 App 内，命中 leftEdgeExcludedVCs（VC 类名子串，
+// 大小写不敏感）的顶层 VC，该页左缘交还页面自身手势，Oback 不接管（右缘返回 + 弹窗 dismiss 仍由 Oback 提供）。
+// ≠ 按 App 排除(leftEdgeExcludeApps)：按 App 是整 App 不接管左缘；按页是同一 App 内仅个别页面让出左缘。
+// 设置面板 PSTextFieldCell 以逗号/换行分隔字符串写入；兼容数组写入。
++ (BOOL)isLeftEdgeExcludedVC:(NSString *)className {
+    if (!className.length) return NO;
+    NSDictionary *d = [self _mergedPrefs];
+    id raw = [d objectForKey:@"leftEdgeExcludedVCs"];
+    NSMutableArray *list = [NSMutableArray array];
+    if ([raw isKindOfClass:[NSString class]] && [raw length]) {
+        NSArray *parts = [raw componentsSeparatedByCharactersInSet:
+                          [NSCharacterSet characterSetWithCharactersInString:@",\n"]];
+        for (NSString *s in parts) {
+            NSString *t = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (t.length) [list addObject:t];
+        }
+    } else if ([raw isKindOfClass:[NSArray class]]) {
+        for (id e in (NSArray *)raw) if ([e isKindOfClass:[NSString class]] && [e length]) [list addObject:e];
+    }
+    if (!list.count) return NO;
+    NSString *lc = [className lowercaseString];
+    for (NSString *sub in list) {
+        if ([lc containsString:[sub lowercaseString]]) return YES;
+    }
+    return NO;
+}
+
 // 全局返回列表：命中此列表的 App 启用「全屏/任意位置返回」——Oback 左缘 edge pan 不接管
 // （交全屏 pan 统一接管左→右 nav pop），系统 interactivePop 仍禁用防双触发；右缘 modal dismiss
 // 仍由 Oback 提供。≠ 黑名单（整 App 不注入）、≠ 左缘排除（左缘交还系统原生 interactivePop）。

@@ -1098,6 +1098,18 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
         return NO;
     }
 
+    // [优化①] 横向滚动优先：触摸点下是横向可滚/分页 scrollView（微信/小红书图片查看器、Safari 图片、地图）
+    // 时，边缘返回让路，交还 App 横滑——避免屏幕边缘热区的系统级「边缘优先于滚动」优先级压过横向滚动，
+    // 导致图片在边缘附近滑不动或误触发返回。仅判定横向可滚(contentSize.width 明显大于可视宽)，
+    // 纵向 list 不受影响（contentSize.width≈可视宽 → 不触发，仍正常返回）。比「排除列表」通用。
+    {
+        UIScrollView *hsv = [self scrollViewAtPoint:loc inView:win];
+        if (hsv && hsv.contentSize.width > hsv.bounds.size.width * 1.05) {
+            OBLog(@"shouldBegin=NO (横向滚动让路: sv=%@ paging=%d)", NSStringFromClass([hsv class]), (int)hsv.pagingEnabled);
+            return NO;
+        }
+    }
+
     // 关键修复（朋友圈等自定义容器）：nav 类 pan 直接读其所属 nav（swizzle UINavigationController
     // 的 viewDidAppear 时已把所属 nav 绑到 pan 上），不再依赖 win.rootViewController 标准链枚举——
     // 微信朋友圈的 nav 不在 childViewControllers 标准链上，旧逻辑靠 topMost 枚举永远解析不到 → 无返回。
@@ -1133,6 +1145,13 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
         if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
     }
     if (!top) { OBLog(@"shouldBegin=NO (无顶层 VC)"); return NO; }
+
+    // [优化③] 左缘按页排除：顶层 VC 类名命中 leftEdgeExcludedVCs（子串，大小写不敏感）时，
+    // 该页左缘交还页面自身手势（如侧栏/轮播左滑），Oback 不接管；右缘/弹窗不受影响。仅作用于左缘，全局返回模式另算。
+    if (edge == ObackEdgeLeft && [ObackPreferences isLeftEdgeExcludedVC:NSStringFromClass([top class])]) {
+        OBLog(@"shouldBegin=NO (左缘按页排除命中: vc=%@)", NSStringFromClass([top class]));
+        return NO;
+    }
 
     // 排除名单（朋友圈等）：不干预，交原生处理，避免我们的 pan 与整屏滚动手势打架、进不了 Began
     if ([self _isExcludedViewController:top]) {
@@ -1292,7 +1311,13 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
               (unsigned long)nav.viewControllers.count);
         return YES;
     }
-    return NO;  // 无 nav pop：不接管，交还（modal dismiss 由 Oback 右缘提供）
+    if (top.presentingViewController != nil) {
+        // [优化②] 全局返回也接管弹窗 dismiss：勾了全局返回的 App，弹窗页全屏横滑也能返回
+        // （复用 handleGlobalPan→beginTransition→triggerTransitionInWindow 的 modal dismiss 链路）。
+        OBLog(@"globalShouldBegin=YES (loc.x=%.1f modal dismiss)", loc.x);
+        return YES;
+    }
+    return NO;  // 无 nav pop 且无 modal：不接管，交还
 }
 
 // 全屏 pan 处理：Began 仅记录起点、不驱动；Changed 首次有效位移判定方向——
