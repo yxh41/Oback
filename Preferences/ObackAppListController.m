@@ -593,8 +593,8 @@ static NSArray *_obParseVCNames(id raw) {
 @end
 
 @implementation ObackVCExcludeListController {
-    NSArray *_excluded;    // 已排除的类名
-    NSArray *_seen;        // tweak 记录到的类名（倒序，最近遇到的在前）
+    NSArray *_excluded;    // 已排除的类名（逗号串解析结果）
+    NSArray *_seen;        // tweak 记录到的条目 @{vc,bid,c}（倒序，最近遇到的在前）
     NSString *_searchText;
 }
 
@@ -607,10 +607,68 @@ static NSArray *_obParseVCNames(id raw) {
     return _obParseVCNames(v);
 }
 
-- (NSArray *)_seenNames {
+// 读取 tweak 记录：新格式为 @{vc,bid,c} 字典；兼容旧版纯字符串条目（无 App 归属/无冲突标记）。
+- (NSArray *)_seenEntries {
     NSArray *a = [NSArray arrayWithContentsOfFile:kOBVCSeeNFile];
     if (![a isKindOfClass:[NSArray class]]) return @[];
-    return [[a reverseObjectEnumerator] allObjects];
+    NSMutableArray *out = [NSMutableArray array];
+    for (id e in a) {
+        if ([e isKindOfClass:[NSDictionary class]]) {
+            NSString *v = [(NSDictionary *)e objectForKey:@"vc"];
+            if ([v isKindOfClass:[NSString class]] && [v length]) { [out addObject:e]; continue; }
+        } else if ([e isKindOfClass:[NSString class]] && [e length]) {
+            [out addObject:@{@"vc": e, @"bid": @"", @"c": @NO}];
+        }
+    }
+    return [[out reverseObjectEnumerator] allObjects];
+}
+
+#pragma mark bid → App 显示名（扫描 .app 的 Info.plist，一次性缓存）
+
+- (void)_addBidNameFromPath:(NSString *)appPath toMap:(NSMutableDictionary *)m {
+    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
+                          [appPath stringByAppendingPathComponent:@"Info.plist"]];
+    if (![info isKindOfClass:[NSDictionary class]]) return;
+    NSString *bid = [info objectForKey:@"CFBundleIdentifier"];
+    if (![bid isKindOfClass:[NSString class]] || ![bid length]) return;
+    NSString *name = [info objectForKey:@"CFBundleDisplayName"];
+    if (![name isKindOfClass:[NSString class]] || ![name length])
+        name = [info objectForKey:@"CFBundleName"];
+    if (![name isKindOfClass:[NSString class]] || ![name length]) name = bid;
+    [m setObject:name forKey:bid];
+}
+
+- (NSDictionary *)_bidNameMap {
+    static NSDictionary *map = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSMutableDictionary *m = [NSMutableDictionary dictionary];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        for (NSString *base in @[@"/var/containers/Bundle/Application", @"/Applications"]) {
+            for (NSString *e in [fm contentsOfDirectoryAtPath:base error:nil]) {
+                NSString *p = [base stringByAppendingPathComponent:e];
+                BOOL isDir = NO;
+                if (![fm fileExistsAtPath:p isDirectory:&isDir] || !isDir) continue;
+                if ([base isEqualToString:@"/var/containers/Bundle/Application"]) {
+                    // 该目录下还有一层 UUID
+                    for (NSString *sub in [fm contentsOfDirectoryAtPath:p error:nil]) {
+                        if ([sub hasSuffix:@".app"])
+                            [self _addBidNameFromPath:[p stringByAppendingPathComponent:sub] toMap:m];
+                    }
+                } else if ([e hasSuffix:@".app"]) {
+                    [self _addBidNameFromPath:p toMap:m];
+                }
+            }
+        }
+        map = [m copy];
+    });
+    return map ?: @{};
+}
+
+- (NSString *)_displayNameForBid:(NSString *)bid {
+    if (![bid isKindOfClass:[NSString class]] || !bid.length) return @"未知来源";
+    NSString *n = [[self _bidNameMap] objectForKey:bid];
+    return ([n isKindOfClass:[NSString class]] && n.length) ? n : bid;
 }
 
 - (void)_saveExcluded:(NSArray *)names {
@@ -641,25 +699,23 @@ static NSArray *_obParseVCNames(id raw) {
     [self reloadSpecifiers];
 }
 
-- (NSArray *)_filter:(NSArray *)arr {
-    if (!_searchText.length) return arr;
-    NSString *q = [_searchText lowercaseString];
-    return [arr filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *s, NSDictionary *b) {
-        return [[s lowercaseString] rangeOfString:q].location != NSNotFound;
-    }]];
-}
-
 #pragma mark 列表构建
 
-- (PSSpecifier *)_nameSpec:(NSString *)name {
-    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name
+// 单行：VC 类名；冲突行加 ⚠️ 并在 willDisplayCell 里标红
+- (PSSpecifier *)_entrySpec:(NSDictionary *)e {
+    NSString *vc = [e objectForKey:@"vc"];
+    if (![vc isKindOfClass:[NSString class]] || !vc.length) vc = @"";
+    BOOL conflict = [[e objectForKey:@"c"] boolValue];
+    NSString *title = conflict ? [vc stringByAppendingString:@"   ⚠️"] : vc;
+    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:title
                                                   target:self
                                                      set:nil
                                                      get:nil
                                                   detail:nil
                                                      cell:PSTitleValueCell
                                                      edit:nil];
-    [s setProperty:name forKey:@"vcName"];
+    [s setProperty:vc forKey:@"vcName"];
+    [s setProperty:@(conflict) forKey:@"vcConflict"];
     return s;
 }
 
@@ -680,32 +736,59 @@ static NSArray *_obParseVCNames(id raw) {
     if (!_specifiers) {
         @try {
             _excluded = [self _excludedNames];
-            _seen = [self _seenNames];
-            NSSet *exSet = [NSSet setWithArray:_excluded];
-            NSMutableArray *specs = [NSMutableArray array];
+            _seen = [self _seenEntries];
 
-            // 组1：已排除（点按移出）
-            [specs addObject:[self _groupSpec:[NSString stringWithFormat:@"已排除 %lu 个", (unsigned long)_excluded.count]
-                                       footer:@"点按可移出排除。命中后该页左缘交还页面自身手势，右缘返回与弹窗不受影响。"]];
-            NSArray *exF = [self _filter:_excluded];
-            if (exF.count) {
-                for (NSString *n in exF) [specs addObject:[self _nameSpec:n]];
-            } else {
-                [specs addObject:[self _groupSpec:@""
-                                           footer:(_excluded.count ? @"（无匹配结果）" : @"（尚未排除任何页面）")]];
+            NSUInteger conflictCnt = 0;
+            for (NSDictionary *e in _seen) if ([[e objectForKey:@"c"] boolValue]) conflictCnt++;
+
+            NSMutableArray *specs = [NSMutableArray array];
+            [specs addObject:[self _groupSpec:@"按页排除（按 App 分组）"
+                                       footer:[NSString stringWithFormat:
+                @"在目标页面从屏幕左缘滑一下，其 VC 类名会记录到对应 App 分组下。共 %lu 条记录，"
+                @"其中 %lu 条标红 ⚠️ = 该页左缘被页面自身占用（横向滚动 / 轮播 / 侧栏），"
+                @"会导致左缘异常，优先排除这些。点按即加入/移出排除（子串匹配、大小写不敏感）。",
+                (unsigned long)_seen.count, (unsigned long)conflictCnt]]];
+
+            // 按 bid 分组（组顺序保持「最近遇到」的先后）
+            NSMutableDictionary *byBid = [NSMutableDictionary dictionary];
+            NSMutableArray *bidOrder = [NSMutableArray array];
+            for (NSDictionary *e in _seen) {
+                NSString *bid = [e objectForKey:@"bid"];
+                if (![bid isKindOfClass:[NSString class]]) bid = @"";
+                NSMutableArray *arr = [byBid objectForKey:bid];
+                if (!arr) {
+                    arr = [NSMutableArray array];
+                    [byBid setObject:arr forKey:bid];
+                    [bidOrder addObject:bid];
+                }
+                [arr addObject:e];
             }
 
-            // 组2：检测到的页面（点按加入）
-            NSMutableArray *cand = [NSMutableArray array];
-            for (NSString *n in _seen) if (![exSet containsObject:n]) [cand addObject:n];
-            [specs addObject:[self _groupSpec:[NSString stringWithFormat:@"检测到的页面 %lu 个", (unsigned long)cand.count]
-                                       footer:@"在目标页面从屏幕左缘滑一下，其 VC 类名会自动出现在这里，点按即加入排除（子串匹配、大小写不敏感）。"]];
-            NSArray *candF = [self _filter:cand];
-            if (candF.count) {
-                for (NSString *n in candF) [specs addObject:[self _nameSpec:n]];
-            } else {
+            BOOL anyRow = NO;
+            NSString *q = [_searchText lowercaseString];
+            for (NSString *bid in bidOrder) {
+                NSMutableArray *f = [NSMutableArray array];
+                NSUInteger cCnt = 0;
+                for (NSDictionary *e in [byBid objectForKey:bid]) {
+                    NSString *v = [e objectForKey:@"vc"];
+                    if (![v isKindOfClass:[NSString class]] || !v.length) continue;
+                    if (q.length && [[v lowercaseString] rangeOfString:q].location == NSNotFound) continue;
+                    [f addObject:e];
+                    if ([[e objectForKey:@"c"] boolValue]) cCnt++;
+                }
+                if (!f.count) continue;
+                anyRow = YES;
+                NSString *title = [NSString stringWithFormat:@"%@  (%lu%@)",
+                                   [self _displayNameForBid:bid],
+                                   (unsigned long)f.count,
+                                   (cCnt ? [NSString stringWithFormat:@"，%lu 个冲突", (unsigned long)cCnt] : @"")];
+                [specs addObject:[self _groupSpec:title footer:@""]];
+                for (NSDictionary *e in f) [specs addObject:[self _entrySpec:e]];
+            }
+
+            if (!anyRow) {
                 [specs addObject:[self _groupSpec:@""
-                                           footer:(_seen.count ? @"（已全部排除，或无匹配结果）"
+                                           footer:(_seen.count ? @"（无匹配结果）"
                                                                : @"（暂无记录：去目标页面从屏幕左缘滑一下即可）")]];
             }
             _specifiers = specs;
@@ -717,7 +800,7 @@ static NSArray *_obParseVCNames(id raw) {
     return _specifiers;
 }
 
-#pragma mark 勾选与点按
+#pragma mark 勾选 / 冲突标红 / 点按
 
 - (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
     // ⚠️ 不调 super：本环境 PSListController 未实现该方法，super 调用会 unrecognized selector 闪退（崩溃日志实测）。
@@ -727,6 +810,17 @@ static NSArray *_obParseVCNames(id raw) {
         cell.accessoryType = [[self _excludedNames] containsObject:name]
             ? UITableViewCellAccessoryCheckmark
             : UITableViewCellAccessoryNone;
+        // 冲突 = 该页左缘被页面自身占用（会导致左缘异常）→ 标红
+        if ([[spec propertyForKey:@"vcConflict"] boolValue]) {
+            cell.textLabel.textColor = [UIColor systemRedColor];
+        } else {
+            // cell 复用，非冲突行必须显式恢复默认色，否则滚动后会串色
+            if (@available(iOS 13.0, *)) {
+                cell.textLabel.textColor = [UIColor labelColor];
+            } else {
+                cell.textLabel.textColor = [UIColor blackColor];
+            }
+        }
     }
 }
 
@@ -739,7 +833,7 @@ static NSArray *_obParseVCNames(id raw) {
         if ([arr containsObject:name]) [arr removeObject:name];
         else [arr addObject:name];
         [self _saveExcluded:arr];
-        _specifiers = nil;   // 触发重建：两个分组随之刷新
+        _specifiers = nil;   // 触发重建：勾选随之刷新
         [self reloadSpecifiers];
     } else if ([super respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
         [super tableView:tableView didSelectRowAtIndexPath:indexPath];

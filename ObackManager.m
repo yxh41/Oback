@@ -136,32 +136,62 @@ static NSString *OBVCSeeNPath(void) {
 static const NSUInteger kOBVCSeeNMax = 300;   // 上限：防文件无限增长
 static NSMutableSet *__obVCSeeNSet = nil;
 
-static void OBRecordVCClasses(NSArray *names) {
+// 条目格式：@{ @"vc": 类名, @"bid": 来源 App bundle id, @"c": @(是否冲突) }
+// 冲突 = 该页左缘被页面自身占用（起滑点下存在横向可滚 scrollView，会被①让路），
+// 即「会导致左缘异常」的页面，设置页据此标红。
+static NSString *_obVCSeeNKey(NSString *vc, NSString *bid) {
+    return [NSString stringWithFormat:@"%@|%@", vc, bid];
+}
+
+static void OBRecordVCClasses(NSArray *names, BOOL conflict) {
     if (!names.count) return;
     @autoreleasepool {
+        NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
+        if (![bid isKindOfClass:[NSString class]]) bid = @"";
         if (!__obVCSeeNSet) {
-            // 首次：把文件已有内容装入内存 Set，避免已存在类名重复触发写盘
+            __obVCSeeNSet = [[NSMutableSet alloc] init];
             NSArray *existing = [NSArray arrayWithContentsOfFile:OBVCSeeNPath()];
-            __obVCSeeNSet = [[NSMutableSet alloc] initWithArray:
-                             ([existing isKindOfClass:[NSArray class]] ? existing : @[])];
+            if ([existing isKindOfClass:[NSArray class]]) {
+                for (id e in existing) {
+                    if (![e isKindOfClass:[NSDictionary class]]) continue;   // 旧格式(纯字符串)在此迁移时丢弃
+                    NSString *v = [(NSDictionary *)e objectForKey:@"vc"];
+                    NSString *b = [(NSDictionary *)e objectForKey:@"bid"];
+                    if (![v isKindOfClass:[NSString class]] || !v.length) continue;
+                    if (![b isKindOfClass:[NSString class]]) b = @"";
+                    [__obVCSeeNSet addObject:_obVCSeeNKey(v, b)];
+                }
+            }
         }
         NSMutableArray *fresh = [NSMutableArray array];
         for (id n in names) {
             if (![n isKindOfClass:[NSString class]] || ![n length]) continue;
-            if ([__obVCSeeNSet containsObject:n]) continue;
-            [__obVCSeeNSet addObject:n];
-            [fresh addObject:n];
+            NSString *key = _obVCSeeNKey(n, bid);
+            if ([__obVCSeeNSet containsObject:key]) continue;
+            [__obVCSeeNSet addObject:key];
+            [fresh addObject:@{@"vc": n, @"bid": bid, @"c": @(conflict)}];
         }
         if (!fresh.count) return;
         // 多进程各自独立（tweak 注入各 App），以文件为真相源做 read-modify-write
         NSMutableArray *all = [NSMutableArray array];
         NSArray *raw = [NSArray arrayWithContentsOfFile:OBVCSeeNPath()];
-        if ([raw isKindOfClass:[NSArray class]]) [all addObjectsFromArray:raw];
-        for (NSString *n in fresh) if (![all containsObject:n]) [all addObject:n];
+        if ([raw isKindOfClass:[NSArray class]]) {
+            for (id e in raw) {
+                // 只保留新字典格式：旧纯字符串条目(无 App 归属/无冲突标记)在此一次性迁移丢弃，滑一次即可重建
+                if ([e isKindOfClass:[NSDictionary class]]) [all addObject:e];
+            }
+        }
+        [all addObjectsFromArray:fresh];
         if (all.count > kOBVCSeeNMax) {
             [all setArray:[all subarrayWithRange:NSMakeRange(all.count - kOBVCSeeNMax, kOBVCSeeNMax)]];
             [__obVCSeeNSet removeAllObjects];
-            [__obVCSeeNSet addObjectsFromArray:all];
+            for (id e in all) {
+                if (![e isKindOfClass:[NSDictionary class]]) continue;
+                NSString *v = [(NSDictionary *)e objectForKey:@"vc"];
+                NSString *b = [(NSDictionary *)e objectForKey:@"bid"];
+                if (![v isKindOfClass:[NSString class]] || !v.length) continue;
+                if (![b isKindOfClass:[NSString class]]) b = @"";
+                [__obVCSeeNSet addObject:_obVCSeeNKey(v, b)];
+            }
         }
         [all writeToFile:OBVCSeeNPath() atomically:YES];
     }
@@ -169,7 +199,7 @@ static void OBRecordVCClasses(NSArray *names) {
 
 // 记录某 VC 及其父链（parentViewController / presentingViewController）的类名。
 // 记录父链：容器 VC（nav/tab/自定义容器）也会被列出，用户排除整个容器更省力。
-static void OBRecordVCChain(UIViewController *vc) {
+static void OBRecordVCChain(UIViewController *vc, BOOL conflict) {
     if (!vc) return;
     NSMutableArray *names = [NSMutableArray array];
     UIViewController *cur = vc;
@@ -182,7 +212,7 @@ static void OBRecordVCChain(UIViewController *vc) {
         if (nxt == cur) break;
         cur = nxt;
     }
-    OBRecordVCClasses(names);
+    OBRecordVCClasses(names, conflict);
 }
 
 #pragma mark - [P6] 诊断日志宏（编译期收敛）
@@ -1162,24 +1192,25 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
         return NO;
     }
 
-    // [方案A] 记录本次左缘起滑所在页面的 VC 类名（含父链），供设置页「按页排除」子页面点选，
-    // 让用户不必开调试日志、不必 Filza 手抄类名。
-    // ⚠️ 必须放在 ① 横向滚动让路【之前】：带轮播/横滑的页面恰恰是用户最想按页排除的目标，
-    // 若放在 ① 之后，这类页面会在 ① 提前 return NO、永远进不到记录，列表里就永远看不到它们。
-    if (edge == ObackEdgeLeft) {
-        OBRecordVCChain([self topMost:win.rootViewController]);
-    }
-
     // [优化①] 横向滚动优先：触摸点下是横向可滚/分页 scrollView（微信/小红书图片查看器、Safari 图片、地图）
     // 时，边缘返回让路，交还 App 横滑——避免屏幕边缘热区的系统级「边缘优先于滚动」优先级压过横向滚动，
     // 导致图片在边缘附近滑不动或误触发返回。仅判定横向可滚(contentSize.width 明显大于可视宽)，
     // 纵向 list 不受影响（contentSize.width≈可视宽 → 不触发，仍正常返回）。比「排除列表」通用。
-    {
-        UIScrollView *hsv = [self scrollViewAtPoint:loc inView:win];
-        if (hsv && hsv.contentSize.width > hsv.bounds.size.width * 1.05) {
-            OBLog(@"shouldBegin=NO (横向滚动让路: sv=%@ paging=%d)", NSStringFromClass([hsv class]), (int)hsv.pagingEnabled);
-            return NO;
-        }
+    // 该结果同时用作「该页左缘是否被页面自身占用」的判据 → 按页排除列表据此标红（conflict）。
+    UIScrollView *hsv = [self scrollViewAtPoint:loc inView:win];
+    BOOL hsvWins = (hsv && hsv.contentSize.width > hsv.bounds.size.width * 1.05);
+
+    // [方案A] 记录本次左缘起滑所在页面的 VC 类名（含父链）+ 来源 App + 是否冲突，
+    // 供设置页「按页排除」子页面按 App 分组展示、冲突标红、点选排除。
+    // ⚠️ 必须在 ① 的 return【之前】：带轮播/横滑的页面恰恰是用户最想按页排除的目标，
+    // 若放在 ① 之后，这类页面会在 ① 提前 return NO、永远进不到记录；且冲突标记正是取自上面的 hsvWins。
+    if (edge == ObackEdgeLeft) {
+        OBRecordVCChain([self topMost:win.rootViewController], hsvWins);
+    }
+
+    if (hsvWins) {
+        OBLog(@"shouldBegin=NO (横向滚动让路: sv=%@ paging=%d)", NSStringFromClass([hsv class]), (int)hsv.pagingEnabled);
+        return NO;
     }
 
     // 关键修复（朋友圈等自定义容器）：nav 类 pan 直接读其所属 nav（swizzle UINavigationController
