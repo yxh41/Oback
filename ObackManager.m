@@ -1146,11 +1146,33 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
     }
     if (!top) { OBLog(@"shouldBegin=NO (无顶层 VC)"); return NO; }
 
-    // [优化③] 左缘按页排除：顶层 VC 类名命中 leftEdgeExcludedVCs（子串，大小写不敏感）时，
-    // 该页左缘交还页面自身手势（如侧栏/轮播左滑），Oback 不接管；右缘/弹窗不受影响。仅作用于左缘，全局返回模式另算。
-    if (edge == ObackEdgeLeft && [ObackPreferences isLeftEdgeExcludedVC:NSStringFromClass([top class])]) {
-        OBLog(@"shouldBegin=NO (左缘按页排除命中: vc=%@)", NSStringFromClass([top class]));
-        return NO;
+    // [优化③] 左缘按页排除：顶层 VC 及其父链（parentViewController / presentingViewController）类名
+    // 命中 leftEdgeExcludedVCs（子串，大小写不敏感）时，该页左缘交还页面自身手势（如侧栏/轮播左滑），
+    // Oback 不接管；右缘/弹窗不受影响。仅作用于左缘，全局返回模式另算。
+    // 匹配父链：容器 VC（如 nav / tab / 自定义容器）命中即其所有子页一并交还，填表更省力。
+    // 调试日志开启时同时打印 top 类名+完整父链，便于在 oback_debug.log 反查要填的真实类名。
+    if (edge == ObackEdgeLeft) {
+        NSMutableString *vcChain = [NSMutableString string];
+        UIViewController *vc = top;
+        BOOL vcHit = NO;
+        while (vc) {
+            NSString *cn = NSStringFromClass([vc class]);
+            [vcChain appendFormat:@"%@%@", (vcChain.length ? @" -> " : @""), cn];
+            if ([ObackPreferences isLeftEdgeExcludedVC:cn]) vcHit = YES;
+            UIViewController *nxt = vc.parentViewController;
+            if (!nxt) nxt = vc.presentingViewController;
+            vc = nxt;
+        }
+        if (vcHit) {
+            OBLog(@"shouldBegin=NO (左缘按页排除命中: vc=%@)", NSStringFromClass([top class]));
+            return NO;
+        }
+        // [优化③诊断] 无条件打印（OBLog 内部按调试日志开关闸控）：左缘每次起滑都输出 top 类名与父链，
+        // 用户开「调试日志」后在目标页左缘滑一下，Filza 打开 /var/mobile/oback_debug.log 即可复制精确类名填入设置。
+        OBLog(@"[diag-vc] leftEdge top=%@ nav=%@ chain=%@",
+              top ? NSStringFromClass([top class]) : @"nil",
+              nav ? NSStringFromClass([nav class]) : @"nil",
+              vcChain);
     }
 
     // 排除名单（朋友圈等）：不干预，交原生处理，避免我们的 pan 与整屏滚动手势打架、进不了 Began
