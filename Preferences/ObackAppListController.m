@@ -490,7 +490,7 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
-        _titles = @[@"经典", @"发光", @"霓虹", @"流光渐变", @"毛玻璃", @"呼吸", @"液态史莱姆"];
+        _titles = @[@"经典", @"发光", @"霓虹", @"流光渐变", @"毛玻璃", @"呼吸", @"液态液滴"];
         _values = @[@0, @1, @2, @3, @4, @5, @6];
         NSMutableArray *specs = [NSMutableArray array];
 
@@ -501,7 +501,7 @@ static NSString *const kDomain = @"com.zlhkf.oback";
                                                           detail:nil
                                                                cell:PSGroupCell
                                                                edit:nil];
-        [group setProperty:@"选择边缘指示的视觉风格，修改后下一次边缘手势即生效。\n「液态史莱姆」为一坨贴屏幕边缘的蠕动液体：贴边侧完全平直贴在屏幕边上，外侧随拖动鼓起成饱满液滴，轮廓表面带持续流动的波纹（史莱姆/液态金属观感）。"
+        [group setProperty:@"选择边缘指示的视觉风格，修改后下一次边缘手势即生效。\n「液态液滴」为一坨贴屏幕边缘被拉出来的液体：贴边侧平整地压在屏幕边上，随手指拉动向屏内逐渐鼓成饱满液滴（像水珠从边缘渗出来），松开即收回。"
                   forKey:@"footerText"];
         [specs addObject:group];
 

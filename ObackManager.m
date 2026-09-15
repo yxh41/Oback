@@ -22,7 +22,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"slime+watchdog-fix"
+#define OBACK_BUILD_TAG @"slime-D"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -246,26 +246,19 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 // 故单独限脏位移：它主要靠「形变 + 内部流动」而非「平移」表达跟手。
 static CGFloat const kSlimeMaxTravel = 40.0;
 
-// ── 液态史莱姆指示器几何（ObackCapsuleEffectSlime）──
-// 与「叶形」的本质区别（用户实机反馈：「像史莱姆/水流那种流动性动画，底部贴屏幕边缘」）：
-//   ① 贴边侧【完全平直】—— 轮廓的靠边一侧就是屏幕那条边本身，严丝合缝贴着，不做任何回鼓；
-//      叶形是两侧都成弧、两端收尖，贴边侧会鼓出来 → 观感是「一片叶子」，不是「一坨贴在边上的液体」。
-//   ② 外侧由【表面张力曲线】生成 —— 中段饱满鼓起、越靠近两端越快回落，末端以【圆钝】收口
-//      （sin^k 曲线，末端导数为 0 → 圆角，不像叶形那样汇成尖）。
-//   ③ 轮廓叠加【流动波】—— 沿 y 方向传播的正弦微扰 + 随时间自走的相位，
-//      让表面产生「蠕动/流动」的活物感（史莱姆的核心特征，也是叶形完全没有的）。
+// ── 液态液滴指示器几何（ObackCapsuleEffectSlime）──
+// 用户实机口径（两轮反馈）：①「像史莱姆/液体那种，底部贴屏幕边缘」；②「是紧贴边缘，拉出来，不是整个像水一样波动，
+// 我说的是拉出来时的动画」→ 最终定为 B·饱满液滴：从中段向两侧同时长胖、上下对称、圆钝收口；
+// 贴边侧平直不缩；**静止时完全静止**（不叠加任何表面波纹，流动性只由「拉出形变」本身表达）。
 // 坐标系：x = 屏幕横向（向屏内为 +x）；y = 屏幕纵向（沿屏幕边缘延伸）。
-static CGFloat const kSlimeFrameW   = 76.0;   // 包围盒宽（容纳最大鼓出 + 流动波振幅）
+static CGFloat const kSlimeFrameW   = 76.0;   // 包围盒宽（容纳最大鼓出）
 static CGFloat const kSlimeFrameH   = 152.0;  // 包围盒高（沿屏幕边缘的最大展开）
 static CGFloat const kSlimeRootX    = 0.0;    // 贴边侧的 x：0 = 紧贴包围盒边缘（渲染时再贴到屏幕边）
 static CGFloat const kSlimeGrowIn0  = 10.0;   // 起手时向屏内的鼓出（一线薄液体）
-static CGFloat const kSlimeGrowIn1  = 58.0;   // 完全拉出时的鼓出
+static CGFloat const kSlimeGrowIn1  = 58.0;   // 完全拉出时的鼓出（饱满液滴的最大半径）
 static CGFloat const kSlimeHalfH0   = 30.0;   // 起手时的沿边半高
 static CGFloat const kSlimeHalfH1   = 72.0;   // 完全拉出时的沿边半高
-static CGFloat const kSlimeEndPow   = 0.62;   // <1 → 腰部更饱满、末端更快回落（表面张力感）
-static CGFloat const kSlimeWaveAmp  = 3.2;    // 流动波振幅 (pt)：轮廓上的蠕动起伏
-static CGFloat const kSlimeWaveFreq = 2.6;    // 流动波沿 y 的空间频率（每侧约 2.6 个波峰）
-static CGFloat const kSlimeWaveSpeed= 2.4;    // 流动波相位自走速度 (rad/s)：静止时也缓慢流动（活物感）
+static CGFloat const kSlimeEndPow   = 0.62;   // <1 → 腰部更饱满、末端更快回落（表面张力/圆钝收口感）
 
 #pragma mark - 边缘方向指示胶囊（OPPO 风格：跟随手指、带方向箭头）
 
@@ -284,9 +277,8 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
 - (void)stopEffectAnimations;   // 收起时停掉渐变等循环动画，避免与淡出动画冲突/残留
 - (BOOL)isBreathing;            // 供 CADisplayLink 插值判断是否叠加呼吸脉冲
 - (void)setFlowSpeed:(CGFloat)speed;   // 流光跟手：流速联动手指速度（1=正常，>1 更 energetic，<1 更 calm）
-- (BOOL)isSlime;                      // 是否为「液态史莱姆」形态（决定形变方式：路径形变 + 流动波 vs 等比缩放）
-- (void)setSlimeProgress:(CGFloat)p;  // 史莱姆进度：0=刚按下的一线薄液体，1=完全拉出的饱满液体
-- (void)setSlimePhase:(CGFloat)phase; // 流动波相位（由 CADisplayLink 自走，产生持续蠕动的活物感）
+- (BOOL)isSlime;                      // 是否为「液态液滴」形态（决定形变方式：路径形变 vs 等比缩放）
+- (void)setSlimeProgress:(CGFloat)p;  // 液滴进度：0=刚按下的一线薄液体，1=完全拉出的饱满液滴
 @end
 
 @implementation ObackEdgeIndicator {
@@ -294,9 +286,8 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     CAShapeLayer *_chevron;
     CAGradientLayer *_gradientLayer; // 流光特效：渐变填充层（弱引用，由 layer 树持有）
     BOOL _breathing;                // 呼吸特效：在平滑插值里叠加正弦脉冲
-    CAShapeLayer *_body;            // 液体特效：液体本体（自绘路径，随进度形变 + 流动波）
-    BOOL _slime;                    // 液态史莱姆标记（用 body 路径取代 background/cornerRadius 那套圆角矩形假设）
-    CGFloat _slimePhase;            // 流动波相位（rad），由 CADisplayLink 累加 → 轮廓持续蠕动
+    CAShapeLayer *_body;            // 液滴特效：液体本体（自绘路径，随进度形变）
+    BOOL _slime;                    // 液态液滴标记（用 body 路径取代 background/cornerRadius 那套圆角矩形假设）
 }
 
 - (instancetype)initWithEdge:(ObackEdge)edge {
@@ -317,13 +308,12 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
 
         UIColor *glow = [UIColor colorWithRed:0.0 green:0.76 blue:1.0 alpha:1.0]; // 青蓝发光色（发光/霓虹共用）
 
-        // ── 「液态史莱姆」独立分支 ──────────────────────────────────────────────
+        // ── 「液态液滴」独立分支 ──────────────────────────────────────────────
         // 本体是一条自绘的封闭路径，不走上面那套 cornerRadius + backgroundColor 的「圆角矩形」假设。
-        // 与叶形的关键差异：贴边侧完全平直（严丝合缝贴屏幕边）、外侧由表面张力曲线鼓起、
-        // 末端圆钝收口、轮廓叠加随时间自走的流动波 → 一坨会蠕动的液体。
+        // 关键特征：贴边侧完全平直（严丝合缝贴屏幕边）、外侧由表面张力曲线鼓起、
+        // 末端圆钝收口、静止时完全静止（流动性只由「拉出形变」表达，不叠加表面波纹）。
         if (fx == ObackCapsuleEffectSlime) {
             _slime = YES;
-            _slimePhase = 0.0;
             self.frame = CGRectMake(0, 0, kSlimeFrameW, kSlimeFrameH);  // 覆盖 init 里的 56×32 胶囊包围盒
             self.layer.cornerRadius = 0;                              // 抹掉刚铺底的胶囊圆角：轮廓由 _body 决定
             self.backgroundColor = [UIColor clearColor];              // 同上，底色改为 _body.fillColor
@@ -457,19 +447,18 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
 
 - (BOOL)isSlime { return _slime; }
 
-- (void)setSlimePhase:(CGFloat)phase {
-    if (!_slime) return;
-    _slimePhase = phase;
-}
-
-// 液体进度：0 = 刚按下、紧贴屏幕边缘的一线薄液体；1 = 完全拉出的饱满液滴。
+// 液滴进度：0 = 刚按下、紧贴屏幕边缘的一线薄液体；1 = 完全拉出的饱满液滴。
 // 每帧由 CADisplayLink 调用（已在 Manager 侧用一部分 target 做过一次平滑），此处的重心是几何。
 //
-// 轮廓构造（与叶形的本质差异见文件顶部几何常量注释）：
-//   ① 【贴边侧】是一条绝对平直的线段（x = 屏内基线），不动一丝 → 液体牢牢贴在屏幕边缘；
-//   ② 【外侧】由 sin^k 表面张力曲线生成，中段饱满、末端圆钝收口（导数为 0，不像叶形汇成尖）；
-//   ③ 两条侧边（上端、下端）以短直线把外侧两端与贴边侧连上，形成封闭轮廓；
-//   ④ 外侧轮廓叠加【流动波】：沿 y 传播的正弦微扰 + 自走相位 → 表面持续蠕动（史莱姆的活物感）。
+// 轮廓构造（B·饱满液滴方案，用户拍板）：
+//   ① 【贴边侧】是一条绝对平直的线段（x = 屏内基线），不动一丝 → 液体牢牢贴着屏幕边缘；
+//   ② 【外侧】由表面张力曲线 sin(u·π)^k 生成：u 从 0 到 1 时从 0 涨到峰值再回落到 0，
+//      中段（u=0.5）鼓起最多、上下两侧对称、末端导数为 0 → 圆钝收口（不是尖）。
+//      → 结果是一个「从中段向两侧同时长胖」的饱满液滴，像水珠从边缘渗出来。
+//   ③ 上端、下端各以一小段直线把外侧端点连回贴边侧，形成封闭轮廓。
+//   ⚠️ 刻意【不叠加任何表面波纹】：流动性完全由「拉出形变」本身表达。
+//      （早期版本曾加相位自走的流动波，导致静止时也在蠕动 —— 用户明确否掉：
+//        「是紧贴边缘，拉出来……我说的是拉出来时的动画」，故静止时必须完全静止。）
 - (void)setSlimeProgress:(CGFloat)p {
     if (!_slime || !_body) return;
     CGFloat e = p;
@@ -486,22 +475,16 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     // 外侧方向：左缘时向屏内是 +x；右缘时向屏内是 -x
     CGFloat outDir = isLeft ? 1.0 : -1.0;
 
-    // 流动波随进度增强：起手时几乎平滑（一线液体谈不上波纹），拉出后波动明显
-    CGFloat waveAmp = kSlimeWaveAmp * (0.35 + 0.65 * e);
-
-    // 采样构造闭合轮廓。N 越大越平滑；外侧 64 点足以让流动波呈现出连续曲线。
+    // 采样构造闭合轮廓。N 越大越平滑；64 点足以让液滴曲线看不出折线。
     NSInteger N = 64;
     UIBezierPath *path = [UIBezierPath bezierPath];
 
-    // ① 外侧（从下端 u=0 走到上端 u=1）：表面张力曲线 + 流动波
+    // ① 外侧（从下端 u=0 走到上端 u=1）：表面张力曲线，中段鼓起最多、上下对称
     for (NSInteger i = 0; i <= N; i++) {
         CGFloat u = (CGFloat)i / (CGFloat)N;
-        // 表面张力：sin^k，k<1 → 中段饱满、末端快速回落但导数为 0（圆钝收口，不是尖）
+        // 表面张力：sin^k，k<1 → 中段更饱满、末端快速回落到 0 且导数为 0（圆钝收口）
         CGFloat s = pow(sin(M_PI * u), kSlimeEndPow);
-        // 流动波：沿 y 的正弦扰动，相位带 u 偏移 → 波形会沿轮廓「流淌」而不是整体上下晃
-        CGFloat wave = sin(M_PI * kSlimeWaveFreq * u + _slimePhase) * waveAmp;
-        // 波幅在两端收敛到 0（乘 s），保证端点位置稳定、不与侧边接缝错位
-        CGFloat x = baseX + outDir * (gIn * s + wave * s);
+        CGFloat x = baseX + outDir * (gIn * s);
         CGFloat y = cy - halfH + 2.0 * halfH * u;
         CGPoint pt = CGPointMake(x, y);
         if (i == 0) [path moveToPoint:pt];
@@ -513,12 +496,11 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     [path addLineToPoint:CGPointMake(baseX, cy - halfH)];
     [path closePath];
 
-    // 箭头：跟着液体一起「张开」，置于液体鼓出的中段偏内处（不贴在边缘上，否则会被屏幕边裁掉）
+    // 箭头：跟着液滴一起「张开」，置于液滴鼓出的中段（不贴在边缘上，否则会被屏幕边裁掉）
     CGFloat reach = 7.0 + 7.0 * e;                     // 箭头张开的半高
     CGFloat step  = 4.5 + 3.5 * e;                     // 箭头横向步长
     CGFloat dir   = outDir;                            // 箭头指向「向屏内」= 返回方向
-    CGFloat cxRaw = baseX + outDir * (gIn * 0.5);      // 置于液体腰部
-    CGFloat cx    = cxRaw;
+    CGFloat cx    = baseX + outDir * (gIn * 0.5);      // 置于液滴腰部
     UIBezierPath *cp = [UIBezierPath bezierPath];
     [cp moveToPoint:CGPointMake(cx + dir * step, cy - reach)];
     [cp addLineToPoint:CGPointMake(cx - dir * step, cy)];
@@ -595,10 +577,8 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
     CADisplayLink *_indicatorLink; // 胶囊平滑：每帧插值到目标位置（手势中跑，结束即停）
     CGPoint _indicatorTarget;    // 胶囊目标中心（updateIndicator 写入，tick 插值）
     CGFloat _indicatorTargetScale; // 胶囊目标缩放
-    CGFloat _indicatorProgress;        // 液体：当前已呈现的鼓出进度（0=贴边一线，1=饱满液滴）
-    CGFloat _indicatorTargetProgress;  // 液体：目标鼓出进度（updateIndicator 写入，tick 同系数插值）
-    CGFloat _slimePhase;               // 液体：流动波相位（rad，tick 内按时间自走 → 静止时也缓慢蠕动）
-    NSTimeInterval _slimePhaseTS;      // 液体：上一帧时间戳，用于按真实时间推进相位（掉帧也不变速）
+    CGFloat _indicatorProgress;        // 液滴：当前已呈现的鼓出进度（0=贴边一线，1=饱满液滴）
+    CGFloat _indicatorTargetProgress;  // 液滴：目标鼓出进度（updateIndicator 写入，tick 同系数插值）
     CGFloat _flowSpeed;          // 流光跟手：当前平滑流速（1=正常 5.5s 循环，>1 更快更 energetic）
     CGFloat _flowTargetSpeed;    // 流光跟手：目标流速（由手指横向速度映射，手指暂停时缓回 1.0）
     id     _navPopTarget;        // 方案A: 系统原生 nav pop 的私有 target(_UINavigationInteractiveTransition)，
@@ -2505,11 +2485,9 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         [_indicatorLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     }
     _indicatorTarget = ind.center;
-    _indicatorTargetScale = slime ? 1.0 : 0.85;  // 液体不做等比缩放（形变由 setSlimeProgress: 负责）
-    _indicatorProgress = 0.0;                    // 液体：从贴边一线起步
+    _indicatorTargetScale = slime ? 1.0 : 0.85;  // 液滴不做等比缩放（形变由 setSlimeProgress: 负责）
+    _indicatorProgress = 0.0;                    // 液滴：从贴边一线起步
     _indicatorTargetProgress = 0.0;
-    _slimePhase = 0.0;                           // 液体：每轮手势从相位 0 起（波形不跨手势跳变）
-    _slimePhaseTS = 0.0;
     OBLog(@"indicator shown (edge=%@ y=%.0f)", edge == ObackEdgeLeft ? @"左" : @"右", loc.y);
     [UIView animateWithDuration:0.15 delay:0 options:UIViewAnimationOptionCurveEaseOut
                      animations:^{ ind.alpha = 0.9; } completion:nil];
@@ -2612,24 +2590,15 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     sc += (targetScale - sc) * k;
     _indicator.transform = CGAffineTransformMakeScale(sc, sc);
     _indicator.alpha = targetAlpha;
-    // 液体：与位置同一系数插值到目标鼓出进度；流动波相位按真实时间自走 → 轮廓持续蠕动。
-    // 相位自走使液体「活着」：即便手指停在原地不动，表面也在缓缓流淌（史莱姆的核心观感）。
+    // 液滴：与位置同一系数插值到目标鼓出进度。
+    // 差值 <0.002 时跳过重建（省掉每帧 64 点路径构造）——**静止时完全静止**是用户明确要求：
+    // 流动性只由「拉出形变」本身表达，不叠加任何自走的表面波纹（早期版本加了相位自走，被否掉）。
     if ([(ObackEdgeIndicator *)_indicator isSlime]) {
-        // 相位推进：用 CADisplayLink 的真实时间戳算 delta，掉帧/后台暂停都不会导致波形跳变
-        NSTimeInterval now = link.timestamp;
-        if (_slimePhaseTS <= 0.0) _slimePhaseTS = now;      // 首帧只记录基准，不推进
-        CGFloat dt = (CGFloat)(now - _slimePhaseTS);
-        _slimePhaseTS = now;
-        if (dt < 0.0 || dt > 0.25) dt = 0.0;                // 异常间隔（回前台/卡顿）不推进，防波形跳变
-        _slimePhase += (CGFloat)kSlimeWaveSpeed * dt;
-        // 相位环绕，避免长时间累加后浮点精度下降
-        if (_slimePhase > 2.0 * M_PI) _slimePhase -= 2.0 * M_PI;
-
         CGFloat dp = _indicatorTargetProgress - _indicatorProgress;
-        if (fabs(dp) > 0.002) _indicatorProgress += dp * k;
-        // 进度变化或相位在走 → 每帧都要重建路径（液体必须持续蠕动，不能像叶形那样跳过静止帧）
-        [(ObackEdgeIndicator *)_indicator setSlimePhase:_slimePhase];
-        [(ObackEdgeIndicator *)_indicator setSlimeProgress:_indicatorProgress];
+        if (fabs(dp) > 0.002) {
+            _indicatorProgress += dp * k;
+            [(ObackEdgeIndicator *)_indicator setSlimeProgress:_indicatorProgress];
+        }
     }
 }
 
