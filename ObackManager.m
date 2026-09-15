@@ -240,6 +240,25 @@ static void *kObackNavKey = &kObackNavKey;   // 把 pan 所属的 UINavigationCo
 static void *kDiagLastLogKey = &kDiagLastLogKey;  // 双返回诊断：同一 window 日志节流（每 2s 最多打一次手势清单）
 static void *kGlobalPanKey = &kGlobalPanKey;        // 全屏 pan 引用（绑到 window，gestureRecognizerShouldBegin 识别用）
 static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指移动的距离 (pt)
+// 「边缘叶片」自身会随进度横向鼓出(最多 62pt)+纵向张开，若再叠加胶囊那档 110pt 位移会过度夸张，
+// 故单独限脏位移：叶片主要靠「形变」而非「平移」表达跟手。
+static CGFloat const kLeafMaxTravel = 46.0;
+
+// ── 叶形指示器几何（ObackCapsuleEffectLeaf，B·弧边版：两侧都成弧、两端收尖的完整叶片）──
+// 坐标系：x = 屏幕横向（向屏内为 +x），y = 屏幕纵向（沿屏幕边缘延伸）。
+// 轮廓由两条弧合成：外侧 +gIn 大幅鼓向屏内，靠边缘一侧 −gOut 小幅回鼓；两端 u=0/1 处两弧汇合成尖
+// → 得到完整的封闭叶片（而非半个椭圆），静止时贴边的一侧几乎就是屏幕那条边。
+// frame 取「完全拉出」时的最大包围盒，形变全发生在内部，故 center 定位逻辑无需改动。
+static CGFloat const kLeafFrameW   = 80.0;   // 包围盒宽（容纳最大状态的两侧鼓出）
+static CGFloat const kLeafFrameH   = 148.0;  // 包围盒高（沿屏幕边缘的最大展开）
+static CGFloat const kLeafRootX    = 16.0;   // 叶根在包围盒内的 x（贴边一侧留出 gOut 余量）
+static CGFloat const kLeafGrowIn0  = 12.0;   // 起手时向屏内的鼓出（细尖）
+static CGFloat const kLeafGrowIn1  = 62.0;   // 完全拉出时的鼓出
+static CGFloat const kLeafGrowOut0 = 3.0;    // 起手时向屏幕边缘一侧的回鼓
+static CGFloat const kLeafGrowOut1 = 14.0;   // 完全拉出时的回鼓（外侧也成弧 → 两端收尖）
+static CGFloat const kLeafHalfH0   = 32.0;   // 起手时的沿边半高
+static CGFloat const kLeafHalfH1   = 73.0;   // 完全拉出时的沿边半高
+static CGFloat const kLeafWaistPow = 0.78;   // <1 → 腰部饱满、越靠尖端收得越快（柳叶感）
 
 #pragma mark - 边缘方向指示胶囊（OPPO 风格：跟随手指、带方向箭头）
 
@@ -250,6 +269,7 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     ObackCapsuleEffectGradient  = 3,   // 流光：动态渐变填充
     ObackCapsuleEffectFrosted   = 4,   // 毛玻璃：半透明磨砂
     ObackCapsuleEffectBreathing = 5,   // 呼吸：跟随中轻微脉冲
+    ObackCapsuleEffectLeaf      = 6,   // 边缘叶片：从整条屏幕边缘拉起的饱满叶形，随拖动进度鼓出+张开（照 ColorOS/realme UI 实拍）
 };
 
 @interface ObackEdgeIndicator : UIView
@@ -257,6 +277,8 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
 - (void)stopEffectAnimations;   // 收起时停掉渐变等循环动画，避免与淡出动画冲突/残留
 - (BOOL)isBreathing;            // 供 CADisplayLink 插值判断是否叠加呼吸脉冲
 - (void)setFlowSpeed:(CGFloat)speed;   // 流光跟手：流速联动手指速度（1=正常，>1 更 energetic，<1 更 calm）
+- (BOOL)isLeaf;                       // 是否为「边缘叶片」形态（决定形变方式：路径形变 vs 等比缩放）
+- (void)setLeafProgress:(CGFloat)p;   // 叶片进度：0=刚按下的一条细尖，1=完全拉出的饱满叶片
 @end
 
 @implementation ObackEdgeIndicator {
@@ -264,6 +286,8 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     CAShapeLayer *_chevron;
     CAGradientLayer *_gradientLayer; // 流光特效：渐变填充层（弱引用，由 layer 树持有）
     BOOL _breathing;                // 呼吸特效：在平滑插值里叠加正弦脉冲
+    CAShapeLayer *_body;            // 叶形特效：叶片本体（自绘路径，随进度形变）
+    BOOL _leaf;                     // 叶形特效标记（用 body 路径取代 background/cornerRadius 那套圆角矩形假设）
 }
 
 - (instancetype)initWithEdge:(ObackEdge)edge {
@@ -283,6 +307,37 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
         @try { fx = [ObackPreferences capsuleEffect]; } @catch (NSException *e) { fx = ObackCapsuleEffectClassic; }
 
         UIColor *glow = [UIColor colorWithRed:0.0 green:0.76 blue:1.0 alpha:1.0]; // 青蓝发光色（发光/霓虹共用）
+
+        // ── 「边缘叶片」独立分支 ────────────────────────────────────────────────
+        // 本体是一条自绘的封闭式叶形路径（两条弧 + 两端收尖），不走上面那套
+        // cornerRadius + backgroundColor 的「圆角矩形」假设；起手时贴着屏幕边缘只露一条细尖，
+        // 随手指拉出逐步横向鼓出 + 纵向张开（形变而非等比缩放），还原 ColorOS/realme UI 的观感。
+        if (fx == ObackCapsuleEffectLeaf) {
+            _leaf = YES;
+            self.frame = CGRectMake(0, 0, kLeafFrameW, kLeafFrameH);  // 覆盖 init 里的 56×32 胶囊包围盒
+            self.layer.cornerRadius = 0;                              // 抹掉刚铺底的胶囊圆角：轮廓由 _body 决定
+            self.backgroundColor = [UIColor clearColor];              // 同上，底色改为 _body.fillColor
+            self.layer.shadowOpacity = 0;                             // 同上，阴影改挂 _body 并随叶形走 shadowPath
+
+            _body = [CAShapeLayer layer];
+            _body.frame = self.bounds;
+            _body.fillColor = [[UIColor whiteColor] colorWithAlphaComponent:0.92].CGColor;
+            _body.shadowColor = [UIColor blackColor].CGColor;
+            _body.shadowOpacity = 0.16;
+            _body.shadowRadius = 10;
+            _body.shadowOffset = CGSizeZero;
+            [self.layer addSublayer:_body];
+
+            _chevron = [CAShapeLayer layer];
+            _chevron.lineCap = kCALineCapRound;
+            _chevron.lineJoin = kCALineJoinRound;
+            _chevron.strokeColor = [UIColor colorWithWhite:0.32 alpha:1.0].CGColor;   // 淡左向箭头（照片里是浅灰）
+            _chevron.fillColor = nil;
+            [self.layer addSublayer:_chevron];
+
+            [self setLeafProgress:0.0];   // 先摆成贴边细尖，避免 addSublayer 到出帧之间闪一下满叶
+            return self;
+        }
 
         switch (fx) {
             case ObackCapsuleEffectGlow: {           // 发光：彩色外发光
@@ -388,6 +443,63 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
         [self.layer addSublayer:_chevron];
     }
     return self;
+}
+
+- (BOOL)isLeaf { return _leaf; }
+
+// 叶片进度：0 = 刚按下、紧贴屏幕边缘的一条细尖；1 = 完全拉出的饱满叶片。
+// 每帧由 CADisplayLink 调用（已在 Manager 侧用一部分 target 做过一次平滑），此处的重心是几何。
+- (void)setLeafProgress:(CGFloat)p {
+    if (!_leaf || !_body) return;
+    CGFloat e = p;
+    if (e < 0.0) e = 0.0; else if (e > 1.0) e = 1.0;
+    e = e * e * (3.0 - 2.0 * e);                      // smoothstep：起步与收尾都柔，避免线性形变显生硬
+
+    CGFloat gIn   = kLeafGrowIn0  + (kLeafGrowIn1  - kLeafGrowIn0)  * e;   // 向屏内的鼓出
+    CGFloat gOut  = kLeafGrowOut0 + (kLeafGrowOut1 - kLeafGrowOut0) * e;   // 向屏幕边缘一侧的回鼓
+    CGFloat halfH = kLeafHalfH0   + (kLeafHalfH1   - kLeafHalfH0)   * e;   // 沿屏幕边缘的半高
+    BOOL isLeft = (_edge == ObackEdgeLeft);
+    CGFloat cy = kLeafFrameH * 0.5;
+
+    // 采样 ~114 点构造闭合轮廓：两条弧在 u=0/1 处汇合成尖 → 完整封闭的叶片
+    NSInteger N = 56;
+    UIBezierPath *path = [UIBezierPath bezierPath];
+    for (NSInteger pass = 0; pass < 2; pass++) {
+        BOOL inward = (pass == 0);                     // 第 0 趟：向屏内的那条弧（下尖→上尖）；第 1 趟：回鼓弧（上尖→下尖）
+        for (NSInteger j = 0; j <= N; j++) {
+            NSInteger i = inward ? j : (N - j);
+            CGFloat u = (CGFloat)i / (CGFloat)N;
+            CGFloat s = pow(sin(M_PI * u), kLeafWaistPow);   // 0→1→0；幂<1 → 腰部饱满、靠近两端迅速收尖
+            CGFloat y = cy - halfH + 2.0 * halfH * u;
+            CGFloat x = kLeafRootX + (inward ? gIn * s : -gOut * s);
+            if (!isLeft) x = kLeafFrameW - x;          // 右边缘整体镜像
+            CGPoint pt = CGPointMake(x, y);
+            if (pass == 0 && i == 0) [path moveToPoint:pt];
+            else [path addLineToPoint:pt];
+        }
+    }
+    [path closePath];
+
+    // 箭头：跟着叶片一起「张开」，始终落在叶片腰部偏内侧
+    CGFloat reach = 7.0 + 7.0 * e;                     // 箭头张开的半高
+    CGFloat step  = 4.5 + 3.5 * e;                     // 箭头横向步长
+    CGFloat dir   = isLeft ? 1.0 : -1.0;
+    CGFloat cxRaw = kLeafRootX + gIn * 0.5;            // 置于叶片腰部
+    CGFloat cx    = isLeft ? cxRaw : (kLeafFrameW - cxRaw);
+    UIBezierPath *cp = [UIBezierPath bezierPath];
+    [cp moveToPoint:CGPointMake(cx + dir * step, cy - reach)];
+    [cp addLineToPoint:CGPointMake(cx - dir * step, cy)];
+    [cp addLineToPoint:CGPointMake(cx + dir * step, cy + reach)];
+
+    // ⚠️ 必须关掉隐式动画：这里是被 CADisplayLink 逐帧调用的，
+    //    若走 CA 默认的 0.25s 隐式动画，形变会滞后于手指（看起来「跟不上手」）。
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _body.path = path.CGPath;
+    _body.shadowPath = path.CGPath;                    // 阴影跟着轮廓走，而不是一个矩形糊边
+    _chevron.path = cp.CGPath;
+    _chevron.lineWidth = 2.8 + 1.0 * e;
+    [CATransaction commit];
 }
 
 - (void)stopEffectAnimations {
@@ -2249,10 +2361,16 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 
 // 胶囊初始停靠位置：贴住触发边缘、垂直对齐手势起点
 - (CGPoint)indicatorHomeCenterForEdge:(ObackEdge)edge basePoint:(CGPoint)loc window:(UIWindow *)win {
-    CGFloat halfW = 28.0;
-    CGFloat x = (edge == ObackEdgeLeft) ? (halfW - 8.0)
-                                        : (win.bounds.size.width - halfW + 8.0);
-    return CGPointMake(x, loc.y);
+    CGFloat halfW = 28.0;      // 胶囊包围盒半宽
+    CGFloat inset = 8.0;       // 露出屏幕边缘外的部分（贴边感）
+    if ([ObackPreferences capsuleEffect] == ObackCapsuleEffectLeaf) {
+        // 叶片包围盒更宽，且叶根比胶囊更靠边：静止时贴边那条弧几乎正压在屏幕边缘上。
+        halfW = kLeafFrameW * 0.5;
+        inset = 14.0;
+    }
+    CGFloat x = (edge == ObackEdgeLeft) ? (halfW - inset)
+                                        : (win.bounds.size.width - halfW + inset);
+    return CGPointMake(x, loc.y);   // y 跟随起手点 → 纵向跟手
 }
 
 - (void)showIndicatorWithEdge:(ObackEdge)edge atPoint:(CGPoint)loc inWindow:(UIWindow *)win {
@@ -2266,7 +2384,9 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     ObackEdgeIndicator *ind = [[[ObackEdgeIndicator alloc] initWithEdge:edge] autorelease];
     ind.center = [self indicatorHomeCenterForEdge:edge basePoint:loc window:win];
     ind.alpha = 0.0;
-    ind.transform = CGAffineTransformMakeScale(0.85, 0.85);
+    // 叶形：起手就是一条几乎看不见的细尖，靠 setLeafProgress: 随手指「长」出来 → 不再做 0.85 预压
+    BOOL leaf = [ind isLeaf];
+    ind.transform = leaf ? CGAffineTransformIdentity : CGAffineTransformMakeScale(0.85, 0.85);
     [win addSubview:ind];
     [win bringSubviewToFront:ind];
     _indicator = ind;
@@ -2278,7 +2398,9 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         [_indicatorLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     }
     _indicatorTarget = ind.center;
-    _indicatorTargetScale = 0.85;
+    _indicatorTargetScale = leaf ? 1.0 : 0.85;   // 叶片不做等比缩放（形变由 setLeafProgress: 负责）
+    _indicatorProgress = 0.0;                    // 叶形：从贴边细尖起步
+    _indicatorTargetProgress = 0.0;
     OBLog(@"indicator shown (edge=%@ y=%.0f)", edge == ObackEdgeLeft ? @"左" : @"右", loc.y);
     [UIView animateWithDuration:0.15 delay:0 options:UIViewAnimationOptionCurveEaseOut
                      animations:^{ ind.alpha = 0.9; } completion:nil];
@@ -2302,11 +2424,21 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     CGFloat fingerX = [pan locationInView:win].x;
     CGFloat dx = fingerX - _indicatorStartX;
     CGFloat dir = (self.currentEdge == ObackEdgeLeft) ? 1.0 : -1.0;
-    CGFloat travel = MIN(fabs(dx), kIndicatorMaxTravel) * dir;   // 跟随手指，最多移动 kIndicatorMaxTravel
+    CGFloat maxTravel = [(ObackEdgeIndicator *)_indicator isLeaf] ? kLeafMaxTravel : kIndicatorMaxTravel;
+    CGFloat travel = MIN(fabs(dx), maxTravel) * dir;   // 跟随手指；叶形位移更小（它主要靠鼓出表达跟手）
     CGPoint home = [self indicatorHomeCenterForEdge:self.currentEdge basePoint:_indicatorAnchor window:win];
     // 仅更新目标位置/缩放，真正位移由 CADisplayLink(_obIndicatorTick:) 每帧插值 → 平滑不抖
     _indicatorTarget = CGPointMake(home.x + travel, home.y);
-    _indicatorTargetScale = 0.85 + 0.15 * MIN(1.0, _currentPercent / 0.3);
+    if ([(ObackEdgeIndicator *)_indicator isLeaf]) {
+        _indicatorTargetScale = 1.0;   // 叶片不做等比缩放
+        // 叶形用「路径形变」表达进度：0=贴边细尖 → 1=完全拉出的饱满叶片。
+        // 0.45 归一：拉到约一半行程就基本饱满，之后维持 —— 与实拍的 ColorOS 观感一致。
+        // ⚠️ 只写 target，实际形变在 _obIndicatorTick: 里与位置同一系数插值，
+        //    否则「位置滞后、形状先到」会在快滑时脱节。
+        _indicatorTargetProgress = MIN(1.0, _currentPercent / 0.45);
+    } else {
+        _indicatorTargetScale = 0.85 + 0.15 * MIN(1.0, _currentPercent / 0.3);
+    }
     _indicator.alpha = 0.9;
     // [2026-08-01 流光跟手] 手指横向速度 → 流光目标速度：快滑更 energetic、慢拖更 calm
     CGFloat vx = [pan velocityInView:win].x;
@@ -2322,15 +2454,17 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     [(ObackEdgeIndicator *)ind stopEffectAnimations];   // 停渐变等循环动画，避免与下方淡出动画冲突
     if (!ind) return;
     if (committed) {
-        // 提交返回：放大淡出
+        // 提交返回：放大淡出（叶片本身已很大，放大幅度收敛，避免糊成一片白）
+        CGFloat endScale = [(ObackEdgeIndicator *)ind isLeaf] ? 1.12 : 1.35;
         [UIView animateWithDuration:MAX(0.18, p.duration * 0.6) delay:0
                              options:UIViewAnimationOptionCurveEaseIn
                           animations:^{
             ind.alpha = 0.0;
-            ind.transform = CGAffineTransformMakeScale(1.35, 1.35);
+            ind.transform = CGAffineTransformMakeScale(endScale, endScale);
         } completion:^(BOOL f) { [ind removeFromSuperview]; }];
     } else {
         // 取消：弹回边缘并缩小消失
+        CGFloat backScale = [(ObackEdgeIndicator *)ind isLeaf] ? 0.72 : 0.6;
         CGPoint home = [self indicatorHomeCenterForEdge:self.currentEdge
                                               basePoint:_indicatorAnchor window:win];
         [UIView animateWithDuration:MAX(0.22, p.duration * 0.7) delay:0
@@ -2338,7 +2472,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
                           animations:^{
             ind.center = home;
             ind.alpha = 0.0;
-            ind.transform = CGAffineTransformMakeScale(0.6, 0.6);
+            ind.transform = CGAffineTransformMakeScale(backScale, backScale);
         } completion:^(BOOL f) { [ind removeFromSuperview]; }];
     }
 }
@@ -2369,6 +2503,14 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     sc += (targetScale - sc) * k;
     _indicator.transform = CGAffineTransformMakeScale(sc, sc);
     _indicator.alpha = targetAlpha;
+    // 叶形：与位置同一系数插值到目标鼓出进度（差异极小时跳过重建，省掉每帧 114 点的路径构造）
+    if ([(ObackEdgeIndicator *)_indicator isLeaf]) {
+        CGFloat dp = _indicatorTargetProgress - _indicatorProgress;
+        if (fabs(dp) > 0.002) {
+            _indicatorProgress += dp * k;
+            [(ObackEdgeIndicator *)_indicator setLeafProgress:_indicatorProgress];
+        }
+    }
 }
 
 - (void)_stopIndicatorLink {

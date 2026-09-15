@@ -282,13 +282,14 @@ static NSTimeInterval __obMergedPrefsTS = 0;
 }
 
 // 胶囊特效：设置面板「胶囊风格」(key=capsuleEffect)。
-// 取值含义（见 ObackManager.m 的 ObackCapsuleEffect 枚举）：0=经典（默认）/1=发光/2=霓虹/3=流光/4=毛玻璃/5=呼吸。
-// 越界值回落经典(0)。此处用字面量边界(0..5)以避免跨文件依赖该枚举定义。
+// 取值含义（见 ObackManager.m 的 ObackCapsuleEffect 枚举）：0=经典（默认）/1=发光/2=霓虹/3=流光/4=毛玻璃/5=呼吸
+// /6=边缘叶片（从整条屏幕边缘拉起的饱满叶形，随拖动进度鼓出+张开）。
+// 越界值回落经典(0)。此处用字面量边界(0..6)以避免跨文件依赖该枚举定义。
 + (NSInteger)capsuleEffect {
     NSDictionary *d = [self _mergedPrefs];
     id v = [d objectForKey:@"capsuleEffect"];
     NSInteger e = v ? [v integerValue] : 0;   // 未设置 → 默认经典
-    if (e < 0 || e > 5) e = 0;
+    if (e < 0 || e > 6) e = 0;
     return e;
 }
 

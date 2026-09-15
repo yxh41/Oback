@@ -490,8 +490,8 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
-        _titles = @[@"经典", @"发光", @"霓虹", @"流光渐变", @"毛玻璃", @"呼吸"];
-        _values = @[@0, @1, @2, @3, @4, @5];
+        _titles = @[@"经典", @"发光", @"霓虹", @"流光渐变", @"毛玻璃", @"呼吸", @"边缘叶片"];
+        _values = @[@0, @1, @2, @3, @4, @5, @6];
         NSMutableArray *specs = [NSMutableArray array];
 
         PSSpecifier *group = [PSSpecifier preferenceSpecifierNamed:@"胶囊风格"
@@ -501,7 +501,8 @@ static NSString *const kDomain = @"com.zlhkf.oback";
                                                           detail:nil
                                                                cell:PSGroupCell
                                                                edit:nil];
-        [group setProperty:@"选择边缘指示胶囊的视觉风格，修改后下一次边缘手势即生效。" forKey:@"footerText"];
+        [group setProperty:@"选择边缘指示的视觉风格，修改后下一次边缘手势即生效。\n「边缘叶片」为 ColorOS/realme UI 观感：从整条屏幕边缘拉起的饱满叶形，随手指拖动逐渐鼓出、张开。"
+                  forKey:@"footerText"];
         [specs addObject:group];
 
         for (NSUInteger i = 0; i < _titles.count; i++) {
