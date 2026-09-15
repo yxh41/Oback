@@ -98,11 +98,50 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     }
 }
 
+// 系统 App 候选根目录：原生 /Applications，以及 roothide/部分越狱的软链根 /var/jb/Applications。
+// 后者不存在时 contentsOfDirectoryAtPath 返回 nil，_scanAppsAtPath 直接返回空数组，无副作用。
+- (NSArray *)_systemAppPaths {
+    return @[@"/Applications", @"/var/jb/Applications"];
+}
+
+// 「设置」App 兜底条目（com.apple.Preferences）。
+// 背景：Oback 自 2c6b7f1 起在系统「设置」App 内也生效，用户需要在白名单/黑名单/左缘排除/全局返回等
+// 列表里能勾到它。但目录扫描常被两道过滤挡掉，导致搜索「设置」永远搜不到：
+//   ① _homeScreenSet：设置图标被移出主屏（进 App 资源库）时就不在 IconState.plist 里；
+//   ② hasIcon：Preferences.app 的 Info.plist 未必声明 CFBundleIconName/CFBundleIconFiles/
+//      CFBundleIcons（系统 App 图标由 Assets / SpringBoard 提供）。
+// 故扫描不到时手工补一条：保证一定能被搜索到并勾选。图标读不到就无图标显示，不影响勾选与生效。
+- (void)_ensureSettingsAppIn:(NSMutableArray *)apps {
+    for (NSDictionary *a in apps) {
+        if ([[a objectForKey:@"bundleID"] isEqualToString:@"com.apple.Preferences"]) return;
+    }
+    NSString *path = @"/Applications/Preferences.app";
+    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:[path stringByAppendingPathComponent:@"Info.plist"]];
+    NSString *bid = info[@"CFBundleIdentifier"];
+    if (![bid isKindOfClass:[NSString class]] || !bid.length) bid = @"com.apple.Preferences";
+    NSString *name = info[@"CFBundleDisplayName"];
+    if (![name isKindOfClass:[NSString class]] || !name.length) name = @"设置";
+    [apps addObject:@{@"path": path, @"bundleID": bid, @"name": name}];
+}
+
 - (NSDictionary *)_installedApps {
     if (!_allApps) {
         if (!_homeScreenSet) _homeScreenSet = [self _homeScreenBundleIDs];
         NSArray *userApps = [self _scanAppsAtPath:@"/var/containers/Bundle/Application"];
-        NSArray *systemApps = [self _scanAppsAtPath:@"/Applications"];
+        NSMutableArray *systemApps = [NSMutableArray array];
+        NSMutableSet *seen = [NSMutableSet set];
+        for (NSString *base in [self _systemAppPaths]) {
+            for (NSDictionary *app in [self _scanAppsAtPath:base]) {
+                NSString *bid = app[@"bundleID"];
+                if ([bid isKindOfClass:[NSString class]] && bid.length) {
+                    if ([seen containsObject:bid]) continue;
+                    [seen addObject:bid];
+                }
+                [systemApps addObject:app];
+            }
+        }
+        [self _ensureSettingsAppIn:systemApps];
+        [systemApps sortUsingDescriptors:@[[NSSortDescriptor sortDescriptorWithKey:@"name" ascending:YES]]];
         _allApps = @{@"user": userApps, @"system": systemApps};
     }
     return _allApps;
