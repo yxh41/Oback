@@ -98,11 +98,50 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     }
 }
 
+// 系统 App 候选根目录：原生 /Applications，以及 roothide/部分越狱的软链根 /var/jb/Applications。
+// 后者不存在时 contentsOfDirectoryAtPath 返回 nil，_scanAppsAtPath 直接返回空数组，无副作用。
+- (NSArray *)_systemAppPaths {
+    return @[@"/Applications", @"/var/jb/Applications"];
+}
+
+// 「设置」App 兜底条目（com.apple.Preferences）。
+// 背景：Oback 自 2c6b7f1 起在系统「设置」App 内也生效，用户需要在白名单/黑名单/左缘排除/全局返回等
+// 列表里能勾到它。但目录扫描常被两道过滤挡掉，导致搜索「设置」永远搜不到：
+//   ① _homeScreenSet：设置图标被移出主屏（进 App 资源库）时就不在 IconState.plist 里；
+//   ② hasIcon：Preferences.app 的 Info.plist 未必声明 CFBundleIconName/CFBundleIconFiles/
+//      CFBundleIcons（系统 App 图标由 Assets / SpringBoard 提供）。
+// 故扫描不到时手工补一条：保证一定能被搜索到并勾选。图标读不到就无图标显示，不影响勾选与生效。
+- (void)_ensureSettingsAppIn:(NSMutableArray *)apps {
+    for (NSDictionary *a in apps) {
+        if ([[a objectForKey:@"bundleID"] isEqualToString:@"com.apple.Preferences"]) return;
+    }
+    NSString *path = @"/Applications/Preferences.app";
+    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:[path stringByAppendingPathComponent:@"Info.plist"]];
+    NSString *bid = info[@"CFBundleIdentifier"];
+    if (![bid isKindOfClass:[NSString class]] || !bid.length) bid = @"com.apple.Preferences";
+    NSString *name = info[@"CFBundleDisplayName"];
+    if (![name isKindOfClass:[NSString class]] || !name.length) name = @"设置";
+    [apps addObject:@{@"path": path, @"bundleID": bid, @"name": name}];
+}
+
 - (NSDictionary *)_installedApps {
     if (!_allApps) {
         if (!_homeScreenSet) _homeScreenSet = [self _homeScreenBundleIDs];
         NSArray *userApps = [self _scanAppsAtPath:@"/var/containers/Bundle/Application"];
-        NSArray *systemApps = [self _scanAppsAtPath:@"/Applications"];
+        NSMutableArray *systemApps = [NSMutableArray array];
+        NSMutableSet *seen = [NSMutableSet set];
+        for (NSString *base in [self _systemAppPaths]) {
+            for (NSDictionary *app in [self _scanAppsAtPath:base]) {
+                NSString *bid = app[@"bundleID"];
+                if ([bid isKindOfClass:[NSString class]] && bid.length) {
+                    if ([seen containsObject:bid]) continue;
+                    [seen addObject:bid];
+                }
+                [systemApps addObject:app];
+            }
+        }
+        [self _ensureSettingsAppIn:systemApps];
+        [systemApps sortUsingDescriptors:@[[NSSortDescriptor sortDescriptorWithKey:@"name" ascending:YES]]];
         _allApps = @{@"user": userApps, @"system": systemApps};
     }
     return _allApps;
@@ -451,8 +490,8 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
-        _titles = @[@"经典", @"发光", @"霓虹", @"流光渐变", @"毛玻璃", @"呼吸"];
-        _values = @[@0, @1, @2, @3, @4, @5];
+        _titles = @[@"经典", @"发光", @"霓虹", @"流光渐变", @"毛玻璃", @"呼吸", @"液态史莱姆"];
+        _values = @[@0, @1, @2, @3, @4, @5, @6];
         NSMutableArray *specs = [NSMutableArray array];
 
         PSSpecifier *group = [PSSpecifier preferenceSpecifierNamed:@"胶囊风格"
@@ -462,7 +501,8 @@ static NSString *const kDomain = @"com.zlhkf.oback";
                                                           detail:nil
                                                                cell:PSGroupCell
                                                                edit:nil];
-        [group setProperty:@"选择边缘指示胶囊的视觉风格，修改后下一次边缘手势即生效。" forKey:@"footerText"];
+        [group setProperty:@"选择边缘指示的视觉风格，修改后下一次边缘手势即生效。\n「液态史莱姆」为一坨贴屏幕边缘的蠕动液体：贴边侧完全平直贴在屏幕边上，外侧随拖动鼓起成饱满液滴，轮廓表面带持续流动的波纹（史莱姆/液态金属观感）。"
+                  forKey:@"footerText"];
         [specs addObject:group];
 
         for (NSUInteger i = 0; i < _titles.count; i++) {
@@ -556,5 +596,338 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     }
     return self;
 }
+@end
+
+#pragma mark - 左缘·按页排除：VC 类名点选列表（方案A，取代单行文本框）
+
+// 取代原来的单行 PSTextFieldCell：tweak 侧（ObackManager 的 OBRecordVCChain）把左缘遇到的
+// VC 类名写入 /var/mobile/oback_vc_seen.plist；本页列出「检测到的页面」，点按即加入/移出排除，
+// 用户不必开调试日志、不必 Filza 手抄类名，类名多了也能搜索。
+// 沿用 ObackAppListController 已验证稳定的写法：系统原生 PSTitleValueCell + didSelectRow 切换
+// + willDisplayCell 画勾选 + 搜索；⚠️ 绝不自定义 cell 类。
+// 写入走 oback_setGlobalPref（跨 App 真相源）+ suite 兜底，确保 tweak 注入其它 App 读得到。
+
+static NSString *const kOBVCSeeNFile = @"/var/mobile/oback_vc_seen.plist";
+
+// 与 ObackPreferences.isLeftEdgeExcludedVC: 的分隔规则保持一致（逗号/换行 + 去首尾空白）
+static NSArray *_obParseVCNames(id raw) {
+    if ([raw isKindOfClass:[NSArray class]]) {
+        NSMutableArray *o = [NSMutableArray array];
+        for (id e in (NSArray *)raw) {
+            if ([e isKindOfClass:[NSString class]] && [e length]) [o addObject:e];
+        }
+        return o;
+    }
+    if (![raw isKindOfClass:[NSString class]] || ![raw length]) return @[];
+    NSArray *parts = [raw componentsSeparatedByCharactersInSet:
+                      [NSCharacterSet characterSetWithCharactersInString:@",\n"]];
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSString *s in parts) {
+        NSString *t = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (t.length) [out addObject:t];
+    }
+    return out;
+}
+
+@interface ObackVCExcludeListController : PSListController <UISearchResultsUpdating>
+@end
+
+@implementation ObackVCExcludeListController {
+    NSArray *_excluded;    // 已排除的类名（逗号串解析结果）
+    NSArray *_seen;        // tweak 记录到的条目 @{vc,bid,c}（倒序，最近遇到的在前）
+    NSString *_searchText;
+}
+
+- (NSArray *)_excludedNames {
+    id v = oback_globalPrefs()[@"leftEdgeExcludedVCs"];
+    if (!v) {
+        NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+        v = [d objectForKey:@"leftEdgeExcludedVCs"];
+    }
+    return _obParseVCNames(v);
+}
+
+// 读取 tweak 记录：新格式为 @{vc,bid,c} 字典；兼容旧版纯字符串条目（无 App 归属/无冲突标记）。
+- (NSArray *)_seenEntries {
+    NSArray *a = [NSArray arrayWithContentsOfFile:kOBVCSeeNFile];
+    if (![a isKindOfClass:[NSArray class]]) return @[];
+    NSMutableArray *out = [NSMutableArray array];
+    for (id e in a) {
+        if ([e isKindOfClass:[NSDictionary class]]) {
+            NSString *v = [(NSDictionary *)e objectForKey:@"vc"];
+            if ([v isKindOfClass:[NSString class]] && [v length]) { [out addObject:e]; continue; }
+        } else if ([e isKindOfClass:[NSString class]] && [e length]) {
+            [out addObject:@{@"vc": e, @"bid": @"", @"c": @NO}];
+        }
+    }
+    return [[out reverseObjectEnumerator] allObjects];
+}
+
+#pragma mark bid 备注（用户自定义别名，替代全量 App 扫描 —— 零开销）
+
+// 备注存在 vcBidNotes（bid → 备注）。不再扫描 /var/containers/Bundle/Application 下所有 .app 的
+// Info.plist（那要读上百个文件、首次进页面会卡顿），可读性改由用户自己的备注保证。
+- (NSDictionary *)_notes {
+    id v = oback_globalPrefs()[@"vcBidNotes"];
+    if (!v) {
+        NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+        v = [d objectForKey:@"vcBidNotes"];
+    }
+    return [v isKindOfClass:[NSDictionary class]] ? v : @{};
+}
+
+- (void)_saveNotes:(NSDictionary *)n {
+    oback_setGlobalPref(@"vcBidNotes", n);
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    [d setObject:n forKey:@"vcBidNotes"];
+    [d synchronize];
+}
+
+// 分组标题：有备注显示备注，否则回退显示 bid
+- (NSString *)_displayNameForBid:(NSString *)bid {
+    if (![bid isKindOfClass:[NSString class]] || !bid.length) return @"未知来源";
+    NSString *note = [[self _notes] objectForKey:bid];
+    return ([note isKindOfClass:[NSString class]] && note.length) ? note : bid;
+}
+
+// 备注编辑：用 UIAlertController 的文本框（标准 UIKit，必定可用）——
+// 不用 PSTextFieldCell：本环境 PreferenceLoader 的文本框 cell 存在填不进去的问题。
+- (void)_editNoteForBid:(NSString *)bid {
+    NSString *cur = [[self _notes] objectForKey:bid];
+    if (![cur isKindOfClass:[NSString class]]) cur = @"";
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"备注"
+                                                               message:[NSString stringWithFormat:@"给 %@ 起个好认的名字，显示在分组标题上。", bid]
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    [a addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = cur;
+        tf.placeholder = @"例如：拼多多商家版";
+        tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+    }];
+    [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [a addAction:[UIAlertAction actionWithTitle:@"清空" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *act) {
+        NSMutableDictionary *n = [[self _notes] mutableCopy];
+        [n removeObjectForKey:bid];
+        [self _saveNotes:n];
+        _specifiers = nil;
+        [self reloadSpecifiers];
+    }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
+        NSString *t = @"";
+        UITextField *tf = [[a textFields] firstObject];
+        if (tf) {
+            t = [tf.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (!t) t = @"";
+        }
+        NSMutableDictionary *n = [[self _notes] mutableCopy];
+        if (t.length) [n setObject:t forKey:bid]; else [n removeObjectForKey:bid];
+        [self _saveNotes:n];
+        _specifiers = nil;
+        [self reloadSpecifiers];
+    }]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+- (PSSpecifier *)_noteSpec:(NSString *)bid {
+    NSString *note = [[self _notes] objectForKey:bid];
+    BOOL has = ([note isKindOfClass:[NSString class]] && note.length);
+    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:(has ? [NSString stringWithFormat:@"备注：%@", note] : @"＋ 添加备注")
+                                                  target:self
+                                                     set:nil
+                                                     get:nil
+                                                  detail:nil
+                                                     cell:PSTitleValueCell
+                                                     edit:nil];
+    [s setProperty:bid forKey:@"vcBidNote"];
+    return s;
+}
+
+- (void)_saveExcluded:(NSArray *)names {
+    NSString *joined = [names componentsJoinedByString:@","];
+    oback_setGlobalPref(@"leftEdgeExcludedVCs", joined);
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    [d setObject:joined forKey:@"leftEdgeExcludedVCs"];
+    [d synchronize];
+}
+
+#pragma mark 搜索
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    UISearchController *sc = [[UISearchController alloc] initWithSearchResultsController:nil];
+    sc.searchResultsUpdater = self;
+    sc.obscuresBackgroundDuringPresentation = NO;
+    sc.searchBar.placeholder = @"搜索类名";
+    self.navigationItem.searchController = sc;
+    self.navigationItem.hidesSearchBarWhenScrolling = NO;
+    self.definesPresentationContext = YES;
+}
+
+- (void)updateSearchResultsForSearchController:(UISearchController *)sc {
+    NSString *t = [sc.searchBar.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] ?: @"";
+    _searchText = t.length ? t : nil;
+    _specifiers = nil;
+    [self reloadSpecifiers];
+}
+
+#pragma mark 列表构建
+
+// 单行：VC 类名；冲突行加 ⚠️ 并在 willDisplayCell 里标红
+- (PSSpecifier *)_entrySpec:(NSDictionary *)e {
+    NSString *vc = [e objectForKey:@"vc"];
+    if (![vc isKindOfClass:[NSString class]] || !vc.length) vc = @"";
+    BOOL conflict = [[e objectForKey:@"c"] boolValue];
+    NSString *title = conflict ? [vc stringByAppendingString:@"   ⚠️"] : vc;
+    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:title
+                                                  target:self
+                                                     set:nil
+                                                     get:nil
+                                                  detail:nil
+                                                     cell:PSTitleValueCell
+                                                     edit:nil];
+    [s setProperty:vc forKey:@"vcName"];
+    [s setProperty:@(conflict) forKey:@"vcConflict"];
+    return s;
+}
+
+- (PSSpecifier *)_groupSpec:(NSString *)title footer:(NSString *)footer {
+    // ⚠️ 组标题必须用 specifier 的 name（第一个参数），设 label 会导致标题整片空白（与 App 选择器同坑）。
+    PSSpecifier *g = [PSSpecifier preferenceSpecifierNamed:(title ?: @"")
+                                                  target:self
+                                                     set:nil
+                                                     get:nil
+                                                  detail:nil
+                                                     cell:PSGroupCell
+                                                     edit:nil];
+    if (footer.length) [g setProperty:footer forKey:@"footerText"];
+    return g;
+}
+
+- (NSArray *)specifiers {
+    if (!_specifiers) {
+        @try {
+            _excluded = [self _excludedNames];
+            _seen = [self _seenEntries];
+
+            NSUInteger conflictCnt = 0;
+            for (NSDictionary *e in _seen) if ([[e objectForKey:@"c"] boolValue]) conflictCnt++;
+
+            NSMutableArray *specs = [NSMutableArray array];
+            [specs addObject:[self _groupSpec:@"按页排除（按 App 分组）"
+                                       footer:[NSString stringWithFormat:
+                @"在目标页面从屏幕左缘滑一下，其 VC 类名会记录到对应 App 分组下。共 %lu 条记录，"
+                @"其中 %lu 条标红 ⚠️ = 该页左缘被页面自身占用（横向滚动 / 轮播 / 侧栏），"
+                @"会导致左缘异常，优先排除这些。点按即加入/移出排除（子串匹配、大小写不敏感）。",
+                (unsigned long)_seen.count, (unsigned long)conflictCnt]]];
+
+            // 按 bid 分组（组顺序保持「最近遇到」的先后）
+            NSMutableDictionary *byBid = [NSMutableDictionary dictionary];
+            NSMutableArray *bidOrder = [NSMutableArray array];
+            for (NSDictionary *e in _seen) {
+                NSString *bid = [e objectForKey:@"bid"];
+                if (![bid isKindOfClass:[NSString class]]) bid = @"";
+                NSMutableArray *arr = [byBid objectForKey:bid];
+                if (!arr) {
+                    arr = [NSMutableArray array];
+                    [byBid setObject:arr forKey:bid];
+                    [bidOrder addObject:bid];
+                }
+                [arr addObject:e];
+            }
+
+            BOOL anyRow = NO;
+            NSString *q = [_searchText lowercaseString];
+            for (NSString *bid in bidOrder) {
+                NSMutableArray *f = [NSMutableArray array];
+                NSUInteger cCnt = 0;
+                for (NSDictionary *e in [byBid objectForKey:bid]) {
+                    NSString *v = [e objectForKey:@"vc"];
+                    if (![v isKindOfClass:[NSString class]] || !v.length) continue;
+                    if (q.length && [[v lowercaseString] rangeOfString:q].location == NSNotFound) continue;
+                    [f addObject:e];
+                    if ([[e objectForKey:@"c"] boolValue]) cCnt++;
+                }
+                if (!f.count) continue;
+                anyRow = YES;
+                NSString *title = [NSString stringWithFormat:@"%@  (%lu%@)",
+                                   [self _displayNameForBid:bid],
+                                   (unsigned long)f.count,
+                                   (cCnt ? [NSString stringWithFormat:@"，%lu 个冲突", (unsigned long)cCnt] : @"")];
+                [specs addObject:[self _groupSpec:title footer:@""]];
+                [specs addObject:[self _noteSpec:bid]];   // 备注行：点按可给该 App 起别名
+                for (NSDictionary *e in f) [specs addObject:[self _entrySpec:e]];
+            }
+
+            if (!anyRow) {
+                [specs addObject:[self _groupSpec:@""
+                                           footer:(_seen.count ? @"（无匹配结果）"
+                                                               : @"（暂无记录：去目标页面从屏幕左缘滑一下即可）")]];
+            }
+            _specifiers = specs;
+        } @catch (NSException *e) {
+            (void)e;
+            _specifiers = [NSMutableArray array];
+        }
+    }
+    return _specifiers;
+}
+
+#pragma mark 勾选 / 冲突标红 / 点按
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    // ⚠️ 不调 super：本环境 PSListController 未实现该方法，super 调用会 unrecognized selector 闪退（崩溃日志实测）。
+    PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
+    // 备注行（App 别名）：不打勾，次要色
+    if ([spec propertyForKey:@"vcBidNote"]) {
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        if (@available(iOS 13.0, *)) {
+            cell.textLabel.textColor = [UIColor secondaryLabelColor];
+        } else {
+            cell.textLabel.textColor = [UIColor grayColor];
+        }
+        return;
+    }
+    NSString *name = [spec propertyForKey:@"vcName"];
+    if (name.length) {
+        cell.accessoryType = [[self _excludedNames] containsObject:name]
+            ? UITableViewCellAccessoryCheckmark
+            : UITableViewCellAccessoryNone;
+        // 冲突 = 该页左缘被页面自身占用（会导致左缘异常）→ 标红
+        if ([[spec propertyForKey:@"vcConflict"] boolValue]) {
+            cell.textLabel.textColor = [UIColor systemRedColor];
+        } else {
+            // cell 复用，非冲突行必须显式恢复默认色，否则滚动后会串色
+            if (@available(iOS 13.0, *)) {
+                cell.textLabel.textColor = [UIColor labelColor];
+            } else {
+                cell.textLabel.textColor = [UIColor blackColor];
+            }
+        }
+    }
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
+    // 备注行 → 弹输入框编辑 App 别名
+    NSString *bid = [spec propertyForKey:@"vcBidNote"];
+    if (bid) {
+        [self _editNoteForBid:bid];
+        return;
+    }
+    NSString *name = [spec propertyForKey:@"vcName"];
+    if (name.length) {
+        NSMutableArray *arr = [[self _excludedNames] mutableCopy];
+        if ([arr containsObject:name]) [arr removeObject:name];
+        else [arr addObject:name];
+        [self _saveExcluded:arr];
+        _specifiers = nil;   // 触发重建：勾选随之刷新
+        [self reloadSpecifiers];
+    } else if ([super respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
+        [super tableView:tableView didSelectRowAtIndexPath:indexPath];
+    }
+}
+
 @end
 

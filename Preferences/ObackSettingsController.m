@@ -129,12 +129,21 @@ static NSDictionary *_obSliderUnits(void) {
  */
 
 - (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
-    // ⚠️ 绝不调 [super ...] —— PSListController 未实现该方法，调用会 doesNotRecognizeSelector 闪退
+    // ⚠️ 铁律（勿改回）：**绝不**调 [super tableView:willDisplayCell:forRowAtIndexPath:]。
+    // 本环境（roothide / iOS 16.4.1）的 PSListController【未实现】该方法，调用即 doesNotRecognizeSelector 闪退。
+    // 实证：2026-09-14 设置 App 崩溃日志 SIGABRT，栈帧为
+    //   [UIResponder doesNotRecognizeSelector:] ← ___forwarding___ ← ObackSettings ←
+    //   -[UITableView _notifyWillDisplayCell:forIndexPath:]
+    // ⚠️ 且 [super respondsToSelector:@selector(...)] **挡不住这个坑**：给 super 发消息时 receiver 仍是 self，
+    // NSObject 的 respondsToSelector: 从 receiver 的【实际类】（即本子类）开始查找，而本子类自己实现了该方法
+    // → 恒返回 YES → 照样调父类不存在的实现 → 崩。判断父类是否实现须用
+    //   [[self superclass] instancesRespondToSelector:@selector(...)]
+    // （注意：tableView:didSelectRowAtIndexPath: 与之不同——PSListController 确实实现了它，黑白名单页长期稳定即实证。）
     PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
     if (!spec) return;
 
     NSString *key = [spec propertyForKey:@"key"];
-    if (!_obSliderUnits()[key]) return;   // 非滑块行，跳过
+    if (!_obSliderUnits()[key]) return;   // 非滑块行，跳过（不调 super）
 
     // ── 在 PSSliderCell 内部找到 UISlider ──
     UISlider *slider = nil;
@@ -239,7 +248,9 @@ static NSDictionary *_obSliderUnits(void) {
 
 // PSButtonCell 的 action 会打到本控制器（无参调用，安全）。向所有已注入 Oback 的 App 广播一次诊断请求，
 // 各 App 的 ObackManager 收到后把 [Oback-diag] 写入手机本地文件 /var/mobile/oback_diag.log（含前台/后台 App 真实 bid），
-// 无需重启 App，也无需 Mac（设置面板本身被排除注入，无法在此打印自身诊断，故改用跨进程写文件 + 手机上展示）。
+// 无需重启 App，也无需 Mac（诊断行由各 App 自己写文件，不在本面板内联打印，故改用跨进程写文件 + 手机上展示）。
+// 注：2026-09-15 起「设置」App 本身也会注入 Oback（开关 settingsAppEnabled 控制，默认开），
+// 但诊断仍走「各进程自己写文件」的老路子——统一输出源，避免同一次诊断出现两种写入格式。
 - (void)dumpDiagnostics {
     // 先清空上次诊断文件，便于本次拿到干净快照
     NSString *path = @"/var/mobile/oback_diag.log";

@@ -93,16 +93,41 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     return NO;
 }
 
-// 内置排除列表（T4 / 2026-08-23）：QQ(com.tencent.mqq) / TIM(com.tencent.tim)。
-// 这两个 App 用 NTPushPopLib 等自研转场库整体接管交互返回，与 Oback 长期抢手势（瞬返 / 文本选择
-// 手柄拖不动 / 全屏返回失效），为其定制的两套专用子系统已在 T4 从源码移除。此处在「全局+黑名单」
-// 模式下直接判不生效（等价于内置黑名单，用户无需手动加），彻底不注入、零副作用。
-// 保留强制启用能力：切到白名单模式并显式勾选 QQ/TIM 仍会生效（供后续实验，风险自负）。
-+ (BOOL)_isBuiltinExcluded:(NSString *)bid {
+// [已移除 2026-09-15，用户拍板] 内置排除列表（原 T4 / 2026-08-23）：QQ(com.tencent.mqq) / TIM(com.tencent.tim)。
+// 原逻辑：这两个 App 用 NTPushPopLib 等自研转场库整体接管交互返回，与 Oback 长期抢手势（瞬返 /
+// 文本选择手柄拖不动 / 全屏返回失效），为其定制的两套专用子系统已在 T4 从源码移除，此处再在黑名单
+// 模式下对其短路 return NO（等价于内置黑名单）。
+// 移除原因：面板里能勾上却永远不生效，属「看不见的规则」，与「用户自己配置」的设计冲突。
+// 现与其他 App 完全一致，需要规避时请用户自行选用（均对用户可见、可撤销）：
+//   - 整 App 不注入 → 选黑名单程序；
+//   - 左缘交还系统、保留右缘+弹窗 → 选左缘排除程序；
+//   - 返回无动画/瞬切 → 选无动画修复程序（走非交互 pop，正是历史上 QQ/TIM 唯一有效的一条路）；
+//   - 单页左缘冲突 → 左缘·按页排除（VC 类名）。
+
+// 当前进程是否为系统「设置」App。bundle id 大小写在不同版本不固定，故大小写不敏感比较。
+// 精确匹配（不做「点前缀兜底」）：避免误命中设置进程的 extension（如 com.apple.Preferences.xxx）。
++ (BOOL)isSettingsApp {
+    NSString *bid = NSBundle.mainBundle.bundleIdentifier;
     if (!bid.length) return NO;
-    if ([bid caseInsensitiveCompare:@"com.tencent.mqq"] == NSOrderedSame) return YES;
-    if ([bid caseInsensitiveCompare:@"com.tencent.tim"] == NSOrderedSame) return YES;
-    return NO;
+    return [bid caseInsensitiveCompare:@"com.apple.Preferences"] == NSOrderedSame;
+}
+
+// 「设置 App 内生效」熔断键（plist key=settingsAppEnabled，默认开）。
+// ⚠️ 这是**隐藏熔断键，设置面板里没有对应开关**（用户要求面板保持精简）——日常无需关心，
+// 仅当「设置」App 因 Oback 注入出现异常时应急使用。
+// 熔断方式：Filza 编辑 /var/mobile/Library/Preferences/com.zlhkf.oback.plist，把 settingsAppEnabled
+// 置 0 → 约 2 秒（_mergedPrefs TTL）内停止接管手势；上滑杀掉设置 App 重开则彻底不装 hook。
+// 背景：Tweak.xm 的 %ctor 一律跳过 com.apple.* 系统进程（防系统 UI 异常），但用户需要在系统设置里
+// 也能用 Oback 的跟手返回，故对「设置」App 单独开洞，并由此键控制是否真正生效。
+// ⚠️ 直读全局文件、不走 _mergedPrefs / NSUserDefaults：本方法要在 %ctor（dylib 加载早期，
+// NSUserDefaults 尚未就绪）被调用，任何高层 API 都可能在此阶段出问题；dictionaryWithContentsOfFile 是安全的。
++ (BOOL)settingsAppEnabled {
+    NSDictionary *g = [NSDictionary dictionaryWithContentsOfFile:kGlobalPlistPath];
+    if (!g) return YES;                 // 从未写过偏好 → 默认开
+    id v = [g objectForKey:@"settingsAppEnabled"];
+    if (!v) return YES;                 // 未设置 → 默认开
+    if ([v respondsToSelector:@selector(boolValue)]) return [v boolValue];
+    return YES;
 }
 
 // 是否允许当前 App 生效：
@@ -118,8 +143,14 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     id wm = [d objectForKey:@"whitelistMode"];
     BOOL whitelistMode = wm ? [wm boolValue] : NO;   // 未设置 → 默认全局生效（黑名单模式），符合"全局注入"设计
 
-    // 内置排除：黑名单模式下 QQ/TIM 一律不生效（白名单模式仍可显式勾选强制启用）
-    if (!whitelistMode && [self _isBuiltinExcluded:bid]) return NO;
+    // [已移除 2026-09-15] 此处原为 QQ/TIM 内置排除（!whitelistMode && _isBuiltinExcluded → return NO）。
+    // 面板里勾得上却永远不生效属隐形规则，已按用户拍板删除；QQ/TIM 现与其他 App 完全一致，
+    // 需要规避时由用户自行选用黑名单 / 左缘排除 / 无动画修复 / 按页排除（VC 类名）。
+
+    // 「设置」App 例外开关（key=settingsAppEnabled，默认开）：关掉后 2 秒内（_mergedPrefs TTL）
+    // 即从所有入口（start / attachToWindow / linkNav / shouldBegin）停止接管，无需杀设置 App。
+    // 这是注入系统进程的秒级回退通道：万一设置 App 内出现异常，拨掉开关即可恢复原生行为。
+    if ([self isSettingsApp] && ![self settingsAppEnabled]) return NO;
 
     if (whitelistMode) {
         NSArray *white = [d objectForKey:@"whitelistApps"];
@@ -148,6 +179,33 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     NSString *bid = NSBundle.mainBundle.bundleIdentifier;
     if (!bid) return NO;
     return [self _bid:bid matchesList:list];
+}
+
+// [优化③] 左缘按页（VC）排除：在已允许左缘返回的 App 内，命中 leftEdgeExcludedVCs（VC 类名子串，
+// 大小写不敏感）的顶层 VC，该页左缘交还页面自身手势，Oback 不接管（右缘返回 + 弹窗 dismiss 仍由 Oback 提供）。
+// ≠ 按 App 排除(leftEdgeExcludeApps)：按 App 是整 App 不接管左缘；按页是同一 App 内仅个别页面让出左缘。
+// 设置面板 PSTextFieldCell 以逗号/换行分隔字符串写入；兼容数组写入。
++ (BOOL)isLeftEdgeExcludedVC:(NSString *)className {
+    if (!className.length) return NO;
+    NSDictionary *d = [self _mergedPrefs];
+    id raw = [d objectForKey:@"leftEdgeExcludedVCs"];
+    NSMutableArray *list = [NSMutableArray array];
+    if ([raw isKindOfClass:[NSString class]] && [raw length]) {
+        NSArray *parts = [raw componentsSeparatedByCharactersInSet:
+                          [NSCharacterSet characterSetWithCharactersInString:@",\n"]];
+        for (NSString *s in parts) {
+            NSString *t = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (t.length) [list addObject:t];
+        }
+    } else if ([raw isKindOfClass:[NSArray class]]) {
+        for (id e in (NSArray *)raw) if ([e isKindOfClass:[NSString class]] && [e length]) [list addObject:e];
+    }
+    if (!list.count) return NO;
+    NSString *lc = [className lowercaseString];
+    for (NSString *sub in list) {
+        if ([lc containsString:[sub lowercaseString]]) return YES;
+    }
+    return NO;
 }
 
 // 全局返回列表：命中此列表的 App 启用「全屏/任意位置返回」——Oback 左缘 edge pan 不接管
@@ -224,13 +282,14 @@ static NSTimeInterval __obMergedPrefsTS = 0;
 }
 
 // 胶囊特效：设置面板「胶囊风格」(key=capsuleEffect)。
-// 取值含义（见 ObackManager.m 的 ObackCapsuleEffect 枚举）：0=经典（默认）/1=发光/2=霓虹/3=流光/4=毛玻璃/5=呼吸。
-// 越界值回落经典(0)。此处用字面量边界(0..5)以避免跨文件依赖该枚举定义。
+// 取值含义（见 ObackManager.m 的 ObackCapsuleEffect 枚举）：0=经典（默认）/1=发光/2=霓虹/3=流光/4=毛玻璃/5=呼吸
+// /6=液态史莱姆（贴屏幕边缘平直、外侧表面张力鼓起、轮廓带持续流动波的蠕动液体）。
+// 越界值回落经典(0)。此处用字面量边界(0..6)以避免跨文件依赖该枚举定义。
 + (NSInteger)capsuleEffect {
     NSDictionary *d = [self _mergedPrefs];
     id v = [d objectForKey:@"capsuleEffect"];
     NSInteger e = v ? [v integerValue] : 0;   // 未设置 → 默认经典
-    if (e < 0 || e > 5) e = 0;
+    if (e < 0 || e > 6) e = 0;
     return e;
 }
 

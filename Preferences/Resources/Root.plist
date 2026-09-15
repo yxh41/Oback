@@ -206,6 +206,24 @@
 		</dict>
 		<dict>
 			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>在已允许左缘返回的 App 内，把「需要自己用左边缘」的特定页面加进来：命中后该页左缘交还页面自身手势，Oback 不接管；右缘返回与弹窗 dismiss 不受影响。用法：在目标页面从屏幕左缘滑一下，该页 VC 类名会自动出现在下方「选择要排除的页面」列表中，点按即可加入/移出排除（子串匹配、大小写不敏感），无需手抄类名。≠ 选左缘排除程序（整 App）。适合页面内有左滑手势（侧栏 / 轮播 / 画布）与返回冲突的场景。</string>
+			<key>label</key>
+			<string>左缘·按页排除</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSLinkCell</string>
+			<key>detail</key>
+			<string>ObackVCExcludeListController</string>
+			<key>label</key>
+			<string>选择要排除的页面</string>
+			<key>footnote</key>
+			<string>在目标页面从屏幕左缘滑一下，其 VC 类名会自动出现在列表里，点按即可加入/移出排除（子串匹配、大小写不敏感）。无需手抄类名，类名多时可搜索。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
 			<string>PSLinkCell</string>
 			<key>detail</key>
 			<string>ObackGlobalBackListController</string>

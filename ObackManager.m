@@ -14,13 +14,15 @@
 - (void)_obCopyLog;
 - (NSArray<UIWindow *> *)_allVisibleWindows;   // [P3] 集中枚举可见 window，替代 5 处重复实现
 - (void)_obInterruptActiveInteraction;   // [P8] 进后台/自愈看门狗强制收尾进行中交互（防 QQ 快照 watchdog 闪退）
+- (void)_obEnterForeground;              // [2026-09-16 watchdog 修复] 回前台解除后台禁令并补一次链接
+- (void)_linkNavPopGesturesInWindow:(UIWindow *)win;  // 全窗口链接（超时早退/后台早退）
 @property (nonatomic, retain) UIActivityViewController *logActivityVC;  // [v11c] retain 防活动视图控制器提前释放(MRC 陷阱)
 @end
 
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"T4-noqq-t2"
+#define OBACK_BUILD_TAG @"slime+watchdog-fix"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -121,6 +123,100 @@ void OBLog(NSString *fmt, ...) {
     [msg release];
 }
 
+#pragma mark - [方案A] VC 类名记录（供设置页「按页排除」点选，免手抄类名）
+
+// 左缘起滑时把当前页面 VC 及其父链的类名去重写入共享文件，设置页「排除的 VC 类名」子页面
+// 读取该文件列出「检测到的页面」，用户点一下即加入排除——不必开调试日志、不必 Filza 手抄。
+// 写入策略：内存 Set 去重 → 仅【新出现的类名】才 read-modify-write 一次（每个类名基本只写一次），
+// 故即便每次左缘起滑都调用，实际磁盘 IO 次数 ≈ 见过的不同类名个数，开销可忽略。
+static NSString *OBVCSeeNPath(void) {
+    if ([[NSFileManager defaultManager] isWritableFileAtPath:@"/var/mobile"])
+        return @"/var/mobile/oback_vc_seen.plist";
+    NSString *dir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+    return dir ? [dir stringByAppendingPathComponent:@"oback_vc_seen.plist"] : @"/var/mobile/oback_vc_seen.plist";
+}
+static const NSUInteger kOBVCSeeNMax = 300;   // 上限：防文件无限增长
+static NSMutableSet *__obVCSeeNSet = nil;
+
+// 条目格式：@{ @"vc": 类名, @"bid": 来源 App bundle id, @"c": @(是否冲突) }
+// 冲突 = 该页左缘被页面自身占用（起滑点下存在横向可滚 scrollView，会被①让路），
+// 即「会导致左缘异常」的页面，设置页据此标红。
+static NSString *_obVCSeeNKey(NSString *vc, NSString *bid) {
+    return [NSString stringWithFormat:@"%@|%@", vc, bid];
+}
+
+static void OBRecordVCClasses(NSArray *names, BOOL conflict) {
+    if (!names.count) return;
+    @autoreleasepool {
+        NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
+        if (![bid isKindOfClass:[NSString class]]) bid = @"";
+        if (!__obVCSeeNSet) {
+            __obVCSeeNSet = [[NSMutableSet alloc] init];
+            NSArray *existing = [NSArray arrayWithContentsOfFile:OBVCSeeNPath()];
+            if ([existing isKindOfClass:[NSArray class]]) {
+                for (id e in existing) {
+                    if (![e isKindOfClass:[NSDictionary class]]) continue;   // 旧格式(纯字符串)在此迁移时丢弃
+                    NSString *v = [(NSDictionary *)e objectForKey:@"vc"];
+                    NSString *b = [(NSDictionary *)e objectForKey:@"bid"];
+                    if (![v isKindOfClass:[NSString class]] || !v.length) continue;
+                    if (![b isKindOfClass:[NSString class]]) b = @"";
+                    [__obVCSeeNSet addObject:_obVCSeeNKey(v, b)];
+                }
+            }
+        }
+        NSMutableArray *fresh = [NSMutableArray array];
+        for (id n in names) {
+            if (![n isKindOfClass:[NSString class]] || ![n length]) continue;
+            NSString *key = _obVCSeeNKey(n, bid);
+            if ([__obVCSeeNSet containsObject:key]) continue;
+            [__obVCSeeNSet addObject:key];
+            [fresh addObject:@{@"vc": n, @"bid": bid, @"c": @(conflict)}];
+        }
+        if (!fresh.count) return;
+        // 多进程各自独立（tweak 注入各 App），以文件为真相源做 read-modify-write
+        NSMutableArray *all = [NSMutableArray array];
+        NSArray *raw = [NSArray arrayWithContentsOfFile:OBVCSeeNPath()];
+        if ([raw isKindOfClass:[NSArray class]]) {
+            for (id e in raw) {
+                // 只保留新字典格式：旧纯字符串条目(无 App 归属/无冲突标记)在此一次性迁移丢弃，滑一次即可重建
+                if ([e isKindOfClass:[NSDictionary class]]) [all addObject:e];
+            }
+        }
+        [all addObjectsFromArray:fresh];
+        if (all.count > kOBVCSeeNMax) {
+            [all setArray:[all subarrayWithRange:NSMakeRange(all.count - kOBVCSeeNMax, kOBVCSeeNMax)]];
+            [__obVCSeeNSet removeAllObjects];
+            for (id e in all) {
+                if (![e isKindOfClass:[NSDictionary class]]) continue;
+                NSString *v = [(NSDictionary *)e objectForKey:@"vc"];
+                NSString *b = [(NSDictionary *)e objectForKey:@"bid"];
+                if (![v isKindOfClass:[NSString class]] || !v.length) continue;
+                if (![b isKindOfClass:[NSString class]]) b = @"";
+                [__obVCSeeNSet addObject:_obVCSeeNKey(v, b)];
+            }
+        }
+        [all writeToFile:OBVCSeeNPath() atomically:YES];
+    }
+}
+
+// 记录某 VC 及其父链（parentViewController / presentingViewController）的类名。
+// 记录父链：容器 VC（nav/tab/自定义容器）也会被列出，用户排除整个容器更省力。
+static void OBRecordVCChain(UIViewController *vc, BOOL conflict) {
+    if (!vc) return;
+    NSMutableArray *names = [NSMutableArray array];
+    UIViewController *cur = vc;
+    NSUInteger guard = 0;
+    while (cur && guard++ < 20) {   // 深度护栏：防异常父链（循环引用）死循环
+        NSString *cn = NSStringFromClass([cur class]);
+        if (cn.length) [names addObject:cn];
+        UIViewController *nxt = cur.parentViewController;
+        if (!nxt) nxt = cur.presentingViewController;
+        if (nxt == cur) break;
+        cur = nxt;
+    }
+    OBRecordVCClasses(names, conflict);
+}
+
 #pragma mark - [P6] 诊断日志宏（编译期收敛）
 
 // 所有 [diag-*] 诊断日志统一走本宏。当前在 Makefile 定义 OBACK_DIAG=1（真机调试需要），故照常输出；
@@ -146,6 +242,30 @@ static void *kObackNavKey = &kObackNavKey;   // 把 pan 所属的 UINavigationCo
 static void *kDiagLastLogKey = &kDiagLastLogKey;  // 双返回诊断：同一 window 日志节流（每 2s 最多打一次手势清单）
 static void *kGlobalPanKey = &kGlobalPanKey;        // 全屏 pan 引用（绑到 window，gestureRecognizerShouldBegin 识别用）
 static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指移动的距离 (pt)
+// 「液态史莱姆」自身会随进度横向鼓出(最多 58pt)+纵向蠕动张开，若再叠加胶囊那档 110pt 位移会过度夸张，
+// 故单独限脏位移：它主要靠「形变 + 内部流动」而非「平移」表达跟手。
+static CGFloat const kSlimeMaxTravel = 40.0;
+
+// ── 液态史莱姆指示器几何（ObackCapsuleEffectSlime）──
+// 与「叶形」的本质区别（用户实机反馈：「像史莱姆/水流那种流动性动画，底部贴屏幕边缘」）：
+//   ① 贴边侧【完全平直】—— 轮廓的靠边一侧就是屏幕那条边本身，严丝合缝贴着，不做任何回鼓；
+//      叶形是两侧都成弧、两端收尖，贴边侧会鼓出来 → 观感是「一片叶子」，不是「一坨贴在边上的液体」。
+//   ② 外侧由【表面张力曲线】生成 —— 中段饱满鼓起、越靠近两端越快回落，末端以【圆钝】收口
+//      （sin^k 曲线，末端导数为 0 → 圆角，不像叶形那样汇成尖）。
+//   ③ 轮廓叠加【流动波】—— 沿 y 方向传播的正弦微扰 + 随时间自走的相位，
+//      让表面产生「蠕动/流动」的活物感（史莱姆的核心特征，也是叶形完全没有的）。
+// 坐标系：x = 屏幕横向（向屏内为 +x）；y = 屏幕纵向（沿屏幕边缘延伸）。
+static CGFloat const kSlimeFrameW   = 76.0;   // 包围盒宽（容纳最大鼓出 + 流动波振幅）
+static CGFloat const kSlimeFrameH   = 152.0;  // 包围盒高（沿屏幕边缘的最大展开）
+static CGFloat const kSlimeRootX    = 0.0;    // 贴边侧的 x：0 = 紧贴包围盒边缘（渲染时再贴到屏幕边）
+static CGFloat const kSlimeGrowIn0  = 10.0;   // 起手时向屏内的鼓出（一线薄液体）
+static CGFloat const kSlimeGrowIn1  = 58.0;   // 完全拉出时的鼓出
+static CGFloat const kSlimeHalfH0   = 30.0;   // 起手时的沿边半高
+static CGFloat const kSlimeHalfH1   = 72.0;   // 完全拉出时的沿边半高
+static CGFloat const kSlimeEndPow   = 0.62;   // <1 → 腰部更饱满、末端更快回落（表面张力感）
+static CGFloat const kSlimeWaveAmp  = 3.2;    // 流动波振幅 (pt)：轮廓上的蠕动起伏
+static CGFloat const kSlimeWaveFreq = 2.6;    // 流动波沿 y 的空间频率（每侧约 2.6 个波峰）
+static CGFloat const kSlimeWaveSpeed= 2.4;    // 流动波相位自走速度 (rad/s)：静止时也缓慢流动（活物感）
 
 #pragma mark - 边缘方向指示胶囊（OPPO 风格：跟随手指、带方向箭头）
 
@@ -156,6 +276,7 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     ObackCapsuleEffectGradient  = 3,   // 流光：动态渐变填充
     ObackCapsuleEffectFrosted   = 4,   // 毛玻璃：半透明磨砂
     ObackCapsuleEffectBreathing = 5,   // 呼吸：跟随中轻微脉冲
+    ObackCapsuleEffectSlime     = 6,   // 液态史莱姆：贴边平直、外侧表面张力鼓起、轮廓带流动波的蠕动液体（照用户实机描述）
 };
 
 @interface ObackEdgeIndicator : UIView
@@ -163,6 +284,9 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
 - (void)stopEffectAnimations;   // 收起时停掉渐变等循环动画，避免与淡出动画冲突/残留
 - (BOOL)isBreathing;            // 供 CADisplayLink 插值判断是否叠加呼吸脉冲
 - (void)setFlowSpeed:(CGFloat)speed;   // 流光跟手：流速联动手指速度（1=正常，>1 更 energetic，<1 更 calm）
+- (BOOL)isSlime;                      // 是否为「液态史莱姆」形态（决定形变方式：路径形变 + 流动波 vs 等比缩放）
+- (void)setSlimeProgress:(CGFloat)p;  // 史莱姆进度：0=刚按下的一线薄液体，1=完全拉出的饱满液体
+- (void)setSlimePhase:(CGFloat)phase; // 流动波相位（由 CADisplayLink 自走，产生持续蠕动的活物感）
 @end
 
 @implementation ObackEdgeIndicator {
@@ -170,6 +294,9 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     CAShapeLayer *_chevron;
     CAGradientLayer *_gradientLayer; // 流光特效：渐变填充层（弱引用，由 layer 树持有）
     BOOL _breathing;                // 呼吸特效：在平滑插值里叠加正弦脉冲
+    CAShapeLayer *_body;            // 液体特效：液体本体（自绘路径，随进度形变 + 流动波）
+    BOOL _slime;                    // 液态史莱姆标记（用 body 路径取代 background/cornerRadius 那套圆角矩形假设）
+    CGFloat _slimePhase;            // 流动波相位（rad），由 CADisplayLink 累加 → 轮廓持续蠕动
 }
 
 - (instancetype)initWithEdge:(ObackEdge)edge {
@@ -189,6 +316,38 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
         @try { fx = [ObackPreferences capsuleEffect]; } @catch (NSException *e) { fx = ObackCapsuleEffectClassic; }
 
         UIColor *glow = [UIColor colorWithRed:0.0 green:0.76 blue:1.0 alpha:1.0]; // 青蓝发光色（发光/霓虹共用）
+
+        // ── 「液态史莱姆」独立分支 ──────────────────────────────────────────────
+        // 本体是一条自绘的封闭路径，不走上面那套 cornerRadius + backgroundColor 的「圆角矩形」假设。
+        // 与叶形的关键差异：贴边侧完全平直（严丝合缝贴屏幕边）、外侧由表面张力曲线鼓起、
+        // 末端圆钝收口、轮廓叠加随时间自走的流动波 → 一坨会蠕动的液体。
+        if (fx == ObackCapsuleEffectSlime) {
+            _slime = YES;
+            _slimePhase = 0.0;
+            self.frame = CGRectMake(0, 0, kSlimeFrameW, kSlimeFrameH);  // 覆盖 init 里的 56×32 胶囊包围盒
+            self.layer.cornerRadius = 0;                              // 抹掉刚铺底的胶囊圆角：轮廓由 _body 决定
+            self.backgroundColor = [UIColor clearColor];              // 同上，底色改为 _body.fillColor
+            self.layer.shadowOpacity = 0;                             // 同上，阴影改挂 _body 并随液体路径走 shadowPath
+
+            _body = [CAShapeLayer layer];
+            _body.frame = self.bounds;
+            _body.fillColor = [[UIColor whiteColor] colorWithAlphaComponent:0.92].CGColor;
+            _body.shadowColor = [UIColor blackColor].CGColor;
+            _body.shadowOpacity = 0.16;
+            _body.shadowRadius = 10;
+            _body.shadowOffset = CGSizeZero;
+            [self.layer addSublayer:_body];
+
+            _chevron = [CAShapeLayer layer];
+            _chevron.lineCap = kCALineCapRound;
+            _chevron.lineJoin = kCALineJoinRound;
+            _chevron.strokeColor = [UIColor colorWithWhite:0.32 alpha:1.0].CGColor;   // 淡灰左向箭头
+            _chevron.fillColor = nil;
+            [self.layer addSublayer:_chevron];
+
+            [self setSlimeProgress:0.0];   // 先摆成贴边一线，避免 addSublayer 到出帧之间闪一下满液体
+            return self;
+        }
 
         switch (fx) {
             case ObackCapsuleEffectGlow: {           // 发光：彩色外发光
@@ -296,6 +455,86 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     return self;
 }
 
+- (BOOL)isSlime { return _slime; }
+
+- (void)setSlimePhase:(CGFloat)phase {
+    if (!_slime) return;
+    _slimePhase = phase;
+}
+
+// 液体进度：0 = 刚按下、紧贴屏幕边缘的一线薄液体；1 = 完全拉出的饱满液滴。
+// 每帧由 CADisplayLink 调用（已在 Manager 侧用一部分 target 做过一次平滑），此处的重心是几何。
+//
+// 轮廓构造（与叶形的本质差异见文件顶部几何常量注释）：
+//   ① 【贴边侧】是一条绝对平直的线段（x = 屏内基线），不动一丝 → 液体牢牢贴在屏幕边缘；
+//   ② 【外侧】由 sin^k 表面张力曲线生成，中段饱满、末端圆钝收口（导数为 0，不像叶形汇成尖）；
+//   ③ 两条侧边（上端、下端）以短直线把外侧两端与贴边侧连上，形成封闭轮廓；
+//   ④ 外侧轮廓叠加【流动波】：沿 y 传播的正弦微扰 + 自走相位 → 表面持续蠕动（史莱姆的活物感）。
+- (void)setSlimeProgress:(CGFloat)p {
+    if (!_slime || !_body) return;
+    CGFloat e = p;
+    if (e < 0.0) e = 0.0; else if (e > 1.0) e = 1.0;
+    e = e * e * (3.0 - 2.0 * e);                      // smoothstep：起步与收尾都柔，避免线性形变显生硬
+
+    CGFloat gIn   = kSlimeGrowIn0 + (kSlimeGrowIn1 - kSlimeGrowIn0) * e;   // 向屏内的鼓出
+    CGFloat halfH = kSlimeHalfH0  + (kSlimeHalfH1  - kSlimeHalfH0)  * e;   // 沿屏幕边缘的半高
+    BOOL isLeft = (_edge == ObackEdgeLeft);
+    CGFloat cy = kSlimeFrameH * 0.5;
+
+    // 贴边侧在包围盒内的 x（左缘 = kSlimeRootX；右缘镜像到另一侧）
+    CGFloat baseX = isLeft ? kSlimeRootX : (kSlimeFrameW - kSlimeRootX);
+    // 外侧方向：左缘时向屏内是 +x；右缘时向屏内是 -x
+    CGFloat outDir = isLeft ? 1.0 : -1.0;
+
+    // 流动波随进度增强：起手时几乎平滑（一线液体谈不上波纹），拉出后波动明显
+    CGFloat waveAmp = kSlimeWaveAmp * (0.35 + 0.65 * e);
+
+    // 采样构造闭合轮廓。N 越大越平滑；外侧 64 点足以让流动波呈现出连续曲线。
+    NSInteger N = 64;
+    UIBezierPath *path = [UIBezierPath bezierPath];
+
+    // ① 外侧（从下端 u=0 走到上端 u=1）：表面张力曲线 + 流动波
+    for (NSInteger i = 0; i <= N; i++) {
+        CGFloat u = (CGFloat)i / (CGFloat)N;
+        // 表面张力：sin^k，k<1 → 中段饱满、末端快速回落但导数为 0（圆钝收口，不是尖）
+        CGFloat s = pow(sin(M_PI * u), kSlimeEndPow);
+        // 流动波：沿 y 的正弦扰动，相位带 u 偏移 → 波形会沿轮廓「流淌」而不是整体上下晃
+        CGFloat wave = sin(M_PI * kSlimeWaveFreq * u + _slimePhase) * waveAmp;
+        // 波幅在两端收敛到 0（乘 s），保证端点位置稳定、不与侧边接缝错位
+        CGFloat x = baseX + outDir * (gIn * s + wave * s);
+        CGFloat y = cy - halfH + 2.0 * halfH * u;
+        CGPoint pt = CGPointMake(x, y);
+        if (i == 0) [path moveToPoint:pt];
+        else [path addLineToPoint:pt];
+    }
+    // ② 上端 → 贴边侧的上端点（平直侧边的收口）
+    [path addLineToPoint:CGPointMake(baseX, cy + halfH)];
+    // ③ 贴边侧：一条绝对平直的线，严丝合缝贴屏幕边缘
+    [path addLineToPoint:CGPointMake(baseX, cy - halfH)];
+    [path closePath];
+
+    // 箭头：跟着液体一起「张开」，置于液体鼓出的中段偏内处（不贴在边缘上，否则会被屏幕边裁掉）
+    CGFloat reach = 7.0 + 7.0 * e;                     // 箭头张开的半高
+    CGFloat step  = 4.5 + 3.5 * e;                     // 箭头横向步长
+    CGFloat dir   = outDir;                            // 箭头指向「向屏内」= 返回方向
+    CGFloat cxRaw = baseX + outDir * (gIn * 0.5);      // 置于液体腰部
+    CGFloat cx    = cxRaw;
+    UIBezierPath *cp = [UIBezierPath bezierPath];
+    [cp moveToPoint:CGPointMake(cx + dir * step, cy - reach)];
+    [cp addLineToPoint:CGPointMake(cx - dir * step, cy)];
+    [cp addLineToPoint:CGPointMake(cx + dir * step, cy + reach)];
+
+    // ⚠️ 必须关掉隐式动画：这里是被 CADisplayLink 逐帧调用的，
+    //    若走 CA 默认的 0.25s 隐式动画，形变会滞后于手指（看起来「跟不上手」）。
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _body.path = path.CGPath;
+    _body.shadowPath = path.CGPath;                    // 阴影跟着轮廓走，而不是一个矩形糊边
+    _chevron.path = cp.CGPath;
+    _chevron.lineWidth = 2.8 + 1.0 * e;
+    [CATransaction commit];
+}
+
 - (void)stopEffectAnimations {
     // 停掉流光循环动画（冻结在当前帧），保留渐变层本身，
     // 避免收起淡出时胶囊「丢失身体」只剩箭头。层随视图 dealloc 自动释放。
@@ -356,6 +595,10 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
     CADisplayLink *_indicatorLink; // 胶囊平滑：每帧插值到目标位置（手势中跑，结束即停）
     CGPoint _indicatorTarget;    // 胶囊目标中心（updateIndicator 写入，tick 插值）
     CGFloat _indicatorTargetScale; // 胶囊目标缩放
+    CGFloat _indicatorProgress;        // 液体：当前已呈现的鼓出进度（0=贴边一线，1=饱满液滴）
+    CGFloat _indicatorTargetProgress;  // 液体：目标鼓出进度（updateIndicator 写入，tick 同系数插值）
+    CGFloat _slimePhase;               // 液体：流动波相位（rad，tick 内按时间自走 → 静止时也缓慢蠕动）
+    NSTimeInterval _slimePhaseTS;      // 液体：上一帧时间戳，用于按真实时间推进相位（掉帧也不变速）
     CGFloat _flowSpeed;          // 流光跟手：当前平滑流速（1=正常 5.5s 循环，>1 更快更 energetic）
     CGFloat _flowTargetSpeed;    // 流光跟手：目标流速（由手指横向速度映射，手指暂停时缓回 1.0）
     id     _navPopTarget;        // 方案A: 系统原生 nav pop 的私有 target(_UINavigationInteractiveTransition)，
@@ -369,6 +612,14 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
     // [2026-08-22 P9] interacting 置位时刻：用于「下次触摸自愈」——若上一轮交互卡死(转场未收尾)，
     // 新手势的 shouldBegin 不再无条件 return NO，而是超时后强制收尾并放行，杜绝返回永久失效。
     NSTimeInterval _interactingSince;
+    // [2026-09-16 watchdog 修复] 后台标志：进后台(UIApplicationDidEnterBackgroundNotification)置 YES，
+    // 回前台(UIApplicationWillEnterForegroundNotification)置 NO。
+    // 置 YES 期间**禁止一切全树遍历/链接**（_linkNavPopGesturesInWindow 入口早退 + swizzle 的
+    // viewDidAppear/viewDidLayoutSubviews 也不触发链接）——因后台快照前系统会强制 layout，此时再做
+    // 视图树遍历 + requireGestureRecognizerToFail: 仲裁图加边，会与快照的视图遍历争抢 UIKit 内部锁，
+    // 导致主线程自旋等待、时钟烧光 10s 被 scene-update watchdog 强杀（设置 App com.apple.Preferences
+    // 开启注入后实测：崩溃报告 0x8BADF00D，应用 CPU 仅 0.218s / 0% 但时钟 10s）。
+    BOOL _inBackground;
     // 注：不再用单 ivar _globalPan 存引用（多 window 会被覆盖成孤儿 pan → 漏进边缘分支访问 pan.edges 崩）；
     // 改用关联对象标记 kGlobalPanKey 识别全屏 pan（见 gestureRecognizerShouldBegin: 与 attachToWindow:）
 }
@@ -621,9 +872,18 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
                                                object:nil];
     // [P8] 进后台强制收尾进行中交互：QQ 切后台时系统做场景快照，若 Oback 使其视图层卡在转场中
     // 会让快照等不到 settle → 10s 0x8BADF00D watchdog 闪退。进后台即收尾使视图静止，快照可 settle。
+    // [2026-09-16 watchdog 修复] 同时置 _inBackground 标志：后台期间禁止一切全树遍历/链接
+    // （见 _linkNavPopGesturesInWindow 入口早退）。快照前系统会强制 layout → 触发 swizzle 的
+    // viewDidAppear/viewDidLayoutSubviews → 若不拦，设置 App 这类超大视图树会在此刻做三趟遍历 +
+    // 海量 requireGestureRecognizerToFail:，与快照争抢 UIKit 锁 → 主线程自旋 → 时钟烧光被 watchdog 杀。
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(_obInterruptActiveInteraction)
                                                  name:UIApplicationDidEnterBackgroundNotification
+                                               object:nil];
+    // 回前台：解除后台禁令，恢复正常的链接时机（下次 nav 出现/窗口变 key 时重新链接）
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(_obEnterForeground)
+                                                 name:UIApplicationWillEnterForegroundNotification
                                                object:nil];
 }
 
@@ -733,15 +993,40 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
 // T2 去重：edge / scrollPan / pan 三个视图树枚举器同构（深度护栏 + subviews 递归），
 // 统一为泛型 _enumerateGestureViewsIn:depth:predicate:emit:，下方三个公开方法仅提供各自的过滤谓词与类型转换。
 // 深度护栏(>40 防爆栈)与递归骨架只在一处维护。
+//
+// [2026-09-16 watchdog 修复] 新增**节点预算** kOBEnumMaxNodes：
+// 背景：设置 App(com.apple.Preferences) 开启注入后出现 scene-update watchdog 强杀(时钟 10s 但应用 CPU 仅 0.218s
+// → 主线程阻塞而非计算)。根因是 _linkNavPopGesturesInWindow 对**整棵窗口视图树**连做三趟遍历
+// (edge / scrollPan / pan)，且每趟对每个 scrollView 调 requireGestureRecognizerToFail: 改 UIKit 仲裁图。
+// 设置 App 视图树是系统里最庞大的之一(每页数十 cell + iOS16 搜索索引层)，三趟遍历 + 海量仲裁图加边
+// 与「后台快照前的强制 layout」争抢 UIKit 内部锁 → 主线程自旋等待 → 时钟烧光被 watchdog 杀。
+// 预算上限保证单趟遍历的节点数有界：超出即停止递归(仅放弃该窗口尾部深子树的手势链接，
+// 而我们的 pan 已挂在 window / nav.view 上，功能不依赖这些尾部节点)。普通 App 视图树远小于该上限，
+// 行为零变化；仅超大视图树(设置 App / 复杂 iPad 分栏)被截断，避免遍历失控。
+static const NSUInteger kOBEnumMaxNodes = 4000;
+
 - (void)_enumerateGestureViewsIn:(UIView *)view depth:(NSUInteger)depth
 			       predicate:(BOOL(^)(UIView *v, UIGestureRecognizer *g))pred
 			           emit:(void(^)(UIGestureRecognizer *g))emit {
+	[self _enumerateGestureViewsIn:view depth:depth predicate:pred emit:emit budget:NULL];
+}
+
+// 带共享预算的重载：budget 指向跨递归共享的剩余节点数（NULL = 不限额，兼容旧调用点）。
+// 三个公开枚举器各建一个预算桶，保证「三趟遍历」各自有界且互不干扰。
+- (void)_enumerateGestureViewsIn:(UIView *)view depth:(NSUInteger)depth
+			       predicate:(BOOL(^)(UIView *v, UIGestureRecognizer *g))pred
+			           emit:(void(^)(UIGestureRecognizer *g))emit
+			          budget:(NSUInteger *)budget {
 	if (!view || !emit || depth > 40) return;
+	if (budget) {
+		if (*budget == 0) return;
+		(*budget)--;
+	}
 	for (UIGestureRecognizer *g in view.gestureRecognizers) {
 		if (pred(view, g)) emit(g);
 	}
 	for (UIView *sub in view.subviews)
-		[self _enumerateGestureViewsIn:sub depth:depth + 1 predicate:pred emit:emit];
+		[self _enumerateGestureViewsIn:sub depth:depth + 1 predicate:pred emit:emit budget:budget];
 }
 
 // 递归收集窗口视图树里所有 UIScreenEdgePanGestureRecognizer（含 App/插件自定义的左边缘返回手势）。
@@ -749,11 +1034,13 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
 // 在链接处通过 g.delegate == self 跳过自身（避免 requireGestureRecognizerToFail 自引用），无需在此排除。
 - (void)_enumerateEdgeGesturesInView:(UIView *)view depth:(NSUInteger)depth
 			                               block:(void(^)(UIScreenEdgePanGestureRecognizer *g))block {
+	NSUInteger budget = kOBEnumMaxNodes;
 	[self _enumerateGestureViewsIn:view depth:depth
 			                 predicate:^BOOL(UIView *v, UIGestureRecognizer *g){
 			                     return [g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]];
 			                 }
-			                     emit:^(UIGestureRecognizer *g){ block((UIScreenEdgePanGestureRecognizer *)g); }];
+			                     emit:^(UIGestureRecognizer *g){ block((UIScreenEdgePanGestureRecognizer *)g); }
+			                  budget:&budget];
 }
 
 // 递归收集窗口视图树里所有 UIScrollView 的 pan 手势（横向 + 纵向皆含）。
@@ -764,22 +1051,26 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
 // 从中间滑动时 ourPan 本就不 begin → 放行给滚动，互不干扰。完全匹配 OPPO 行为（极端边缘=返回）。
 - (void)_enumerateScrollPansInView:(UIView *)view depth:(NSUInteger)depth
 			                              block:(void(^)(UIPanGestureRecognizer *g))block {
+	NSUInteger budget = kOBEnumMaxNodes;
 	[self _enumerateGestureViewsIn:view depth:depth
 			                 predicate:^BOOL(UIView *v, UIGestureRecognizer *g){
 			                     return [v isKindOfClass:[UIScrollView class]] && g == ((UIScrollView *)v).panGestureRecognizer;
 			                 }
-			                     emit:^(UIGestureRecognizer *g){ block((UIPanGestureRecognizer *)g); }];
+			                     emit:^(UIGestureRecognizer *g){ block((UIPanGestureRecognizer *)g); }
+			                  budget:&budget];
 }
 
 // 收集窗口视图树里所有 UIPanGestureRecognizer（含 plain / 屏幕边缘 / 滚动），用于让"对手手势"
 // 失败于我们的右缘 pan（Oback 独占右缘返回）。排除我们自己的 pan（delegate==self）。
 - (void)_enumeratePansInView:(UIView *)view depth:(NSUInteger)depth
 			                        block:(void(^)(UIPanGestureRecognizer *g))block {
+	NSUInteger budget = kOBEnumMaxNodes;
 	[self _enumerateGestureViewsIn:view depth:depth
 			                 predicate:^BOOL(UIView *v, UIGestureRecognizer *g){
 			                     return [g isKindOfClass:[UIPanGestureRecognizer class]];
 			                 }
-			                     emit:^(UIGestureRecognizer *g){ block((UIPanGestureRecognizer *)g); }];
+			                     emit:^(UIGestureRecognizer *g){ block((UIPanGestureRecognizer *)g); }
+			                  budget:&budget];
 }
 
 // 从 pan 解析出真正的 UIWindow：nav pop 的边缘 pan 挂在 nav.view 上（pan.view 是 UIView 非 window），
@@ -844,10 +1135,17 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
         OBLog(@"linkNav: SKIP（isAllowed=NO, bid=%@）", NSBundle.mainBundle.bundleIdentifier);
         return;
     }
-    // 性能：同一 window 500ms 内不重复全树遍历（windowBecameKey / 已挂载重链可能密集触发）
+    // [2026-09-16 watchdog 修复①] 后台一律不遍历：后台快照前系统强制 layout，此时做三趟视图树遍历 +
+    // 海量 requireGestureRecognizerToFail: 会与快照的视图遍历争抢 UIKit 内部锁 → 主线程自旋等待、
+    // 时钟烧光 10s 被 scene-update watchdog 强杀（设置 App 实测 CPU 0.218s 但时钟 10s）。
+    // 链接是「持久依赖」：后台不链接不影响已建立的关系，回前台时 _obEnterForeground 会补一次。
+    if (_inBackground) return;
+    // 性能：同一 window 1.5s 内不重复全树遍历（windowBecameKey / 已挂载重链可能密集触发）。
+    // [2026-09-16 watchdog 修复②] 由 0.5s 提到 1.5s：链接是持久关系，不必高频重扫；
+    // 超大视图树(设置 App)在快速连续 push/pop 时曾被反复触发，是本次崩溃的放大因素。
     static NSTimeInterval __lastLinkTS = 0;
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-    if (now - __lastLinkTS < 0.5) return;
+    if (now - __lastLinkTS < 1.5) return;
     __lastLinkTS = now;
     NSArray *pans = objc_getAssociatedObject(win, kPanKey);
     if (![pans isKindOfClass:[NSArray class]] || pans.count == 0) {
@@ -1098,6 +1396,27 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
         return NO;
     }
 
+    // [优化①] 横向滚动优先：触摸点下是横向可滚/分页 scrollView（微信/小红书图片查看器、Safari 图片、地图）
+    // 时，边缘返回让路，交还 App 横滑——避免屏幕边缘热区的系统级「边缘优先于滚动」优先级压过横向滚动，
+    // 导致图片在边缘附近滑不动或误触发返回。仅判定横向可滚(contentSize.width 明显大于可视宽)，
+    // 纵向 list 不受影响（contentSize.width≈可视宽 → 不触发，仍正常返回）。比「排除列表」通用。
+    // 该结果同时用作「该页左缘是否被页面自身占用」的判据 → 按页排除列表据此标红（conflict）。
+    UIScrollView *hsv = [self scrollViewAtPoint:loc inView:win];
+    BOOL hsvWins = (hsv && hsv.contentSize.width > hsv.bounds.size.width * 1.05);
+
+    // [方案A] 记录本次左缘起滑所在页面的 VC 类名（含父链）+ 来源 App + 是否冲突，
+    // 供设置页「按页排除」子页面按 App 分组展示、冲突标红、点选排除。
+    // ⚠️ 必须在 ① 的 return【之前】：带轮播/横滑的页面恰恰是用户最想按页排除的目标，
+    // 若放在 ① 之后，这类页面会在 ① 提前 return NO、永远进不到记录；且冲突标记正是取自上面的 hsvWins。
+    if (edge == ObackEdgeLeft) {
+        OBRecordVCChain([self topMost:win.rootViewController], hsvWins);
+    }
+
+    if (hsvWins) {
+        OBLog(@"shouldBegin=NO (横向滚动让路: sv=%@ paging=%d)", NSStringFromClass([hsv class]), (int)hsv.pagingEnabled);
+        return NO;
+    }
+
     // 关键修复（朋友圈等自定义容器）：nav 类 pan 直接读其所属 nav（swizzle UINavigationController
     // 的 viewDidAppear 时已把所属 nav 绑到 pan 上），不再依赖 win.rootViewController 标准链枚举——
     // 微信朋友圈的 nav 不在 childViewControllers 标准链上，旧逻辑靠 topMost 枚举永远解析不到 → 无返回。
@@ -1133,6 +1452,35 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
         if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
     }
     if (!top) { OBLog(@"shouldBegin=NO (无顶层 VC)"); return NO; }
+
+    // [优化③] 左缘按页排除：顶层 VC 及其父链（parentViewController / presentingViewController）类名
+    // 命中 leftEdgeExcludedVCs（子串，大小写不敏感）时，该页左缘交还页面自身手势（如侧栏/轮播左滑），
+    // Oback 不接管；右缘/弹窗不受影响。仅作用于左缘，全局返回模式另算。
+    // 匹配父链：容器 VC（如 nav / tab / 自定义容器）命中即其所有子页一并交还，填表更省力。
+    // 调试日志开启时同时打印 top 类名+完整父链，便于在 oback_debug.log 反查要填的真实类名。
+    if (edge == ObackEdgeLeft) {
+        NSMutableString *vcChain = [NSMutableString string];
+        UIViewController *vc = top;
+        BOOL vcHit = NO;
+        while (vc) {
+            NSString *cn = NSStringFromClass([vc class]);
+            [vcChain appendFormat:@"%@%@", (vcChain.length ? @" -> " : @""), cn];
+            if ([ObackPreferences isLeftEdgeExcludedVC:cn]) vcHit = YES;
+            UIViewController *nxt = vc.parentViewController;
+            if (!nxt) nxt = vc.presentingViewController;
+            vc = nxt;
+        }
+        if (vcHit) {
+            OBLog(@"shouldBegin=NO (左缘按页排除命中: vc=%@)", NSStringFromClass([top class]));
+            return NO;
+        }
+        // [优化③诊断] 无条件打印（OBLog 内部按调试日志开关闸控）：左缘每次起滑都输出 top 类名与父链，
+        // 用户开「调试日志」后在目标页左缘滑一下，Filza 打开 /var/mobile/oback_debug.log 即可复制精确类名填入设置。
+        OBLog(@"[diag-vc] leftEdge top=%@ nav=%@ chain=%@",
+              top ? NSStringFromClass([top class]) : @"nil",
+              nav ? NSStringFromClass([nav class]) : @"nil",
+              vcChain);
+    }
 
     // 排除名单（朋友圈等）：不干预，交原生处理，避免我们的 pan 与整屏滚动手势打架、进不了 Began
     if ([self _isExcludedViewController:top]) {
@@ -1292,7 +1640,13 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
               (unsigned long)nav.viewControllers.count);
         return YES;
     }
-    return NO;  // 无 nav pop：不接管，交还（modal dismiss 由 Oback 右缘提供）
+    if (top.presentingViewController != nil) {
+        // [优化②] 全局返回也接管弹窗 dismiss：勾了全局返回的 App，弹窗页全屏横滑也能返回
+        // （复用 handleGlobalPan→beginTransition→triggerTransitionInWindow 的 modal dismiss 链路）。
+        OBLog(@"globalShouldBegin=YES (loc.x=%.1f modal dismiss)", loc.x);
+        return YES;
+    }
+    return NO;  // 无 nav pop 且无 modal：不接管，交还
 }
 
 // 全屏 pan 处理：Began 仅记录起点、不驱动；Changed 首次有效位移判定方向——
@@ -1407,6 +1761,9 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
 // 后台场景快照(UIApplication _performSnapshotsWithAction)等不到 settle → 10s 看门狗强杀。
 // 进后台/失活或前台自愈看门狗触发时调用：主动收尾一切进行中交互，使视图层立即静止 → 快照可 settle。
 - (void)_obInterruptActiveInteraction {
+    // [2026-09-16 watchdog 修复] 置后台标志：本方法由 UIApplicationDidEnterBackgroundNotification 驱动，
+    // 置位后 _linkNavPopGesturesInWindow 全树遍历入口一律早退（防与后台快照争 UIKit 锁）。
+    _inBackground = YES;
     if (self.interacting) {
         OBLog(@"[P8] 强制收尾进行中交互 interacting=YES（防快照 watchdog 闪退）");
     }
@@ -1422,6 +1779,16 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
     _currentPercent = 0;
     _transitionTriggered = NO;
     [self dismissIndicatorSafety];              // 收起胶囊（interacting 已置 NO，会执行）
+}
+
+// [2026-09-16 watchdog 修复] 回前台：解除后台禁令。
+// 同时补一次链接（后台期间新出现的 nav/scrollView 可能尚未被链接），时机安全——回前台时不做快照。
+- (void)_obEnterForeground {
+    if (!_inBackground) return;
+    _inBackground = NO;
+    OBLog(@"[watchdog-fix] 回前台，解除后台禁令");
+    UIWindow *win = [self currentKeyWindow];
+    if (win) [self _linkNavPopGesturesInWindow:win];
 }
 
 - (void)beginTransition:(UIPanGestureRecognizer *)pan {
@@ -2099,10 +2466,18 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 
 // 胶囊初始停靠位置：贴住触发边缘、垂直对齐手势起点
 - (CGPoint)indicatorHomeCenterForEdge:(ObackEdge)edge basePoint:(CGPoint)loc window:(UIWindow *)win {
-    CGFloat halfW = 28.0;
-    CGFloat x = (edge == ObackEdgeLeft) ? (halfW - 8.0)
-                                        : (win.bounds.size.width - halfW + 8.0);
-    return CGPointMake(x, loc.y);
+    CGFloat halfW = 28.0;      // 胶囊包围盒半宽
+    CGFloat inset = 8.0;       // 露出屏幕边缘外的部分（贴边感）
+    if ([ObackPreferences capsuleEffect] == ObackCapsuleEffectSlime) {
+        // 液体包围盒更宽，且液体【贴边侧必须完全压屏幕边】（不像胶囊那样留 inset 微凸）：
+        // halfW - inset 就是中心的 x，令其等于 halfW（即 inset=0）→ 液体平直的那一侧正好落在屏幕边线上，
+        // 多出的差量 0 让「底部贴屏幕边缘」在几何上成立（inset>0 会让液体整体向屏内缩、露出缝隙）。
+        halfW = kSlimeFrameW * 0.5;
+        inset = 0.0;
+    }
+    CGFloat x = (edge == ObackEdgeLeft) ? (halfW - inset)
+                                        : (win.bounds.size.width - halfW + inset);
+    return CGPointMake(x, loc.y);   // y 跟随起手点 → 纵向跟手
 }
 
 - (void)showIndicatorWithEdge:(ObackEdge)edge atPoint:(CGPoint)loc inWindow:(UIWindow *)win {
@@ -2116,7 +2491,9 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     ObackEdgeIndicator *ind = [[[ObackEdgeIndicator alloc] initWithEdge:edge] autorelease];
     ind.center = [self indicatorHomeCenterForEdge:edge basePoint:loc window:win];
     ind.alpha = 0.0;
-    ind.transform = CGAffineTransformMakeScale(0.85, 0.85);
+    // 液体：起手就是贴着屏幕边的一线薄液体，靠 setSlimeProgress: 随手指「长」出来 → 不再做 0.85 预压
+    BOOL slime = [ind isSlime];
+    ind.transform = slime ? CGAffineTransformIdentity : CGAffineTransformMakeScale(0.85, 0.85);
     [win addSubview:ind];
     [win bringSubviewToFront:ind];
     _indicator = ind;
@@ -2128,7 +2505,11 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         [_indicatorLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     }
     _indicatorTarget = ind.center;
-    _indicatorTargetScale = 0.85;
+    _indicatorTargetScale = slime ? 1.0 : 0.85;  // 液体不做等比缩放（形变由 setSlimeProgress: 负责）
+    _indicatorProgress = 0.0;                    // 液体：从贴边一线起步
+    _indicatorTargetProgress = 0.0;
+    _slimePhase = 0.0;                           // 液体：每轮手势从相位 0 起（波形不跨手势跳变）
+    _slimePhaseTS = 0.0;
     OBLog(@"indicator shown (edge=%@ y=%.0f)", edge == ObackEdgeLeft ? @"左" : @"右", loc.y);
     [UIView animateWithDuration:0.15 delay:0 options:UIViewAnimationOptionCurveEaseOut
                      animations:^{ ind.alpha = 0.9; } completion:nil];
@@ -2152,11 +2533,21 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     CGFloat fingerX = [pan locationInView:win].x;
     CGFloat dx = fingerX - _indicatorStartX;
     CGFloat dir = (self.currentEdge == ObackEdgeLeft) ? 1.0 : -1.0;
-    CGFloat travel = MIN(fabs(dx), kIndicatorMaxTravel) * dir;   // 跟随手指，最多移动 kIndicatorMaxTravel
+    CGFloat maxTravel = [(ObackEdgeIndicator *)_indicator isSlime] ? kSlimeMaxTravel : kIndicatorMaxTravel;
+    CGFloat travel = MIN(fabs(dx), maxTravel) * dir;   // 跟随手指；液体位移更小（它主要靠鼓出+流动表达跟手）
     CGPoint home = [self indicatorHomeCenterForEdge:self.currentEdge basePoint:_indicatorAnchor window:win];
     // 仅更新目标位置/缩放，真正位移由 CADisplayLink(_obIndicatorTick:) 每帧插值 → 平滑不抖
     _indicatorTarget = CGPointMake(home.x + travel, home.y);
-    _indicatorTargetScale = 0.85 + 0.15 * MIN(1.0, _currentPercent / 0.3);
+    if ([(ObackEdgeIndicator *)_indicator isSlime]) {
+        _indicatorTargetScale = 1.0;   // 液体不做等比缩放
+        // 液体用「路径形变」表达进度：0=贴边一线 → 1=完全拉出的饱满液滴。
+        // 0.45 归一：拉到约一半行程就基本饱满，之后维持。
+        // ⚠️ 只写 target，实际形变在 _obIndicatorTick: 里与位置同一系数插值，
+        //    否则「位置滞后、形状先到」会在快滑时脱节。
+        _indicatorTargetProgress = MIN(1.0, _currentPercent / 0.45);
+    } else {
+        _indicatorTargetScale = 0.85 + 0.15 * MIN(1.0, _currentPercent / 0.3);
+    }
     _indicator.alpha = 0.9;
     // [2026-08-01 流光跟手] 手指横向速度 → 流光目标速度：快滑更 energetic、慢拖更 calm
     CGFloat vx = [pan velocityInView:win].x;
@@ -2172,15 +2563,17 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     [(ObackEdgeIndicator *)ind stopEffectAnimations];   // 停渐变等循环动画，避免与下方淡出动画冲突
     if (!ind) return;
     if (committed) {
-        // 提交返回：放大淡出
+        // 提交返回：放大淡出（液体本身已很大，放大幅度收敛，避免糊成一片白）
+        CGFloat endScale = [(ObackEdgeIndicator *)ind isSlime] ? 1.12 : 1.35;
         [UIView animateWithDuration:MAX(0.18, p.duration * 0.6) delay:0
                              options:UIViewAnimationOptionCurveEaseIn
                           animations:^{
             ind.alpha = 0.0;
-            ind.transform = CGAffineTransformMakeScale(1.35, 1.35);
+            ind.transform = CGAffineTransformMakeScale(endScale, endScale);
         } completion:^(BOOL f) { [ind removeFromSuperview]; }];
     } else {
         // 取消：弹回边缘并缩小消失
+        CGFloat backScale = [(ObackEdgeIndicator *)ind isSlime] ? 0.72 : 0.6;
         CGPoint home = [self indicatorHomeCenterForEdge:self.currentEdge
                                               basePoint:_indicatorAnchor window:win];
         [UIView animateWithDuration:MAX(0.22, p.duration * 0.7) delay:0
@@ -2188,7 +2581,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
                           animations:^{
             ind.center = home;
             ind.alpha = 0.0;
-            ind.transform = CGAffineTransformMakeScale(0.6, 0.6);
+            ind.transform = CGAffineTransformMakeScale(backScale, backScale);
         } completion:^(BOOL f) { [ind removeFromSuperview]; }];
     }
 }
@@ -2219,6 +2612,25 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     sc += (targetScale - sc) * k;
     _indicator.transform = CGAffineTransformMakeScale(sc, sc);
     _indicator.alpha = targetAlpha;
+    // 液体：与位置同一系数插值到目标鼓出进度；流动波相位按真实时间自走 → 轮廓持续蠕动。
+    // 相位自走使液体「活着」：即便手指停在原地不动，表面也在缓缓流淌（史莱姆的核心观感）。
+    if ([(ObackEdgeIndicator *)_indicator isSlime]) {
+        // 相位推进：用 CADisplayLink 的真实时间戳算 delta，掉帧/后台暂停都不会导致波形跳变
+        NSTimeInterval now = link.timestamp;
+        if (_slimePhaseTS <= 0.0) _slimePhaseTS = now;      // 首帧只记录基准，不推进
+        CGFloat dt = (CGFloat)(now - _slimePhaseTS);
+        _slimePhaseTS = now;
+        if (dt < 0.0 || dt > 0.25) dt = 0.0;                // 异常间隔（回前台/卡顿）不推进，防波形跳变
+        _slimePhase += (CGFloat)kSlimeWaveSpeed * dt;
+        // 相位环绕，避免长时间累加后浮点精度下降
+        if (_slimePhase > 2.0 * M_PI) _slimePhase -= 2.0 * M_PI;
+
+        CGFloat dp = _indicatorTargetProgress - _indicatorProgress;
+        if (fabs(dp) > 0.002) _indicatorProgress += dp * k;
+        // 进度变化或相位在走 → 每帧都要重建路径（液体必须持续蠕动，不能像叶形那样跳过静止帧）
+        [(ObackEdgeIndicator *)_indicator setSlimePhase:_slimePhase];
+        [(ObackEdgeIndicator *)_indicator setSlimeProgress:_indicatorProgress];
+    }
 }
 
 - (void)_stopIndicatorLink {
