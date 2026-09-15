@@ -6,7 +6,7 @@
 + (ObackParams *)params;
 + (BOOL)isAllowed;        // 统一判断：当前 App 是否允许生效（白名单/黑名单模式）
 + (BOOL)isSettingsApp;    // 当前进程是否为系统「设置」App（com.apple.Preferences）
-+ (BOOL)settingsAppEnabled;  // 设置面板「设置 App 内生效」开关(key=settingsAppEnabled)，默认开；直读全局文件，可在 %ctor 阶段安全调用
++ (BOOL)settingsAppEnabled;  // 「设置 App 内生效」隐藏熔断键(key=settingsAppEnabled，面板无入口)，默认开；直读全局文件，可在 %ctor 阶段安全调用。应急：Filza 把该键置 0
 + (BOOL)isLeftEdgeExcluded;  // 左缘排除列表：命中 App 左缘交还系统原生返回（保留右缘+弹窗），≠ 全局黑名单
 + (BOOL)isLeftEdgeExcludedVC:(NSString *)className;  // [优化③] 左缘按页(VC)排除：类名子串(大小写不敏感)命中 leftEdgeExcludedVCs 时，该页左缘交还自身手势；仅作用于左缘，右缘/弹窗不受影响
 + (BOOL)isGlobalBackEnabled; // 全局返回列表：命中 App 启用全屏/任意位置返回（左缘交全屏 pan 接管、右缘 dismiss 保留），默认关、≠ 黑名单

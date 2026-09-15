@@ -113,9 +113,13 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     return [bid caseInsensitiveCompare:@"com.apple.Preferences"] == NSOrderedSame;
 }
 
-// 「设置 App 内生效」开关（设置面板 key=settingsAppEnabled，默认开）。
+// 「设置 App 内生效」熔断键（plist key=settingsAppEnabled，默认开）。
+// ⚠️ 这是**隐藏熔断键，设置面板里没有对应开关**（用户要求面板保持精简）——日常无需关心，
+// 仅当「设置」App 因 Oback 注入出现异常时应急使用。
+// 熔断方式：Filza 编辑 /var/mobile/Library/Preferences/com.zlhkf.oback.plist，把 settingsAppEnabled
+// 置 0 → 约 2 秒（_mergedPrefs TTL）内停止接管手势；上滑杀掉设置 App 重开则彻底不装 hook。
 // 背景：Tweak.xm 的 %ctor 一律跳过 com.apple.* 系统进程（防系统 UI 异常），但用户需要在系统设置里
-// 也能用 Oback 的跟手返回，故对「设置」App 单独开洞，并由此开关控制是否真正生效。
+// 也能用 Oback 的跟手返回，故对「设置」App 单独开洞，并由此键控制是否真正生效。
 // ⚠️ 直读全局文件、不走 _mergedPrefs / NSUserDefaults：本方法要在 %ctor（dylib 加载早期，
 // NSUserDefaults 尚未就绪）被调用，任何高层 API 都可能在此阶段出问题；dictionaryWithContentsOfFile 是安全的。
 + (BOOL)settingsAppEnabled {

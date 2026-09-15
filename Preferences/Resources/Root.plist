@@ -180,20 +180,6 @@
 		</dict>
 		<dict>
 			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>default</key>
-			<true/>
-			<key>defaults</key>
-			<string>com.zlhkf.oback</string>
-			<key>footnote</key>
-			<string>开（默认）：Oback 在系统「设置」App 内也生效，左/右缘跟手返回与弹窗下拉返回与其它 App 一致。关：设置 App 交还系统原生返回。拨到「关」后约 2 秒内即停止接管手势；若要彻底不注入（连 hook 都不装），需上滑杀掉设置 App 再重开。应急：万一设置 App 打不开，用 Filza 编辑 /var/mobile/Library/Preferences/com.zlhkf.oback.plist，把 settingsAppEnabled 改为 0 即可。注：除「设置」外的其它系统进程（SpringBoard 等）仍一律不注入。</string>
-			<key>key</key>
-			<string>settingsAppEnabled</string>
-			<key>label</key>
-			<string>设置 App 内生效</string>
-		</dict>
-		<dict>
-			<key>cell</key>
 			<string>PSLinkCell</string>
 			<key>detail</key>
 			<string>ObackWhiteListController</string>

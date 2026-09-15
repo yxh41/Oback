@@ -224,9 +224,9 @@ static BOOL oback_shouldBackOff(void) {
         // 唯一例外：系统「设置」App（com.apple.Preferences）——用户要求在系统设置里也能用 Oback
         // 的跟手边缘返回（原生边缘返回在设置里手感与 Oback 不一致）。
         // 精确匹配、不做点前缀兜底：避免误放行设置进程的 extension。
-        // 双重保险：此处 %ctor 决定是否装 hook，运行期 ObackPreferences.isAllowed 还会再据此开关
-        // 拦截一次（key=settingsAppEnabled，默认开）。即：设置内一旦出现异常，拨掉开关 2 秒内
-        // 即停止接管；彻底不注入则需杀掉设置 App 重开。应急也可 Filza 改全局 plist 后重启设置。
+        // 双重保险：此处 %ctor 决定是否装 hook，运行期 ObackPreferences.isAllowed 还会再据此键
+        // 拦截一次（隐藏熔断键 settingsAppEnabled，默认开、面板无入口）。设置内一旦出现异常：
+        // Filza 把该键置 0 → 约 2 秒内停止接管；杀掉设置 App 重开则彻底不装 hook。
         BOOL settingsOK = ([bid caseInsensitiveCompare:@"com.apple.Preferences"] == NSOrderedSame)
                           && [ObackPreferences settingsAppEnabled];
         if (!settingsOK) {
