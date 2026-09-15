@@ -105,6 +105,28 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     return NO;
 }
 
+// 当前进程是否为系统「设置」App。bundle id 大小写在不同版本不固定，故大小写不敏感比较。
+// 精确匹配（不做「点前缀兜底」）：避免误命中设置进程的 extension（如 com.apple.Preferences.xxx）。
++ (BOOL)isSettingsApp {
+    NSString *bid = NSBundle.mainBundle.bundleIdentifier;
+    if (!bid.length) return NO;
+    return [bid caseInsensitiveCompare:@"com.apple.Preferences"] == NSOrderedSame;
+}
+
+// 「设置 App 内生效」开关（设置面板 key=settingsAppEnabled，默认开）。
+// 背景：Tweak.xm 的 %ctor 一律跳过 com.apple.* 系统进程（防系统 UI 异常），但用户需要在系统设置里
+// 也能用 Oback 的跟手返回，故对「设置」App 单独开洞，并由此开关控制是否真正生效。
+// ⚠️ 直读全局文件、不走 _mergedPrefs / NSUserDefaults：本方法要在 %ctor（dylib 加载早期，
+// NSUserDefaults 尚未就绪）被调用，任何高层 API 都可能在此阶段出问题；dictionaryWithContentsOfFile 是安全的。
++ (BOOL)settingsAppEnabled {
+    NSDictionary *g = [NSDictionary dictionaryWithContentsOfFile:kGlobalPlistPath];
+    if (!g) return YES;                 // 从未写过偏好 → 默认开
+    id v = [g objectForKey:@"settingsAppEnabled"];
+    if (!v) return YES;                 // 未设置 → 默认开
+    if ([v respondsToSelector:@selector(boolValue)]) return [v boolValue];
+    return YES;
+}
+
 // 是否允许当前 App 生效：
 //  - whitelistMode 未设置或 YES：只有白名单内的 App 生效（空白名单 = 全部不生效）
 //  - whitelistMode == NO：回到全局生效 + 黑名单排除（原逻辑）
@@ -120,6 +142,11 @@ static NSTimeInterval __obMergedPrefsTS = 0;
 
     // 内置排除：黑名单模式下 QQ/TIM 一律不生效（白名单模式仍可显式勾选强制启用）
     if (!whitelistMode && [self _isBuiltinExcluded:bid]) return NO;
+
+    // 「设置」App 例外开关（key=settingsAppEnabled，默认开）：关掉后 2 秒内（_mergedPrefs TTL）
+    // 即从所有入口（start / attachToWindow / linkNav / shouldBegin）停止接管，无需杀设置 App。
+    // 这是注入系统进程的秒级回退通道：万一设置 App 内出现异常，拨掉开关即可恢复原生行为。
+    if ([self isSettingsApp] && ![self settingsAppEnabled]) return NO;
 
     if (whitelistMode) {
         NSArray *white = [d objectForKey:@"whitelistApps"];

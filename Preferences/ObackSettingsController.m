@@ -248,7 +248,9 @@ static NSDictionary *_obSliderUnits(void) {
 
 // PSButtonCell 的 action 会打到本控制器（无参调用，安全）。向所有已注入 Oback 的 App 广播一次诊断请求，
 // 各 App 的 ObackManager 收到后把 [Oback-diag] 写入手机本地文件 /var/mobile/oback_diag.log（含前台/后台 App 真实 bid），
-// 无需重启 App，也无需 Mac（设置面板本身被排除注入，无法在此打印自身诊断，故改用跨进程写文件 + 手机上展示）。
+// 无需重启 App，也无需 Mac（诊断行由各 App 自己写文件，不在本面板内联打印，故改用跨进程写文件 + 手机上展示）。
+// 注：2026-09-15 起「设置」App 本身也会注入 Oback（开关 settingsAppEnabled 控制，默认开），
+// 但诊断仍走「各进程自己写文件」的老路子——统一输出源，避免同一次诊断出现两种写入格式。
 - (void)dumpDiagnostics {
     // 先清空上次诊断文件，便于本次拿到干净快照
     NSString *path = @"/var/mobile/oback_diag.log";
