@@ -562,6 +562,8 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
     CADisplayLink *_indicatorLink; // 胶囊平滑：每帧插值到目标位置（手势中跑，结束即停）
     CGPoint _indicatorTarget;    // 胶囊目标中心（updateIndicator 写入，tick 插值）
     CGFloat _indicatorTargetScale; // 胶囊目标缩放
+    CGFloat _indicatorProgress;        // 叶形：当前已呈现的鼓出进度（0=贴边细尖，1=饱满叶片）
+    CGFloat _indicatorTargetProgress;  // 叶形：目标鼓出进度（updateIndicator 写入，tick 同系数插值）
     CGFloat _flowSpeed;          // 流光跟手：当前平滑流速（1=正常 5.5s 循环，>1 更快更 energetic）
     CGFloat _flowTargetSpeed;    // 流光跟手：目标流速（由手指横向速度映射，手指暂停时缓回 1.0）
     id     _navPopTarget;        // 方案A: 系统原生 nav pop 的私有 target(_UINavigationInteractiveTransition)，
