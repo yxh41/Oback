@@ -93,17 +93,16 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     return NO;
 }
 
-// 内置排除列表（T4 / 2026-08-23）：QQ(com.tencent.mqq) / TIM(com.tencent.tim)。
-// 这两个 App 用 NTPushPopLib 等自研转场库整体接管交互返回，与 Oback 长期抢手势（瞬返 / 文本选择
-// 手柄拖不动 / 全屏返回失效），为其定制的两套专用子系统已在 T4 从源码移除。此处在「全局+黑名单」
-// 模式下直接判不生效（等价于内置黑名单，用户无需手动加），彻底不注入、零副作用。
-// 保留强制启用能力：切到白名单模式并显式勾选 QQ/TIM 仍会生效（供后续实验，风险自负）。
-+ (BOOL)_isBuiltinExcluded:(NSString *)bid {
-    if (!bid.length) return NO;
-    if ([bid caseInsensitiveCompare:@"com.tencent.mqq"] == NSOrderedSame) return YES;
-    if ([bid caseInsensitiveCompare:@"com.tencent.tim"] == NSOrderedSame) return YES;
-    return NO;
-}
+// [已移除 2026-09-15，用户拍板] 内置排除列表（原 T4 / 2026-08-23）：QQ(com.tencent.mqq) / TIM(com.tencent.tim)。
+// 原逻辑：这两个 App 用 NTPushPopLib 等自研转场库整体接管交互返回，与 Oback 长期抢手势（瞬返 /
+// 文本选择手柄拖不动 / 全屏返回失效），为其定制的两套专用子系统已在 T4 从源码移除，此处再在黑名单
+// 模式下对其短路 return NO（等价于内置黑名单）。
+// 移除原因：面板里能勾上却永远不生效，属「看不见的规则」，与「用户自己配置」的设计冲突。
+// 现与其他 App 完全一致，需要规避时请用户自行选用（均对用户可见、可撤销）：
+//   - 整 App 不注入 → 选黑名单程序；
+//   - 左缘交还系统、保留右缘+弹窗 → 选左缘排除程序；
+//   - 返回无动画/瞬切 → 选无动画修复程序（走非交互 pop，正是历史上 QQ/TIM 唯一有效的一条路）；
+//   - 单页左缘冲突 → 左缘·按页排除（VC 类名）。
 
 // 当前进程是否为系统「设置」App。bundle id 大小写在不同版本不固定，故大小写不敏感比较。
 // 精确匹配（不做「点前缀兜底」）：避免误命中设置进程的 extension（如 com.apple.Preferences.xxx）。
@@ -144,8 +143,9 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     id wm = [d objectForKey:@"whitelistMode"];
     BOOL whitelistMode = wm ? [wm boolValue] : NO;   // 未设置 → 默认全局生效（黑名单模式），符合"全局注入"设计
 
-    // 内置排除：黑名单模式下 QQ/TIM 一律不生效（白名单模式仍可显式勾选强制启用）
-    if (!whitelistMode && [self _isBuiltinExcluded:bid]) return NO;
+    // [已移除 2026-09-15] 此处原为 QQ/TIM 内置排除（!whitelistMode && _isBuiltinExcluded → return NO）。
+    // 面板里勾得上却永远不生效属隐形规则，已按用户拍板删除；QQ/TIM 现与其他 App 完全一致，
+    // 需要规避时由用户自行选用黑名单 / 左缘排除 / 无动画修复 / 按页排除（VC 类名）。
 
     // 「设置」App 例外开关（key=settingsAppEnabled，默认开）：关掉后 2 秒内（_mergedPrefs TTL）
     // 即从所有入口（start / attachToWindow / linkNav / shouldBegin）停止接管，无需杀设置 App。
