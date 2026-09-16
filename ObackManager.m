@@ -22,7 +22,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"nav-dual"
+#define OBACK_BUILD_TAG @"handle-small"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -3054,8 +3054,29 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
             if (ownerWin && !hit && winHitView) {  // [P2] 复用每 window 预计算的 hitTest 结果，不再为每个手柄视图重复 hitTest 整树
                 UIView *t = winHitView;
                 while (t) {
-                    if (t == v || handleKind(NSStringFromClass([t class])) > 0) {
-                        hit = YES; hitCls = cls; hitReason = @"hitTest"; break;
+                    NSInteger tk = (t == v) ? kind : handleKind(NSStringFromClass([t class]));
+                    if (tk > 0) {
+                        // [2026-09-17 P0 根治] 泛匹配(kind==1)在此分支此前**漏了 small 约束** ——
+                        // 与 dist 分支不一致。实测微信：SwiftUI 全屏容器
+                        //   _TtGC7SwiftUI16PlatformViewHostGVS_P10$18ff673c817ListRepresentable
+                        //   GVS_28CollectionViewListDataSourceOs5Never_GOS_19SelectionManagerBoxS3____
+                        // 仅因类名含 "Selection…" 被判 kind==1，而它位于**任何触摸点**的祖先链上
+                        // ⇒ 左缘返回 100% 被拦死（日志：24 次起滑全部 shouldBegin=NO）。
+                        // 现与 dist 分支对齐：kind==1 必须是小视图(<140pt，真正的手柄球)才让路；
+                        // kind==2(DragHandle/SelectionHandle/Caret/Loupe/Magnifier/DragAnimation…)保持无约束。
+                        // 零帧容器(动画中)判为不小 → 保守不放行拦截，宁可不拦也不误杀全局返回。
+                        BOOL smallOK = YES;
+                        if (tk == 1) {
+                            CGSize bs = CGSizeZero;
+                            @try { bs = t.bounds.size; } @catch (NSException *e) {}
+                            smallOK = (bs.width > 0.0 && bs.width < 140.0 && bs.height > 0.0 && bs.height < 140.0);
+                        }
+                        if (smallOK) {
+                            hit = YES;
+                            hitCls = (t == v) ? cls : NSStringFromClass([t class]);
+                            hitReason = @"hitTest";
+                            break;
+                        }
                     }
                     t = t.superview;
                 }
