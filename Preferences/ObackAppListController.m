@@ -501,7 +501,7 @@ static NSString *const kDomain = @"com.zlhkf.oback";
                                                           detail:nil
                                                                cell:PSGroupCell
                                                                edit:nil];
-        [group setProperty:@"选择边缘指示的视觉风格，修改后下一次边缘手势即生效。\n「液态液滴」为一坨贴屏幕边缘被拉出来的液体：贴边侧平整地压在屏幕边上，随手指拉动向屏内逐渐鼓成饱满液滴（像水珠从边缘渗出来），松开即收回。"
+        [group setProperty:@"选择边缘指示的视觉风格，修改后下一次边缘手势即生效。\n「液态液滴」为 ColorOS 观感：一枚深色细长柳叶形贴在屏幕边缘，随手指从边缘「长」出来 —— 贴边侧平整压在屏幕边线上，外侧向屏内鼓起成饱满叶形，上下两端收成尖，松手即收回。"
                   forKey:@"footerText"];
         [specs addObject:group];
 

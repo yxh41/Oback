@@ -22,7 +22,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"slime-D"
+#define OBACK_BUILD_TAG @"slime-video"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -247,18 +247,23 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 static CGFloat const kSlimeMaxTravel = 40.0;
 
 // ── 液态液滴指示器几何（ObackCapsuleEffectSlime）──
-// 用户实机口径（两轮反馈）：①「像史莱姆/液体那种，底部贴屏幕边缘」；②「是紧贴边缘，拉出来，不是整个像水一样波动，
-// 我说的是拉出来时的动画」→ 最终定为 B·饱满液滴：从中段向两侧同时长胖、上下对称、圆钝收口；
-// 贴边侧平直不缩；**静止时完全静止**（不叠加任何表面波纹，流动性只由「拉出形变」本身表达）。
+// 【2026-09-16 定案：照用户提供的 ColorOS 实拍视频还原】
+// 视频证据（720×1280 / 7.83s，指示器出现在 t≈6.2–6.7s 的侧滑返回过程）：
+//   ① 填充是**深色近黑半透明**（帧采样亮度低至 9/255，明显暗于浅蓝内容底），箭头是**白色**；
+//   ② 贴边侧是一条绝对平直的线（压在屏幕边线上），外侧向屏内鼓出；
+//   ③ 最宽处在垂直中点，**上下两端收成尖**；
+//   ④ 实测轮廓：沿边展开 ≈ 220pt、最大鼓出 ≈ 36pt → **高宽比 ≈ 6:1（细长如柳叶，不是圆胖）**；
+//   ⑤ 轮廓宽度沿高度的分布拟合得幂指数 ≈ 1.4（>1 比正弦更收，两端收得更快、更尖）；
+//   ⑥ 动画：起手几乎为零（视频 t=6.2s 时完全看不见）→ 随拖动「长」出来 → 松手收回，**全程表面无波纹**。
 // 坐标系：x = 屏幕横向（向屏内为 +x）；y = 屏幕纵向（沿屏幕边缘延伸）。
-static CGFloat const kSlimeFrameW   = 76.0;   // 包围盒宽（容纳最大鼓出）
-static CGFloat const kSlimeFrameH   = 152.0;  // 包围盒高（沿屏幕边缘的最大展开）
+static CGFloat const kSlimeFrameW   = 44.0;   // 包围盒宽（容纳 36pt 最大鼓出 + 余量）
+static CGFloat const kSlimeFrameH   = 240.0;  // 包围盒高（容纳 220pt 沿边展开 + 余量）
 static CGFloat const kSlimeRootX    = 0.0;    // 贴边侧的 x：0 = 紧贴包围盒边缘（渲染时再贴到屏幕边）
-static CGFloat const kSlimeGrowIn0  = 10.0;   // 起手时向屏内的鼓出（一线薄液体）
-static CGFloat const kSlimeGrowIn1  = 58.0;   // 完全拉出时的鼓出（饱满液滴的最大半径）
-static CGFloat const kSlimeHalfH0   = 30.0;   // 起手时的沿边半高
-static CGFloat const kSlimeHalfH1   = 72.0;   // 完全拉出时的沿边半高
-static CGFloat const kSlimeEndPow   = 0.62;   // <1 → 腰部更饱满、末端更快回落（表面张力/圆钝收口感）
+static CGFloat const kSlimeGrowIn0  = 3.0;    // 起手时的鼓出（视频里起手几乎为零，完全看不见）
+static CGFloat const kSlimeGrowIn1  = 36.0;   // 完全拉出时的鼓出
+static CGFloat const kSlimeHalfH0   = 24.0;   // 起手时的沿边半高（很短一截）
+static CGFloat const kSlimeHalfH1   = 110.0;  // 完全拉出时的沿边半高 → 高 220pt，高宽比 ≈ 6:1
+static CGFloat const kSlimeEndPow   = 1.35;   // 轮廓幂指数：>1 → 比正弦更收、两端更快收尖（照视频轮廓拟合）
 
 #pragma mark - 边缘方向指示胶囊（OPPO 风格：跟随手指、带方向箭头）
 
@@ -310,8 +315,8 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
 
         // ── 「液态液滴」独立分支 ──────────────────────────────────────────────
         // 本体是一条自绘的封闭路径，不走上面那套 cornerRadius + backgroundColor 的「圆角矩形」假设。
-        // 关键特征：贴边侧完全平直（严丝合缝贴屏幕边）、外侧由表面张力曲线鼓起、
-        // 末端圆钝收口、静止时完全静止（流动性只由「拉出形变」表达，不叠加表面波纹）。
+        // 关键特征（照实拍视频还原）：深色近黑半透明填充 + 白色箭头；贴边侧完全平直（压在屏幕边线上）、
+        // 外侧鼓起成一枚细长柳叶、上下两端收成尖；静止时完全静止（流动性只由「拉出形变」表达，无表面波纹）。
         if (fx == ObackCapsuleEffectSlime) {
             _slime = YES;
             self.frame = CGRectMake(0, 0, kSlimeFrameW, kSlimeFrameH);  // 覆盖 init 里的 56×32 胶囊包围盒
@@ -321,17 +326,19 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
 
             _body = [CAShapeLayer layer];
             _body.frame = self.bounds;
-            _body.fillColor = [[UIColor whiteColor] colorWithAlphaComponent:0.92].CGColor;
+            // 深色近黑 + 高不透明（视频帧采样：指示器区域亮度低至 9/255，而内容底约 120）。
+            // 用 86% 而非全不透明，保留一丝「玻璃感」，浅色与深色壁纸上都能看清。
+            _body.fillColor = [UIColor colorWithWhite:0.11 alpha:0.86].CGColor;
             _body.shadowColor = [UIColor blackColor].CGColor;
-            _body.shadowOpacity = 0.16;
-            _body.shadowRadius = 10;
-            _body.shadowOffset = CGSizeZero;
+            _body.shadowOpacity = 0.10;   // 深色形状本身已有对比，阴影只作轻微分离，避免糊边
+            _body.shadowRadius = 8;
+            _body.shadowOffset = CGSizeMake(0, 1);
             [self.layer addSublayer:_body];
 
             _chevron = [CAShapeLayer layer];
             _chevron.lineCap = kCALineCapRound;
             _chevron.lineJoin = kCALineJoinRound;
-            _chevron.strokeColor = [UIColor colorWithWhite:0.32 alpha:1.0].CGColor;   // 淡灰左向箭头
+            _chevron.strokeColor = [UIColor whiteColor].CGColor;   // 深底上的白色箭头（照视频）
             _chevron.fillColor = nil;
             [self.layer addSublayer:_chevron];
 

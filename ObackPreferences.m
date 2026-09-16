@@ -283,7 +283,7 @@ static NSTimeInterval __obMergedPrefsTS = 0;
 
 // 胶囊特效：设置面板「胶囊风格」(key=capsuleEffect)。
 // 取值含义（见 ObackManager.m 的 ObackCapsuleEffect 枚举）：0=经典（默认）/1=发光/2=霓虹/3=流光/4=毛玻璃/5=呼吸
-// /6=液态史莱姆（贴屏幕边缘平直、外侧表面张力鼓起、轮廓带持续流动波的蠕动液体）。
+// /6=液态液滴（深色细长柳叶形，贴屏幕边缘平直、外侧鼓起、上下端收尖，随拖动从边缘「长」出来）。
 // 越界值回落经典(0)。此处用字面量边界(0..6)以避免跨文件依赖该枚举定义。
 + (NSInteger)capsuleEffect {
     NSDictionary *d = [self _mergedPrefs];
