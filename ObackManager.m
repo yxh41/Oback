@@ -22,7 +22,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"slime-small"
+#define OBACK_BUILD_TAG @"nav-dual"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -238,6 +238,14 @@ void *kPanKey = &kPanKey;                  // 暴露给 Tweak.xm：window 上挂
 static void *kPanKindKey = &kPanKindKey;    // 标记 pan 种类：@"nav"(挂在 nav.view 驱动 nav pop) / @"modal"(挂在 window 驱动 modal dismiss)
 static void *kNavPansKey = &kNavPansKey;    // 挂在某个 UINavigationController 上的 Oback 边缘 pan（NSArray），用于幂等去重
 static void *kObackNavKey = &kObackNavKey;   // 把 pan 所属的 UINavigationController 绑到 pan 上（swizzle 时写入），gesture 判定/驱动 pop 时直接读，绕过容器枚举
+// [2026-09-17 双层 nav 修复] 真正「执行 pop」的那个 nav（可能与 kObackNavKey 不同）：
+// 设置 App(com.apple.Preferences) 是 nav 套 nav —— 外层 UINavigationController(childCount=2)
+// -> 内层 PSUIPrefsRootController(本身是 UINavigationController 子类，childCount 恒为 1)。
+// 我们的边缘 pan 挂在内层 nav.view 上（UIKit 让最深层视图先收到触摸），按内层判定「栈只有 1 个 → 不可 pop」
+// 直接 return NO ⇒ 从设置首页点进的各 App 设置页完全没反应；而继续往下钻的页面(通用/关于本机等)内层栈 ≥2 ⇒ 正常。
+// 系统原生返回的做法正是「内层不可 pop 就沿父链向上找可 pop 的外层」，此处复刻该行为。
+// 仅本次手势期间写入（shouldBegin 解析、手势结束清空），ASSIGN 不持有。
+static void *kObackPopNavKey = &kObackPopNavKey;
 // [2026-08-09] kYieldActiveKey 机制已彻底移除（多次引发回归），声明一并删除——无任何引用。
 static void *kDiagLastLogKey = &kDiagLastLogKey;  // 双返回诊断：同一 window 日志节流（每 2s 最多打一次手势清单）
 static void *kGlobalPanKey = &kGlobalPanKey;        // 全屏 pan 引用（绑到 window，gestureRecognizerShouldBegin 识别用）
@@ -1572,21 +1580,44 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
     // - nav.view 上的 pan 只接管 nav pop；
     // - window modal pan 只接管 modal dismiss（有 nav pop 可接管时让 nav pan 处理，避免双触发）。
     if ([kind isEqualToString:@"nav"]) {
+        // [2026-09-17 双层 nav] 本（外层）nav 的 top 本身还是一个 UINavigationController ⇒ 内容其实在内层容器里。
+        // 内层 nav.view 上也挂着我们的边缘 pan（UINavigationController 三个 swizzle 挂载点保证），
+        // 由内层 pan 接管（内层不可 pop 时借用本 nav 执行 pop，见下方 _poppableNavFrom:）。
+        // 故本（外层）pan 让位 —— 否则内层/外层两个 pan 会同时 shouldBegin=YES，一次滑动弹两级。
+        // 保险：仅当内层确实挂上了我们的 pan 才让位；内层没挂（极端情况）则本 pan 照旧接管，不留死角。
+        if ([top isKindOfClass:[UINavigationController class]]) {
+            NSArray *innerPans = objc_getAssociatedObject((UINavigationController *)top, kNavPansKey);
+            if ([innerPans isKindOfClass:[NSArray class]] && innerPans.count > 0) {
+                OBLog(@"shouldBegin(nav)=NO (双层nav：外层让位给内层 nav=%@ 的 pan)", NSStringFromClass([top class]));
+                return NO;
+            }
+        }
         // 顶层有 modal 时，其 dismiss 由 window modal pan 接管；nav.view 在 modal 之下不接管，避免双触发。
         if (nav.presentedViewController != nil || top.presentingViewController != nil) {
             OBLog(@"shouldBegin(nav)=NO (有 modal 在顶层，交给 window modal pan)");
             return NO;
         }
-        if (!(nav && nav.viewControllers.count > 1)) {
-            OBLog(@"shouldBegin(nav)=NO (nav 不可 pop: childCount=%lu)",
+        // [2026-09-17 双层 nav 修复] 内层 nav 栈只有 1 个 VC 时，沿父链向上找真正可 pop 的外层 nav
+        // （设置 App：内层 PSUIPrefsRootController 恒 count=1，可 pop 的是外层 UINavigationController）。
+        // 单层 nav 的普通 App ⇒ _poppableNavFrom: 直接返回自身，行为零变化。
+        UINavigationController *popNav = [self _poppableNavFrom:nav];
+        if (!popNav) {
+            OBLog(@"shouldBegin(nav)=NO (nav 及外层均不可 pop: childCount=%lu)",
                   (unsigned long)nav.viewControllers.count);
             return NO;
         }
+        if (popNav != nav) {
+            OBLog(@"shouldBegin(nav): 双层nav，改用外层可 pop 的 nav=%@（内层 %@ childCount=%lu）",
+                  NSStringFromClass([popNav class]), NSStringFromClass([nav class]),
+                  (unsigned long)nav.viewControllers.count);
+        }
+        objc_setAssociatedObject(pan, kObackPopNavKey, popNav, OBJC_ASSOCIATION_ASSIGN);
         // 即时禁用系统原生 interactivePop：微信等 App 在 viewDidAppear 后会把
         // interactivePopGestureRecognizer.enabled 重新置 YES，linkNav 的禁用被绕过 →
         // 原生边缘返回与我们的 pan 同时驱动同一 _UINavigationInteractiveTransition → 双返回。
         // 起滑瞬间(shouldBegin 确认有效 pop)再压死一次，确保本次只有我们的 pan 驱动转场。
         nav.interactivePopGestureRecognizer.enabled = NO;
+        if (popNav != nav) popNav.interactivePopGestureRecognizer.enabled = NO;   // 双层 nav：外层原生返回也必须压死，防双返回
         if (edge == ObackEdgeRight) {
             self.currentParallaxToView = NO;
             self.rightSimplePop = YES;   // 右缘：非交互 pop（松手提交才 popViewControllerAnimated:，零空白/不破坏导航栏/不进自定义转场）
@@ -1594,7 +1625,7 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
             // 左缘：标准 nav 走方案A(系统原生交互转场, 跟手)；微信等自定义 nav(方案A 在微信不渲染
             // 转场 → 旧非交互兜底依赖脆弱运行时探测且首微拖即弹) 统一改走 rightSimplePop 同款
             // 非交互 pop(松手提交, 与右缘行为完全一致, 受灵敏度滑块控制, 无脆弱探测依赖)。
-            if (![self _navPopShouldDriveSystemNav:nav]) {
+            if (![self _navPopShouldDriveSystemNav:popNav]) {
                 self.currentParallaxToView = NO;
                 self.rightSimplePop = YES;   // 复用右缘松手提交机制，左缘微信与右缘表现统一；
                                              // "不让步"改由 shouldRequireFailureOf 现场从 pan.view 解析 nav 判定（见该处，根治顺序问题）
@@ -1628,6 +1659,15 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
     }
 
     self.currentEdge = edge;
+    // [2026-09-17 双层 nav 诊断] 打印本次真正要 pop 的 nav 的完整栈（底→顶）。
+    // 用途：确认「弹出的下一级到底是谁」—— 设置 App 外层栈底若不是设置首页，pop 就会表现为「没反应/跳错级」。
+    if ([kind isEqualToString:@"nav"]) {
+        UINavigationController *dn = [self _popNavForPan:pan] ?: nav;
+        NSMutableArray *st = [NSMutableArray array];
+        for (UIViewController *v in dn.viewControllers) [st addObject:NSStringFromClass([v class])];
+        OBLog(@"[diag-navstack] popNav=%@(挂点nav=%@) 栈%lu=%@", NSStringFromClass([dn class]),
+              NSStringFromClass([nav class]), (unsigned long)st.count, st);
+    }
     OBLog(@"shouldBegin=YES (kind=%@ edge=%@ top=%@ nav.childCount=%lu presenting=%d currentParallaxToView=%d)",
           kind, edge == ObackEdgeLeft ? @"左" : @"右",
           NSStringFromClass([top class]),
@@ -1715,6 +1755,9 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
     }
     if (!top) return NO;
     if ([self _isExcludedViewController:top]) return NO;
+    // [2026-09-17 双层 nav 修复] 同上：内层不可 pop 时改用外层可 pop 的 nav，并写入 pan 供后续 pop 执行点读取。
+    UINavigationController *gPopNav = [self _poppableNavFrom:nav];
+    if (gPopNav) { objc_setAssociatedObject(pan, kObackPopNavKey, gPopNav, OBJC_ASSOCIATION_ASSIGN); nav = gPopNav; }
     if (nav && nav.viewControllers.count > 1) {
         OBLog(@"globalShouldBegin=YES (loc.x=%.1f 有nav pop=%lu)", loc.x,
               (unsigned long)nav.viewControllers.count);
@@ -1780,7 +1823,7 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
                         UIImpactFeedbackGenerator *g = [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] autorelease];
                         [g impactOccurred];
                     }
-                    UINavigationController *nav = objc_getAssociatedObject(pan, kObackNavKey);
+                    UINavigationController *nav = [self _popNavForPan:pan];
                     if (!nav) {
                         UIViewController *top = [self topMost:win.rootViewController];
                         nav = top.navigationController;
@@ -1819,6 +1862,7 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
             // 仅对 window 全屏 pan(带 kGlobalPanKey)生效；边缘 pan 不带该标记、其 ASSIGN 关联本就安全，不受影响。
             if (objc_getAssociatedObject(pan, kGlobalPanKey)) {
                 objc_setAssociatedObject(pan, kObackNavKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                objc_setAssociatedObject(pan, kObackPopNavKey, nil, OBJC_ASSOCIATION_ASSIGN);
             }
             break;
         }
@@ -1933,15 +1977,11 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
 - (void)triggerTransitionInWindow:(UIWindow *)win withPan:(UIPanGestureRecognizer *)pan {
     // 优先用 shouldBegin 阶段已解析并写入 pan 的 kObackNavKey（QQ/TIM 全屏 pan 等 window pan 也在此写入，
     // 绕过 topMost 枚举——QQ 抽屉/聊天自定义容器下 topMost 只拿到 DrawerViewController 导致 nav=nil 不 pop）。
-    UINavigationController *nav = objc_getAssociatedObject(pan, kObackNavKey);
+    UINavigationController *boundNav = objc_getAssociatedObject(pan, kObackNavKey);
+    UINavigationController *nav = [self _popNavForPan:pan];   // 双层 nav 时取真正可 pop 的外层
     UIViewController *top = nil;
-    if (nav) {
-        top = nav.topViewController;
-    } else if ([objc_getAssociatedObject(pan, kPanKindKey) isEqualToString:@"nav"]) {
-        // 兼容旧路径：nav 类 pan 直接读所属 nav
-        nav = objc_getAssociatedObject(pan, kObackNavKey);
-        top = nav.topViewController;
-    }
+    if (boundNav) top = boundNav.topViewController;           // top 始终是「可见页面」(内层 nav 的 top)
+    if (!top && nav) top = nav.topViewController;
     if (!top) {
         top = [self topMost:win.rootViewController];
         nav = top.navigationController;
@@ -2166,11 +2206,12 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
             // 不在 Began 即 pop，避免撕裂视图层级导致手势收不到终态、胶囊残留。
             UINavigationController *navP = nil;
             NSString *kindP = objc_getAssociatedObject(pan, kPanKindKey);
-            if ([kindP isEqualToString:@"nav"]) navP = objc_getAssociatedObject(pan, kObackNavKey);
+            if ([kindP isEqualToString:@"nav"]) navP = [self _popNavForPan:pan];
             if (!navP) {
                 UIViewController *topP = [self topMost:win.rootViewController];
-                navP = topP.navigationController;
-                if (!navP && [topP isKindOfClass:[UINavigationController class]]) navP = (UINavigationController *)topP;
+                navP = [self _poppableNavFrom:topP.navigationController];
+                if (!navP && [topP isKindOfClass:[UINavigationController class]]) navP = [self _poppableNavFrom:(UINavigationController *)topP];
+                if (!navP) navP = topP.navigationController;
             }
             if (navP) { @try { [navP popViewControllerAnimated:YES]; } @catch (NSException *e) {} }
             _transitionTriggered = YES;
@@ -2194,11 +2235,12 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         if (!_navPopProbeFailed) {
             UINavigationController *navP = nil;
             NSString *kindP = objc_getAssociatedObject(pan, kPanKindKey);
-            if ([kindP isEqualToString:@"nav"]) navP = objc_getAssociatedObject(pan, kObackNavKey);
+            if ([kindP isEqualToString:@"nav"]) navP = [self _popNavForPan:pan];
             if (!navP) {
                 UIViewController *topP = [self topMost:win.rootViewController];
-                navP = topP.navigationController;
-                if (!navP && [topP isKindOfClass:[UINavigationController class]]) navP = (UINavigationController *)topP;
+                navP = [self _poppableNavFrom:topP.navigationController];
+                if (!navP && [topP isKindOfClass:[UINavigationController class]]) navP = [self _poppableNavFrom:(UINavigationController *)topP];
+                if (!navP) navP = topP.navigationController;
             }
             if (navP) {
                 id tc = [navP.topViewController transitionCoordinator];
@@ -2255,7 +2297,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         NSString *kind = objc_getAssociatedObject(pan, kPanKindKey);
         UINavigationController *nav = nil;
         if ([kind isEqualToString:@"nav"]) {
-            nav = objc_getAssociatedObject(pan, kObackNavKey);
+            nav = [self _popNavForPan:pan];
         }
         if (!nav) {
             UIViewController *top = [self topMost:win.rootViewController];
@@ -2263,8 +2305,14 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
             if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
         }
         if (commit && nav && nav.viewControllers.count > 1) {
+            NSUInteger cntBefore = nav.viewControllers.count;
             @try { [nav popViewControllerAnimated:YES]; }
             @catch (NSException *e) { OBLog(@"endTransition 右缘 pop 异常: %@", e); }
+            // [2026-09-17 双层 nav 诊断] pop 前后栈深对照：after == before-1 ⇒ pop 真的生效；
+            // 相等 ⇒ pop 被容器(iOS 设置 App 的 PSSplitViewController)拦截/回滚，即用户看到的「没反应」。
+            OBLog(@"[diag-pop] nav=%@ 前=%lu 后=%lu top=%@", NSStringFromClass([nav class]),
+                  (unsigned long)cntBefore, (unsigned long)nav.viewControllers.count,
+                  nav.topViewController ? NSStringFromClass([nav.topViewController class]) : @"nil");
         }
         // 关键修复：右缘分支此前漏调 dismissIndicatorCommitted，胶囊永远残留屏幕。
         // 提交→放大淡出；取消→弹回边缘，与左右边缘行为一致。
@@ -2423,6 +2471,11 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     // [2026-08-06 崩溃修复] 同 endTransition：panG 的 nav 绑定在手势结束时清空(RETAIN→释放)，杜绝悬空/泄漏。
     if (objc_getAssociatedObject(pan, kGlobalPanKey)) {
         objc_setAssociatedObject(pan, kObackNavKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(pan, kObackPopNavKey, nil, OBJC_ASSOCIATION_ASSIGN);
+    }
+    // 边缘 pan(kind=nav) 的本次解析结果也要清：下一轮手势重新判定（页面已变，外层栈可能已 pop）。
+    if ([objc_getAssociatedObject(pan, kPanKindKey) isEqualToString:@"nav"]) {
+        objc_setAssociatedObject(pan, kObackPopNavKey, nil, OBJC_ASSOCIATION_ASSIGN);
     }
 }
 
@@ -2466,7 +2519,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     // nav 类 pan 直接读所属 nav（swizzle 已绑定），绕过 topMost 枚举——朋友圈等自定义容器不在标准链上
     UINavigationController *nav = nil;
     if ([objc_getAssociatedObject(pan, kPanKindKey) isEqualToString:@"nav"]) {
-        nav = objc_getAssociatedObject(pan, kObackNavKey);
+        nav = [self _popNavForPan:pan];
     }
     if (!nav) {
         UIViewController *top = [self topMost:win.rootViewController];
@@ -2802,7 +2855,42 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     if (vc.presentedViewController) return [self topMost:vc.presentedViewController depth:depth + 1];
     if ([vc isKindOfClass:[UINavigationController class]]) return [self topMost:[(UINavigationController *)vc topViewController] depth:depth + 1];
     if ([vc isKindOfClass:[UITabBarController class]])    return [self topMost:[(UITabBarController *)vc selectedViewController] depth:depth + 1];
+    // [2026-09-17] UISplitViewController 此前完全没有处理 ⇒ 设置 App(PSSplitViewController) 的
+    // window 级兜底 pan 永远解析不到 nav（日志实证：top=PSSplitViewController nav=nil）。
+    // 折叠态(iPhone)取最后一个子 VC（= detail 侧的外层 UINavigationController），展开态同理取 detail。
+    if ([vc isKindOfClass:[UISplitViewController class]]) {
+        NSArray *sub = [(UISplitViewController *)vc viewControllers];
+        UIViewController *last = [sub lastObject];
+        if (last && last != vc) return [self topMost:last depth:depth + 1];
+    }
     return vc;
+}
+
+// [2026-09-17 双层 nav 修复] 从 nav 起沿「外层导航链」向上找第一个真正可 pop 的 nav。
+// 命中条件：viewControllers.count > 1。找不到则返回 nil（调用方按「不可返回」处理）。
+// 普通 App 是单层 nav ⇒ 第一次迭代即返回自身，行为零变化；仅 nav 套 nav（设置 App / UISplitViewController
+// 折叠态）才会向上跳一级。深度护栏 8 防被其他 tweak 改坏的异常层级导致死循环。
+- (UINavigationController *)_poppableNavFrom:(UINavigationController *)nav {
+    UINavigationController *n = nav;
+    for (NSUInteger i = 0; i < 8; i++) {
+        if (!n || ![n isKindOfClass:[UINavigationController class]]) return nil;
+        if (n.viewControllers.count > 1) return n;
+        UINavigationController *up = n.navigationController;
+        if (!up && [n.parentViewController isKindOfClass:[UINavigationController class]])
+            up = (UINavigationController *)n.parentViewController;
+        if (!up || up == n) return nil;
+        n = up;
+    }
+    return nil;
+}
+
+// 本次手势真正要 pop 的 nav：优先读 shouldBegin 阶段解析出的 kObackPopNavKey，
+// 没有（单层 nav 的普通 App / 全局返回路径）则回退到 pan 绑定的 kObackNavKey —— 与旧行为完全一致。
+- (UINavigationController *)_popNavForPan:(UIPanGestureRecognizer *)pan {
+    if (!pan) return nil;
+    UINavigationController *popNav = objc_getAssociatedObject(pan, kObackPopNavKey);
+    if (popNav && [popNav isKindOfClass:[UINavigationController class]]) return popNav;
+    return objc_getAssociatedObject(pan, kObackNavKey);
 }
 
 // 命中测试找最近的 UIScrollView（用于冲突规避）
