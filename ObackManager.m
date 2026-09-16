@@ -19,6 +19,7 @@
 - (void)_suppressOpponentPansForPan:(UIPanGestureRecognizer *)pan;  // [A'] 接管即独占：本次手势期间压制 App 自带返回手势（面板开关 exclusivePop，默认关）
 - (void)_restoreOpponentPansDeferred;                               // [A'] 松手/取消后延后恢复（防对手基于残留 touch 瞬判返回 → 瞬闪）
 - (void)_restoreOpponentPans;                                      // [A'] 立即恢复（进后台强制收尾时用）
+- (void)_restoreOpponentPansIfIdle;                                // [A'] 安全阀：未真正接管时恢复（shouldBegin YES 却从未 Began 的兜底）
 - (NSHashTable *)_suppressedPanTable;                              // [A'] 被压制手势的弱引用表（MRC 下由关联对象持有）
 - (BOOL)_isNavInteractivePop:(UIGestureRecognizer *)g;             // [A'] 是否为某 nav 的系统原生 interactivePop（放行不碰）
 - (BOOL)_isAllowlistedOpponentPan:(UIPanGestureRecognizer *)g view:(UIView *)v;  // [A'] 放行清单
@@ -29,7 +30,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"qq-excl"
+#define OBACK_BUILD_TAG @"qq-excl2"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -1709,6 +1710,13 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
     [self showIndicatorWithEdge:edge atPoint:loc inWindow:win];
     _indicatorAnchor = loc;
     _indicatorStartX = loc.x;
+    // [2026-09-17 A' 挂点前移 —— 本轮关键修复] 压制必须发生在「判定 YES 的这一刻」，不能等 beginTransition。
+    // 日志实证（文本(4).txt）：本 pan 判 YES 后**既没有 begin 也没有 abort** ⇒ 一直停在 Possible 被静默重置，
+    // 永远进不了 beginTransition ⇒ 挂在 beginTransition 的压制全程不触发（A' 一次都没跑）。
+    // 另：该 pan 进不了 Began 的旧因（本文件 1704 行注释已记）正是「被同边的原生/App 边缘手势抢走」——
+    // 而 A' 的命中条件①（UIScreenEdgePanGestureRecognizer）/②（nav.view 树上）恰好覆盖这些抢跑者，
+    // 故前移压制点不仅让 A' 生效，还有望顺带治好「有胶囊没返回」（此前只剩 beginTransition 一次调用时无解）。
+    [self _suppressOpponentPansForPan:pan];
     return YES;
 }
 
@@ -2283,6 +2291,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 
 - (void)endTransition:(UIPanGestureRecognizer *)pan {
     [self _restoreOpponentPansDeferred];   // [A'] 排恢复（0.12s 后且未再次接管才真正恢复；覆盖下方所有 return 分支）
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(_restoreOpponentPansIfIdle) object:nil];   // [A'] 撤掉安全阀
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(dismissIndicatorSafety) object:nil];
     pan.cancelsTouchesInView = NO;   // [2026-07-29 误触修复 v2] 复位：下一轮手势起始 cancelsTouchesInView 回到默认 NO（纯点击不误吞）
     // [2026-07-28 崩溃修复] 收尾 release+nil _simulOpponent。该指针已改为 retain 自持(994 行赋值处)，
@@ -2454,6 +2463,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 // 手势意外失败(Failed/超时等)时的紧急清理：取消转场+消除胶囊，防止残留
 - (void)abortTransition:(UIPanGestureRecognizer *)pan {
     [self _restoreOpponentPansDeferred];   // [A'] 同上：手势失败/被取消也要恢复对手手势
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(_restoreOpponentPansIfIdle) object:nil];   // [A'] 撤掉安全阀
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(dismissIndicatorSafety) object:nil];
     pan.cancelsTouchesInView = NO;   // [2026-07-29 误触修复 v2] 复位：下一轮手势起始 cancelsTouchesInView 回到默认 NO（纯点击不误吞）
     // [2026-07-28 崩溃修复] 同 endTransition：手势失败/被取消时 release+nil _simulOpponent
@@ -2575,7 +2585,13 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 
 - (void)_suppressOpponentPansForPan:(UIPanGestureRecognizer *)pan {
     if (!pan) return;
-    if (![ObackPreferences exclusivePopEnabled]) return;   // 面板开关默认关：不开则完全不改 App 手势状态
+    if (![ObackPreferences exclusivePopEnabled]) {
+        // 只在每次启动打一条：日志里有没有这一行，一锤定音区分
+        // 「开关没读到（roothide 跨进程）」与「读到了但没走到挂点」——上次只能靠猜。
+        static BOOL __obExclWarned = NO;
+        if (!__obExclWarned) { __obExclWarned = YES; OBLog(@"[独占] 开关未开(exclusivePop=0)，本次启动不做任何压制"); }
+        return;   // 面板开关默认关：不开则完全不改 App 手势状态
+    }
     UIWindow *win = [self _windowForPan:pan];
     UINavigationController *nav = [self _popNavForPan:pan];
     if (!nav) {
@@ -2604,6 +2620,17 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         }];
     }
     if (n > 0) OBLog(@"[独占] 本次接管共压制 %lu 个对手手势", (unsigned long)n);
+    // [A' 安全阀] 挂点前移到 shouldBegin 后新增：日志实证「判 YES 却从未 Began」是常态 ⇒
+    // endTransition/abortTransition 都不会来，若不兜底，被禁用的对手手势会**永久失效**。
+    // 故排一个 0.6s 定时器：到时若仍未接管（interacting==NO）就恢复。正常接管时该定时器空转（表已空）。
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(_restoreOpponentPansIfIdle) object:nil];
+    [self performSelector:@selector(_restoreOpponentPansIfIdle) withObject:nil afterDelay:0.6];
+}
+
+// 安全阀体：仅当 Oback 没有真正接管时才恢复（interacting==NO）
+- (void)_restoreOpponentPansIfIdle {
+    if (self.interacting) return;
+    [self _restoreOpponentPans];
 }
 
 - (void)_restoreOpponentPans {
@@ -3091,12 +3118,19 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
             OBDIAG(@"[diag-hit] @(%.0f,%.0f) top=%@ chain=%@ grs=%@", sp.x, sp.y, NSStringFromClass([hv class]), chain, grs);
         }
     }
-    CGFloat hitR = 75.0;   // [2026-08-09 v12e] 容差 60→75：配合子视图真实帧定位，给手指余量；半区 side 约束仍护全局返回
+    // [2026-09-17 收紧 75→32] 几何依据：QQ 手柄球实测 rect=(57,229,18,18) ⇒ 球半径 9pt；指腹≈40pt ⇒ 半径≈20pt；
+    // 留 3pt 余量 ⇒ 合理抓取半径 32pt。75 是 v12e 为「修漏判」放宽的，但漏判真因（零帧容器坐标算歪）
+    // 已在同版本由 effectiveRect（取子视图/CALayer 真实帧）修掉，半径没必要再留 2 倍冗余。
+    // 日志实证（文本(4).txt build qq-excl+0850112）：左缘触摸 x=23/26 距残留手柄 61/31pt 即被拦死 —— 都是半径过大的误杀。
+    // ⚠️ 真正的「压在手柄上」由 hitTest 分支负责（无半径限制），故收紧 dist 兜底几乎不影响抓取。
+    CGFloat hitR = 32.0;
     CGFloat screenW = 0;
     if (wins.count) { @try { screenW = ((UIWindow *)wins.firstObject).bounds.size.width; } @catch (NSException *e) {} }
     if (screenW <= 0) screenW = 390.0;  // 兜底宽度
     BOOL leftZone = (sp.x < 60.0);   // 左缘热区：失败多发的竞争区
     __block BOOL hit = NO;
+    __block CGFloat hitAlpha = -1.0;      // [2026-09-17] 命中手柄的 alpha（诊断：0 = 残留未显示，误拦根因）
+    __block BOOL hitWinNil = NO;          // 命中手柄 window==nil（已脱离视图树）
     __block NSString *hitCls = nil;
     __block NSString *hitReason = nil;   // hitTest(可靠) / dist(坐标兜底)
     __block CGFloat minDist = CGFLOAT_MAX;
@@ -3267,17 +3301,28 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
                 if (!hit) {
                     BOOL small = (kind == 2) ? YES : (haveRect && !CGRectIsEmpty(sf) ? (sf.size.width < 140.0 && sf.size.height < 140.0) : NO);
                     BOOL near = (d <= hitR);
-                    BOOL veryNear = (d <= 45.0f);
+                    BOOL veryNear = (d <= 32.0f);   // [2026-09-17] 45→32：与 hitR 同步。31pt 那次误拦正是此常量所致
+                    // [2026-09-17 可见性约束] 只有**当前真的显示着**的手柄才参与 dist 兜底判定。
+                    // 根因：QQ 聊天页里长期残留 6 个 DragAnimation.DragAnimationBaseView（日志实测），
+                    // 选择早已收起/淡出后它们仍在视图树里 ⇒ 任何左缘触摸只要落到附近就被永久拦死
+                    // （「选过一次字之后左缘就废了」）。hitTest 分支不需要此约束（它按当前渲染帧判定，天然准确）。
+                    BOOL visible = (v.window != nil && !v.hidden && v.alpha > 0.05);
                     if (kind == 2) {
                         // [v12f] 确证手柄(kind==2)：取消半区 side 约束。居中柄(≈W/2)与"手柄在触摸对侧"时
                         // 原 side 判定会误杀真实命中(只靠 veryNear 兜底)，是 v12e 多数抓取漏判的根因。
                         // kind==2 类(DragHandle/SelectionHandle/Caret/Loupe/DragAnimation…)均为选择/光标相关，
                         // 命中即让路不会误伤全局返回。
-                        if (near || veryNear) { hit = YES; hitCls = cls; hitReason = @"dist"; }
+                        if (visible && (near || veryNear)) {
+                            hit = YES; hitCls = cls; hitReason = @"dist";
+                            hitAlpha = v.alpha; hitWinNil = (v.window == nil);
+                        }
                     } else {
                         // [v9] 半区约束 side：左柄管左半、右柄管右半；居中柄(≈W/2) side 恒真；极近(d<=45)兜底不限侧
                         BOOL side = (c.x < screenW * 0.5f) ? (sp.x < screenW * 0.5f) : (sp.x >= screenW * 0.5f);
-                        if (small && ((near && side) || veryNear)) { hit = YES; hitCls = cls; hitReason = @"dist"; }
+                        if (visible && small && ((near && side) || veryNear)) {
+                            hit = YES; hitCls = cls; hitReason = @"dist";
+                            hitAlpha = v.alpha; hitWinNil = (v.window == nil);
+                        }
                     }
                 }
             }
@@ -3307,7 +3352,8 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     if (outActive) *outActive = anyHandlePresent;
     if (outMinDist) *outMinDist = (minDist == CGFLOAT_MAX ? 0 : minDist);
     if (hit) {
-        OBDIAG(@"[diag-handle] 命中活动选择手柄(%@) via %@ 距离=%.0f 触摸x=%.0f → shouldBegin 让路", hitCls ? hitCls : @"?", hitReason ? hitReason : @"?", (minDist==CGFLOAT_MAX?0:minDist), sp.x);
+        OBDIAG(@"[diag-handle] 命中活动选择手柄(%@) via %@ 距离=%.0f 触摸x=%.0f alpha=%.2f winNil=%d → shouldBegin 让路",
+              hitCls ? hitCls : @"?", hitReason ? hitReason : @"?", (minDist==CGFLOAT_MAX?0:minDist), sp.x, hitAlpha, (int)hitWinNil);
         return 2;
     }
     if (anyHandlePresent && minDist > hitR && minDist < 260.0 && sNearCount < 25) {
