@@ -22,7 +22,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"slime-bend"
+#define OBACK_BUILD_TAG @"slime-small"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -292,6 +292,12 @@ static CGFloat const kSlimeEndPow   = 1.35;   // 轮廓幂指数：>1 → 比正
 //   先铺线后弯曲时它 4%→16%（起手是一条细线，随后才被拉弯）。
 static CGFloat const kSlimeReachEase = 2.0;    // 沿边铺线的 ease-out 指数：>1 → 长度先到位
 static CGFloat const kSlimeBendEase  = 2.0;    // 鼓起的 ease-in 指数：>1 → 弯后长出来
+// ── 整体大小（用户 2026-09-16「可以整体小一些」）──
+// ⚠️ 刻意做成**单一系数乘在鼓出与沿边长度上**，而不是去改上面那一组照视频拟合出来的基准值：
+//   ① 高宽比（6:1）与「出来的方式」的宽高比曲线都不受缩放影响（等比缩放，比值不变）；
+//   ② 日后想再大/再小只改这一个数，基准值（视频实测 36×220）仍留在注释里作参照。
+//   贴边性不受影响：贴边侧 baseX 恒为 0，缩放只让鼓出与沿边长度变小，形状依旧压在屏幕边线上。
+static CGFloat const kSlimeScale     = 0.80;   // 整体缩放：1.0 = 照视频原尺寸（36×220）；0.80 = 28.8×176
 // ── 垂直「流动」参数（用户要求：上下移动手指时液体要有被推动的流动感）──
 static CGFloat const kSlimeFlowMax   = 0.28;    // 峰值位置最大偏移比例（uP 在 0.22~0.78 间移动）
 static CGFloat const kSlimeFlowShift = 8.0;     // 液体整体沿 y 的微移（pt）：向上流动时整体也上浮一点
@@ -514,8 +520,8 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     // ⚠️ 别再让两者同系数线性增长：那样每一帧都是同一个胖瘦的小叶子在等比放大（观感＝「胀」不是「弯」）。
     CGFloat eReach = 1.0 - pow(1.0 - p, kSlimeReachEase);                 // 0→1，先快后慢
     CGFloat eBend  = pow(p, kSlimeBendEase);                              // 0→1，先慢后快
-    CGFloat gIn   = kSlimeGrowIn0 + (kSlimeGrowIn1 - kSlimeGrowIn0) * eBend;    // 向屏内的鼓出
-    CGFloat halfH = kSlimeHalfH0  + (kSlimeHalfH1  - kSlimeHalfH0)  * eReach;   // 沿屏幕边缘的半高
+    CGFloat gIn   = (kSlimeGrowIn0 + (kSlimeGrowIn1 - kSlimeGrowIn0) * eBend)  * kSlimeScale;   // 向屏内的鼓出
+    CGFloat halfH = (kSlimeHalfH0  + (kSlimeHalfH1  - kSlimeHalfH0)  * eReach) * kSlimeScale;   // 沿屏幕边缘的半高
     BOOL isLeft = (_edge == ObackEdgeLeft);
     // 垂直流动：整体沿 y 的微移（手指向上 → 液体上浮一点，做出粘滞/惯性感）。
     // 只影响绘制、不改 view 位置 ⇒ 不影响「钉在屏幕边缘」这条铁律。
