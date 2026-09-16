@@ -22,7 +22,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"slime-taut"
+#define OBACK_BUILD_TAG @"slime-bend"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -257,10 +257,8 @@ static CGFloat const kSlimeMaxTravel = 0.0;
 //   ② 贴边侧是一条绝对平直的线（压在屏幕边线上），外侧向屏内鼓出；
 //   ③ 最宽处在垂直中点，**上下两端收成尖**；
 //   ④ 实测轮廓：沿边展开 ≈ 220pt、最大鼓出 ≈ 36pt → **高宽比 ≈ 6:1（细长如柳叶，不是圆胖）**；
-//   ⑤ 【2026-09-16 二次定案：两侧改为「直线」】用户二次反馈「深色部份两边不应该像是从屏幕外抽出来，
-//      应该像贴着屏幕被拉起来 —— 平整的线条中间拉起来、两边自然被带动起来」。
-//      ⇒ 早期用 sin(u·π)^1.35 拟合出的**弧线**侧轮廓，看起来像一枚独立梭子插在屏幕边上；
-//        改为**中段直线**（像布被拎起来的两道折痕，两端仍是自然收口），见 kSlimeTipBlend；
+//   ⑤ 轮廓宽度沿高度的分布拟合得幂指数 ≈ 1.4（>1 比正弦更收，两端收得更快、更尖）；
+//      ⚠️ 曾尝试改成「中段直线」（824da60），用户明确否掉：**弧形是对的**，要改的是「出来的方式」（见 ⑩）。
 //   ⑥ 动画：起手几乎为零（视频 t=6.2s 时完全看不见）→ 随拖动「长」出来 → 松手收回，**全程表面无波纹**；
 //   ⑦ **全程钉在屏幕边缘**：视频里指示器始终贴着侧边，只「长」不「移」——故 kSlimeMaxTravel = 0，
 //      并保证缩放（dismiss）也以屏幕边缘为支点（见 _slimeEdgeAnchoredCenterForScale:y:window:edge:）。
@@ -276,13 +274,24 @@ static CGFloat const kSlimeMaxTravel = 0.0;
 static CGFloat const kSlimeFrameW   = 44.0;   // 包围盒宽（容纳 36pt 最大鼓出 + 余量）
 static CGFloat const kSlimeFrameH   = 240.0;  // 包围盒高（容纳 220pt 沿边展开 + 余量）
 static CGFloat const kSlimeRootX    = 0.0;    // 贴边侧的 x：0 = 紧贴包围盒边缘（渲染时再贴到屏幕边）
-static CGFloat const kSlimeGrowIn0  = 3.0;    // 起手时的鼓出（视频里起手几乎为零，完全看不见）
+static CGFloat const kSlimeGrowIn0  = 1.0;    // 起手时的鼓出：≈0 ⇒ 静态就是「平贴屏幕的直线」（完全看不见）
+                                              // ⚠️ 数值上必须 < 1.37，否则起手那一帧会比 25% 进度「胖」，
+                                              //    宽高比曲线出现回落（先胖后瘦再变胖），破坏「先铺线后弯曲」的单调性
 static CGFloat const kSlimeGrowIn1  = 36.0;   // 完全拉出时的鼓出
 static CGFloat const kSlimeHalfH0   = 24.0;   // 起手时的沿边半高（很短一截）
 static CGFloat const kSlimeHalfH1   = 110.0;  // 完全拉出时的沿边半高 → 高 220pt，高宽比 ≈ 6:1
-static CGFloat const kSlimeTipBlend = 0.22;   // 两端「自然收口」占比（0~1）：0 = 纯直线（两端成硬角）；
-                                              // 0.22 = 外侧 22% 用三次曲线平滑收回（保端点切线水平，
-                                              // 与屏幕边缘相切 ⇒ 两端观感与弧线版一致，只有中段变成直线）
+static CGFloat const kSlimeEndPow   = 1.35;   // 轮廓幂指数：>1 → 比正弦更收、两端更快收尖（照视频轮廓拟合）
+// ── 「出来的方式」参数（用户 2026-09-16 定案：③ 先铺线后弯曲）──
+// 用户澄清：「形状还是原来的弧形，是说边出来的方式得改一下……里边的相当于是一条平贴屏幕的直线，
+//   拉起来的时候是弯起来」。
+// ⇒ 概念模型：静态下是**一条平贴屏幕的直线**（鼓出≈0 ⇒ 完全看不见），拉的时候才**弯**出鼓包。
+//   所以「沿边长度」与「鼓起」必须走**两条不同的曲线**（此前两者都线性 ⇒ 观感是一个点各向等比胀大）：
+//     · 沿边长度 halfH：ease-**out**（kSlimeReachEase）→ 线先快速铺开；
+//     · 鼓起     gIn  ：ease-**in** （kSlimeBendEase） → 弯是后长出来的。
+//   判据是「宽高比 gIn/(2·halfH)」：等比胀大时它一路 12%→16%（始终同一胖瘦），
+//   先铺线后弯曲时它 4%→16%（起手是一条细线，随后才被拉弯）。
+static CGFloat const kSlimeReachEase = 2.0;    // 沿边铺线的 ease-out 指数：>1 → 长度先到位
+static CGFloat const kSlimeBendEase  = 2.0;    // 鼓起的 ease-in 指数：>1 → 弯后长出来
 // ── 垂直「流动」参数（用户要求：上下移动手指时液体要有被推动的流动感）──
 static CGFloat const kSlimeFlowMax   = 0.28;    // 峰值位置最大偏移比例（uP 在 0.22~0.78 间移动）
 static CGFloat const kSlimeFlowShift = 8.0;     // 液体整体沿 y 的微移（pt）：向上流动时整体也上浮一点
@@ -484,29 +493,29 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
 // 液滴进度：0 = 刚按下、紧贴屏幕边缘的一线薄液体；1 = 完全拉出的饱满液滴。
 // 每帧由 CADisplayLink 调用（已在 Manager 侧用一部分 target 做过一次平滑），此处的重心是几何。
 //
-// 轮廓构造（用户两次拍板后的定案）：
+// 轮廓构造（用户拍板定案）：
 //   ① 【贴边侧】是一条绝对平直的线段（x = 屏内基线），不动一丝 → 液体牢牢贴着屏幕边缘；
-//   ② 【外侧 = 中段直线 + 两端自然收口】（本轮改动）：
-//      以「峰值参数 t」表达（t=0/1 为两端、t=0.5 为最鼓处），令 d = |2t-1|：
-//        · d ≤ 1-kSlimeTipBlend  →  s = 1 - d          （**绝对直线**：布被拎起来的两道折痕）
-//        · d >  1-kSlimeTipBlend  →  s = k·r²(2-r)，r=(1-d)/k（三次曲线，与直线段 C¹ 连续、
-//                                     末端导数为 0 → 与屏幕边缘相切，两端自然收回，不是硬角）
-//      → 结果：中段是一道笔直的拉痕，两端自然收进屏幕边缘 —— 像边缘本身被拎起，
-//        而不是一枚独立梭子从屏幕外插进来（旧版 sin^k 全段弧线，用户否掉）。
+//   ② 【外侧】由表面张力曲线 sin(u·π)^k 生成：u 从 0 到 1 时从 0 涨到峰值再回落到 0，
+//      中段（u=0.5）鼓起最多、上下两侧对称、末端导数为 0 → 圆钝收口（不是尖）。
+//      ⚠️ 弧形是用户拍板要保留的形状（824da60 曾改直线被否），别再改形状本身。
 //   ③ 上端、下端各以一小段直线把外侧端点连回贴边侧，形成封闭轮廓。
-//   ④ 因为是「直线段 + 端点切线水平」，所以最鼓处（t=0.5）是一个脊点（夹角 ≈ 36°），
-//      这正是「被手指捏住拉起来」的形态；若想两端也成硬角（纯三角形），把 kSlimeTipBlend 置 0 即可。
 //   ⚠️ 刻意【不叠加任何表面波纹】：流动性完全由「拉出形变」本身表达。
 //      （早期版本曾加相位自走的流动波，导致静止时也在蠕动 —— 用户明确否掉：
 //        「是紧贴边缘，拉出来……我说的是拉出来时的动画」，故静止时必须完全静止。）
-- (void)setSlimeProgress:(CGFloat)p {
+- (void)setSlimeProgress:(CGFloat)prog {
     if (!_slime || !_body) return;
-    CGFloat e = p;
-    if (e < 0.0) e = 0.0; else if (e > 1.0) e = 1.0;
-    e = e * e * (3.0 - 2.0 * e);                      // smoothstep：起步与收尾都柔，避免线性形变显生硬
+    CGFloat p = prog;
+    if (p < 0.0) p = 0.0; else if (p > 1.0) p = 1.0;
+    CGFloat e = p * p * (3.0 - 2.0 * p);               // smoothstep：给箭头线宽/淡入用（起步与收尾都柔）
 
-    CGFloat gIn   = kSlimeGrowIn0 + (kSlimeGrowIn1 - kSlimeGrowIn0) * e;   // 向屏内的鼓出
-    CGFloat halfH = kSlimeHalfH0  + (kSlimeHalfH1  - kSlimeHalfH0)  * e;   // 沿屏幕边缘的半高
+    // 【出来的方式（用户定案 ③ 先铺线后弯曲）】
+    // 静态＝一条平贴屏幕的直线（鼓出≈0 ⇒ 看不见），拉起来才「弯」出鼓包 —— 故两条曲线分开走：
+    //   沿边长度 ease-out（线先铺开） / 鼓起 ease-in（弯后长出来）。
+    // ⚠️ 别再让两者同系数线性增长：那样每一帧都是同一个胖瘦的小叶子在等比放大（观感＝「胀」不是「弯」）。
+    CGFloat eReach = 1.0 - pow(1.0 - p, kSlimeReachEase);                 // 0→1，先快后慢
+    CGFloat eBend  = pow(p, kSlimeBendEase);                              // 0→1，先慢后快
+    CGFloat gIn   = kSlimeGrowIn0 + (kSlimeGrowIn1 - kSlimeGrowIn0) * eBend;    // 向屏内的鼓出
+    CGFloat halfH = kSlimeHalfH0  + (kSlimeHalfH1  - kSlimeHalfH0)  * eReach;   // 沿屏幕边缘的半高
     BOOL isLeft = (_edge == ObackEdgeLeft);
     // 垂直流动：整体沿 y 的微移（手指向上 → 液体上浮一点，做出粘滞/惯性感）。
     // 只影响绘制、不改 view 位置 ⇒ 不影响「钉在屏幕边缘」这条铁律。
@@ -538,17 +547,10 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
         // 保端点（u=0→t=0、u=1→t=1）⇒ 两端依旧归零收成尖、轮廓始终闭合。
         CGFloat t = (u <= uP) ? (0.5 * u / uP)
                               : (0.5 + 0.5 * (u - uP) / (1.0 - uP));
-        // 侧轮廓（本轮定案）：**中段直线** + 两端自然收口。d = |2t-1|：0 = 最鼓处、1 = 端点。
-        // 直线段让两侧成为「平整的折痕」（像布被拎起来），不再是原来那道让液滴像独立梭子的弧线；
-        // 两端用三次曲线（与直线段 C¹ 连续、端点导数为 0）自然收回 → 与屏幕边缘相切，收口观感不变。
-        CGFloat d = fabs(2.0 * t - 1.0);
-        CGFloat s;
-        if (kSlimeTipBlend <= 0.0 || d <= 1.0 - kSlimeTipBlend) {
-            s = 1.0 - d;                                   // 直线段（kSlimeTipBlend=0 ⇒ 全直线，两端成硬角）
-        } else {
-            CGFloat r = (1.0 - d) / kSlimeTipBlend;        // r: 1 → 0
-            s = kSlimeTipBlend * r * r * (2.0 - r);        // 三次曲线：端点导数 0（与边缘相切）
-        }
+        // 弧形侧轮廓：sin^k，k>1 → 比正弦更收、两端更快收尖（照实拍视频轮廓拟合）。
+        // ⚠️ 824da60 曾把它改成「中段直线 + 两端三次曲线收口」，用户否掉：
+        //    「形状还是原来的弧形，是说边出来的方式得改一下」⇒ 弧形保留，改的是【出来的过程】。
+        CGFloat s = pow(sin(M_PI * t), kSlimeEndPow);
         CGFloat x = baseX + outDir * (gIn * s);
         CGFloat y = cy - halfH + 2.0 * halfH * u;
         CGPoint pt = CGPointMake(x, y);
@@ -571,7 +573,11 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     // 【2026-09-16 再缩小一档】用户「箭头可以再小点」→ 三个系数同步下调约 26%，
     //   ⚠️ 仍**全部按液滴当前尺寸的比例**给出（同源生长的性质不能丢），只调系数。
     //   且本轮侧轮廓改直线后中段比弧线版更瘦（3/8 高度处 90% → 75%），箭头同步缩小才不显拥挤。
-    CGFloat aReach = halfH * 0.085;                    // 半高：完全展开 ≈ 9.4（上一版 0.115 → 12.7）
+    // ⚠️ aReach 由 halfH 改为 **gIn**（0.26×36 ≈ 9.4，与旧系数在满进度时等价）：
+    //    本轮起「长度」与「鼓起」不再同系数增长，若箭头纵向仍跟 halfH，中途会变成一枚
+    //    「又高又瘦」的畸形箭头（例如 50% 进度时鼓出才 11pt、箭头却已 15pt 高）。
+    //    两个方向都跟**鼓包**走 ⇒ 箭头全程保持同一胖瘦，与液体同步长大。
+    CGFloat aReach = gIn   * 0.26;                     // 半高：完全展开 ≈ 9.4
     CGFloat aStep  = gIn   * 0.125;                    // 横向半跨：完全展开 ≈ 4.5（上一版 0.17 → 6.1）
     CGFloat aLine  = 0.30 + 1.60 * e;                  // 线宽：0.30 → 1.9（上一版 0.35 → 2.5；起手趋零）
     CGFloat aAlpha = pow(e, 1.2);                      // 淡入：比尺寸稍晚一点，杜绝「边上一闪」
