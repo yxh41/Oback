@@ -22,7 +22,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"slime-arrow"
+#define OBACK_BUILD_TAG @"slime-flow"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -263,7 +263,13 @@ static CGFloat const kSlimeMaxTravel = 0.0;
 //      并保证缩放（dismiss）也以屏幕边缘为支点（见 _slimeEdgeAnchoredCenterForScale:y:window:edge:）。
 //   ⑧ **箭头是「长出来」的、不是「蹦出来」的**：视频里白色箭头随液体浮现而渐显。
 //      ⇒ 箭头尺寸按液滴当前尺寸比例给出（aReach/aStep）+ 线宽与不透明度起手趋零。
+//   ⑨ **手指上下移动时液体要「流」起来**（用户 2026-09-16 追加要求）：
+//      手指向上 → 深色液体也向上运动 → **上大下小**，看得出是被「推」着走的。
+//      实现 = 把轮廓最宽处（峰值）从固定 u=0.5 改成随垂直速度上下偏移的 uP，
+//      并让整体沿 y 做一点微移（有粘滞/惯性感）。速度→bias 归一化、bias 再做平滑，
+//      故**松手或手指停住时液体自动回到对称**（不做自走的表面波纹）。
 // 坐标系：x = 屏幕横向（向屏内为 +x）；y = 屏幕纵向（沿屏幕边缘延伸）。
+// ⚠️ 轮廓参数 u 的方向：**u=0 对应屏幕上方端点，u=1 对应屏幕下方端点**（y = cy - halfH + 2·halfH·u）。
 static CGFloat const kSlimeFrameW   = 44.0;   // 包围盒宽（容纳 36pt 最大鼓出 + 余量）
 static CGFloat const kSlimeFrameH   = 240.0;  // 包围盒高（容纳 220pt 沿边展开 + 余量）
 static CGFloat const kSlimeRootX    = 0.0;    // 贴边侧的 x：0 = 紧贴包围盒边缘（渲染时再贴到屏幕边）
@@ -272,6 +278,10 @@ static CGFloat const kSlimeGrowIn1  = 36.0;   // 完全拉出时的鼓出
 static CGFloat const kSlimeHalfH0   = 24.0;   // 起手时的沿边半高（很短一截）
 static CGFloat const kSlimeHalfH1   = 110.0;  // 完全拉出时的沿边半高 → 高 220pt，高宽比 ≈ 6:1
 static CGFloat const kSlimeEndPow   = 1.35;   // 轮廓幂指数：>1 → 比正弦更收、两端更快收尖（照视频轮廓拟合）
+// ── 垂直「流动」参数（用户要求：上下移动手指时液体要有被推动的流动感）──
+static CGFloat const kSlimeFlowMax   = 0.28;    // 峰值位置最大偏移比例（uP 在 0.22~0.78 间移动）
+static CGFloat const kSlimeFlowShift = 8.0;     // 液体整体沿 y 的微移（pt）：向上流动时整体也上浮一点
+static CGFloat const kSlimeFlowRefV  = 1200.0;  // 速度归一化参考（pt/s）：达到该速度即视为「全力流动」
 
 #pragma mark - 边缘方向指示胶囊（OPPO 风格：跟随手指、带方向箭头）
 
@@ -292,6 +302,9 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
 - (void)setFlowSpeed:(CGFloat)speed;   // 流光跟手：流速联动手指速度（1=正常，>1 更 energetic，<1 更 calm）
 - (BOOL)isSlime;                      // 是否为「液态液滴」形态（决定形变方式：路径形变 vs 等比缩放）
 - (void)setSlimeProgress:(CGFloat)p;  // 液滴进度：0=刚按下的一线薄液体，1=完全拉出的饱满液滴
+// 垂直流动偏置：+1 = 手指向上（液体向上流 → 上大下小），-1 = 手指向下，0 = 对称。
+// 只写值不重建路径；由紧接着的 setSlimeProgress: 统一应用（调用方在 tick 里同步推进两者）。
+- (void)setSlimeFlowBias:(CGFloat)bias;
 @end
 
 @implementation ObackEdgeIndicator {
@@ -301,6 +314,7 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     BOOL _breathing;                // 呼吸特效：在平滑插值里叠加正弦脉冲
     CAShapeLayer *_body;            // 液滴特效：液体本体（自绘路径，随进度形变）
     BOOL _slime;                    // 液态液滴标记（用 body 路径取代 background/cornerRadius 那套圆角矩形假设）
+    CGFloat _slimeFlowBias;         // 垂直流动偏置（-1~+1）：把轮廓峰值沿上下移动，做出「被推动」的流动感
 }
 
 - (instancetype)initWithEdge:(ObackEdge)edge {
@@ -483,29 +497,45 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     CGFloat gIn   = kSlimeGrowIn0 + (kSlimeGrowIn1 - kSlimeGrowIn0) * e;   // 向屏内的鼓出
     CGFloat halfH = kSlimeHalfH0  + (kSlimeHalfH1  - kSlimeHalfH0)  * e;   // 沿屏幕边缘的半高
     BOOL isLeft = (_edge == ObackEdgeLeft);
-    CGFloat cy = kSlimeFrameH * 0.5;
+    // 垂直流动：整体沿 y 的微移（手指向上 → 液体上浮一点，做出粘滞/惯性感）。
+    // 只影响绘制、不改 view 位置 ⇒ 不影响「钉在屏幕边缘」这条铁律。
+    CGFloat cy = kSlimeFrameH * 0.5 - _slimeFlowBias * kSlimeFlowShift;
 
     // 贴边侧在包围盒内的 x（左缘 = kSlimeRootX；右缘镜像到另一侧）
     CGFloat baseX = isLeft ? kSlimeRootX : (kSlimeFrameW - kSlimeRootX);
     // 外侧方向：左缘时向屏内是 +x；右缘时向屏内是 -x
     CGFloat outDir = isLeft ? 1.0 : -1.0;
 
+    // 垂直流动：把轮廓峰值从固定中点 u=0.5 改成随 bias 偏移的 uP。
+    // ⚠️ u 的方向：u=0 = 屏幕**上**端，u=1 = 屏幕**下**端（见 y = cy - halfH + 2·halfH·u）。
+    // bias>0（手指向上）→ uP < 0.5 → 峰值上移 ⇒ **上大下小**，液体看起来被「推」着往上走；
+    // bias<0 则相反（下大上小）。bias=0 时 uP=0.5，形状与对称版完全一致（向后兼容）。
+    CGFloat uP = 0.5 - kSlimeFlowMax * _slimeFlowBias;
+    if (uP < 0.06) uP = 0.06; else if (uP > 0.94) uP = 0.94;
+    // 箭头的纵向中心跟着「最宽处」走：液体被推着上/下移动时，箭头随之浮到鼓包中央，
+    // 始终待在最厚的那一段里（bias=0 时 uP=0.5 ⇒ 与原来完全一致）。
+    CGFloat cyArrow = cy - halfH + 2.0 * halfH * uP;
+
     // 采样构造闭合轮廓。N 越大越平滑；64 点足以让液滴曲线看不出折线。
     NSInteger N = 64;
     UIBezierPath *path = [UIBezierPath bezierPath];
 
-    // ① 外侧（从下端 u=0 走到上端 u=1）：表面张力曲线，中段鼓起最多、上下对称
+    // ① 外侧（从上端 u=0 走到下端 u=1）：表面张力曲线，峰值落在 uP（bias=0 时即中段）
     for (NSInteger i = 0; i <= N; i++) {
         CGFloat u = (CGFloat)i / (CGFloat)N;
-        // 表面张力：sin^k，k<1 → 中段更饱满、末端快速回落到 0 且导数为 0（圆钝收口）
-        CGFloat s = pow(sin(M_PI * u), kSlimeEndPow);
+        // 峰值重映射：把 u 分段线性映到以 uP 为峰值的参数 t；
+        // 保端点（u=0→t=0、u=1→t=1）⇒ 两端依旧归零收成尖、轮廓始终闭合。
+        CGFloat t = (u <= uP) ? (0.5 * u / uP)
+                              : (0.5 + 0.5 * (u - uP) / (1.0 - uP));
+        // 表面张力：sin^k，k>1 → 比正弦更收、两端更快收尖（照实拍视频轮廓拟合）
+        CGFloat s = pow(sin(M_PI * t), kSlimeEndPow);
         CGFloat x = baseX + outDir * (gIn * s);
         CGFloat y = cy - halfH + 2.0 * halfH * u;
         CGPoint pt = CGPointMake(x, y);
         if (i == 0) [path moveToPoint:pt];
         else [path addLineToPoint:pt];
     }
-    // ② 上端 → 贴边侧的上端点（平直侧边的收口）
+    // ② 下端 → 贴边侧的下端点（平直侧边的收口）
     [path addLineToPoint:CGPointMake(baseX, cy + halfH)];
     // ③ 贴边侧：一条绝对平直的线，严丝合缝贴屏幕边缘
     [path addLineToPoint:CGPointMake(baseX, cy - halfH)];
@@ -518,17 +548,17 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     //    起手时液滴只有 3pt 宽的一线，箭头却已是接近满尺寸的纯白图形，且中心落在 x≈1.5
     //    → 箭头一半被屏幕边裁掉 ⇒ 观感就是「边上一闪蹦出个白箭头」（用户 2026-09-16 反馈「有点突兀」）。
     //    固定基准还导致中途箭头相对液滴过大（两者不同步）。
-    CGFloat aReach = halfH * 0.16;                     // 半高：随液滴沿边长度走，完全展开 ≈ 17.6
-    CGFloat aStep  = gIn   * 0.24;                     // 横向半跨：随液滴鼓出走，完全展开 ≈ 8.6
-    CGFloat aLine  = 0.4 + 2.8 * e;                    // 线宽：0.4 → 3.2（起手趋零，不显硬边）
+    CGFloat aReach = halfH * 0.115;                    // 半高：完全展开 ≈ 12.6（比上一版 0.16 明显小一圈）
+    CGFloat aStep  = gIn   * 0.17;                     // 横向半跨：完全展开 ≈ 6.1
+    CGFloat aLine  = 0.35 + 2.15 * e;                  // 线宽：0.35 → 2.5（起手趋零，不显硬边）
     CGFloat aAlpha = pow(e, 1.2);                      // 淡入：比尺寸稍晚一点，杜绝「边上一闪」
     CGFloat dir    = outDir;                           // 箭头尖端朝屏幕外侧 = 返回方向（左缘朝左 / 右缘朝右）
     // 中腰「略偏屏内」放置：整枚箭头（±aStep）都落在液滴轮廓内，既不被屏幕边裁掉、也不戳出液滴外沿。
     CGFloat cx     = baseX + outDir * (gIn * 0.54);
     UIBezierPath *cp = [UIBezierPath bezierPath];
-    [cp moveToPoint:CGPointMake(cx + dir * aStep, cy - aReach)];
-    [cp addLineToPoint:CGPointMake(cx - dir * aStep, cy)];
-    [cp addLineToPoint:CGPointMake(cx + dir * aStep, cy + aReach)];
+    [cp moveToPoint:CGPointMake(cx + dir * aStep, cyArrow - aReach)];
+    [cp addLineToPoint:CGPointMake(cx - dir * aStep, cyArrow)];
+    [cp addLineToPoint:CGPointMake(cx + dir * aStep, cyArrow + aReach)];
 
     // ⚠️ 必须关掉隐式动画：这里是被 CADisplayLink 逐帧调用的，
     //    若走 CA 默认的 0.25s 隐式动画，形变会滞后于手指（看起来「跟不上手」）。
@@ -540,6 +570,14 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     _chevron.lineWidth = aLine;
     _chevron.opacity = (float)aAlpha;                  // 与液滴一起淡入（起手为 0 ⇒ 不先于液体出现）
     [CATransaction commit];
+}
+
+// 垂直流动偏置（-1~+1）。只记录值、不重建路径 —— 调用方（_obIndicatorTick:）紧接着就会调
+// setSlimeProgress: 把新 bias 应用上去，避免同一帧构造两次 64 点路径。
+- (void)setSlimeFlowBias:(CGFloat)bias {
+    if (!_slime) return;
+    if (bias < -1.0) bias = -1.0; else if (bias > 1.0) bias = 1.0;
+    _slimeFlowBias = bias;
 }
 
 - (void)stopEffectAnimations {
@@ -604,6 +642,8 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
     CGFloat _indicatorTargetScale; // 胶囊目标缩放
     CGFloat _indicatorProgress;        // 液滴：当前已呈现的鼓出进度（0=贴边一线，1=饱满液滴）
     CGFloat _indicatorTargetProgress;  // 液滴：目标鼓出进度（updateIndicator 写入，tick 同系数插值）
+    CGFloat _slimeFlowBias;            // 液滴：当前垂直流动偏置（-1~+1，tick 插值到 target）
+    CGFloat _slimeFlowBiasTarget;      // 液滴：目标垂直流动偏置（由手指垂直速度映射，停手/松手时缓回 0）
     CGFloat _flowSpeed;          // 流光跟手：当前平滑流速（1=正常 5.5s 循环，>1 更快更 energetic）
     CGFloat _flowTargetSpeed;    // 流光跟手：目标流速（由手指横向速度映射，手指暂停时缓回 1.0）
     id     _navPopTarget;        // 方案A: 系统原生 nav pop 的私有 target(_UINavigationInteractiveTransition)，
@@ -2513,6 +2553,8 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     _indicatorTargetScale = slime ? 1.0 : 0.85;  // 液滴不做等比缩放（形变由 setSlimeProgress: 负责）
     _indicatorProgress = 0.0;                    // 液滴：从贴边一线起步
     _indicatorTargetProgress = 0.0;
+    _slimeFlowBias = 0.0;                        // 液滴：垂直流动从「对称」起手
+    _slimeFlowBiasTarget = 0.0;
     OBLog(@"indicator shown (edge=%@ y=%.0f)", edge == ObackEdgeLeft ? @"左" : @"右", loc.y);
     [UIView animateWithDuration:0.15 delay:0 options:UIViewAnimationOptionCurveEaseOut
                      animations:^{ ind.alpha = 0.9; } completion:nil];
@@ -2550,6 +2592,12 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         // ⚠️ 只写 target，实际形变在 _obIndicatorTick: 里与位置同一系数插值，
         //    否则「位置滞后、形状先到」会在快滑时脱节。
         _indicatorTargetProgress = MIN(1.0, _currentPercent / 0.45);
+        // 手指垂直速度 → 垂直流动偏置（向上为 +1）。用户要求：手指向上 → 深色液体也向上跑 → 上大下小。
+        // 速度是瞬时量、会抖，故先做一次低通（0.6/0.4），再由 tick 做第二级插值 → 两级平滑足够顺。
+        // 手指停住/松手时速度归零 ⇒ bias 自动缓回 0 ⇒ 液体回到对称（不做自走波纹）。
+        CGFloat vy = [pan velocityInView:win].y;                  // UIKit：y 向下为正
+        CGFloat biasRaw = MAX(-1.0, MIN(1.0, -vy / kSlimeFlowRefV));  // 手指向上 ⇒ vy<0 ⇒ biasRaw>0
+        _slimeFlowBiasTarget = _slimeFlowBiasTarget * 0.6 + biasRaw * 0.4;
     } else {
         _indicatorTargetScale = 0.85 + 0.15 * MIN(1.0, _currentPercent / 0.3);
     }
@@ -2641,13 +2689,19 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     sc += (targetScale - sc) * k;
     _indicator.transform = CGAffineTransformMakeScale(sc, sc);
     _indicator.alpha = targetAlpha;
-    // 液滴：与位置同一系数插值到目标鼓出进度。
-    // 差值 <0.002 时跳过重建（省掉每帧 64 点路径构造）——**静止时完全静止**是用户明确要求：
-    // 流动性只由「拉出形变」本身表达，不叠加任何自走的表面波纹（早期版本加了相位自走，被否掉）。
+    // 液滴：与位置同一系数插值到目标鼓出进度 + 目标垂直流动偏置。
+    // 「静止时完全静止」仍是铁律：**只要 bias 已归零且没在动，就不重建路径**（省掉每帧 64 点构造）。
+    // 也刻意不解锁任何自走的相位波（早期版本那样做会被用户否掉）。
     if ([(ObackEdgeIndicator *)_indicator isSlime]) {
         CGFloat dp = _indicatorTargetProgress - _indicatorProgress;
-        if (fabs(dp) > 0.002) {
+        CGFloat db = _slimeFlowBiasTarget - _slimeFlowBias;
+        // 需要重建的三种情形：进度在变 / bias 在变 / bias 尚未归零（还得继续往 0 收）
+        BOOL moving = (fabs(dp) > 0.002) || (fabs(db) > 0.002) || (fabs(_slimeFlowBias) > 0.002);
+        if (moving) {
             _indicatorProgress += dp * k;
+            // 流动偏置用略小的系数：比位置/进度稍「黏」一点，液体推起来更有重量感
+            _slimeFlowBias += db * (k * 0.7);
+            [(ObackEdgeIndicator *)_indicator setSlimeFlowBias:_slimeFlowBias];
             [(ObackEdgeIndicator *)_indicator setSlimeProgress:_indicatorProgress];
         }
     }
