@@ -22,7 +22,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"slime-video"
+#define OBACK_BUILD_TAG @"slime-pinned"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -242,9 +242,13 @@ static void *kObackNavKey = &kObackNavKey;   // 把 pan 所属的 UINavigationCo
 static void *kDiagLastLogKey = &kDiagLastLogKey;  // 双返回诊断：同一 window 日志节流（每 2s 最多打一次手势清单）
 static void *kGlobalPanKey = &kGlobalPanKey;        // 全屏 pan 引用（绑到 window，gestureRecognizerShouldBegin 识别用）
 static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指移动的距离 (pt)
-// 「液态史莱姆」自身会随进度横向鼓出(最多 58pt)+纵向蠕动张开，若再叠加胶囊那档 110pt 位移会过度夸张，
-// 故单独限脏位移：它主要靠「形变 + 内部流动」而非「平移」表达跟手。
-static CGFloat const kSlimeMaxTravel = 40.0;
+// 【2026-09-16 修正：液滴不做任何横向平移】
+// 用户报「贴不了边缘，一定要距离边缘有距离？」——根因就是这里给了 40pt 跟手位移：
+// 贴边侧虽然起手压在屏幕边线上（inset=0），但 _indicatorTarget.x = home.x + travel 会把整块形状
+// 向屏内推最多 40pt → 贴边侧离开边线，露出最大 40pt 的缝。
+// 照实拍视频：指示器**全程钉在屏幕边缘**，跟手感完全由「从边缘长出来」的形变（setSlimeProgress:）
+// 表达，不靠平移。故此处归零；日后若想恢复少量位移，只改这一个数即可（贴边性会同步变差）。
+static CGFloat const kSlimeMaxTravel = 0.0;
 
 // ── 液态液滴指示器几何（ObackCapsuleEffectSlime）──
 // 【2026-09-16 定案：照用户提供的 ColorOS 实拍视频还原】
@@ -254,7 +258,9 @@ static CGFloat const kSlimeMaxTravel = 40.0;
 //   ③ 最宽处在垂直中点，**上下两端收成尖**；
 //   ④ 实测轮廓：沿边展开 ≈ 220pt、最大鼓出 ≈ 36pt → **高宽比 ≈ 6:1（细长如柳叶，不是圆胖）**；
 //   ⑤ 轮廓宽度沿高度的分布拟合得幂指数 ≈ 1.4（>1 比正弦更收，两端收得更快、更尖）；
-//   ⑥ 动画：起手几乎为零（视频 t=6.2s 时完全看不见）→ 随拖动「长」出来 → 松手收回，**全程表面无波纹**。
+//   ⑥ 动画：起手几乎为零（视频 t=6.2s 时完全看不见）→ 随拖动「长」出来 → 松手收回，**全程表面无波纹**；
+//   ⑦ **全程钉在屏幕边缘**：视频里指示器始终贴着侧边，只「长」不「移」——故 kSlimeMaxTravel = 0，
+//      并保证缩放（dismiss）也以屏幕边缘为支点（见 _slimeEdgeAnchoredCenterForScale:y:window:edge:）。
 // 坐标系：x = 屏幕横向（向屏内为 +x）；y = 屏幕纵向（沿屏幕边缘延伸）。
 static CGFloat const kSlimeFrameW   = 44.0;   // 包围盒宽（容纳 36pt 最大鼓出 + 余量）
 static CGFloat const kSlimeFrameH   = 240.0;  // 包围盒高（容纳 220pt 沿边展开 + 余量）
@@ -2519,7 +2525,9 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     CGFloat dx = fingerX - _indicatorStartX;
     CGFloat dir = (self.currentEdge == ObackEdgeLeft) ? 1.0 : -1.0;
     CGFloat maxTravel = [(ObackEdgeIndicator *)_indicator isSlime] ? kSlimeMaxTravel : kIndicatorMaxTravel;
-    CGFloat travel = MIN(fabs(dx), maxTravel) * dir;   // 跟随手指；液体位移更小（它主要靠鼓出+流动表达跟手）
+    // 跟随手指；液滴的 maxTravel = 0 → travel 恒为 0 ⇒ 形状**钉在屏幕边缘不动**，
+    // 跟手感完全由下方 setSlimeProgress: 的「从边缘长出来」表达（见 kSlimeMaxTravel 注释）。
+    CGFloat travel = MIN(fabs(dx), maxTravel) * dir;
     CGPoint home = [self indicatorHomeCenterForEdge:self.currentEdge basePoint:_indicatorAnchor window:win];
     // 仅更新目标位置/缩放，真正位移由 CADisplayLink(_obIndicatorTick:) 每帧插值 → 平滑不抖
     _indicatorTarget = CGPointMake(home.x + travel, home.y);
@@ -2540,6 +2548,16 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     // 不再每帧 [win bringSubviewToFront:]（O(n) 主窗口子视图重排）；仅在 showIndicator 时置顶一次
 }
 
+// 液滴缩放时的「支点」修正：把 center 换算成「贴边侧始终停在屏幕边线上」的位置。
+// 直接 CGAffineTransformMakeScale 是围绕 center 缩放 → 贴边侧也会跟着缩，露出缝隙；
+// 令 center.x = halfW*s（左缘）/ W - halfW*s（右缘），则缩放后贴边侧依旧压在边线上。
+- (CGPoint)_slimeEdgeAnchoredCenterForScale:(CGFloat)s y:(CGFloat)y window:(UIWindow *)win edge:(ObackEdge)edge {
+    CGFloat halfW = kSlimeFrameW * 0.5;
+    CGFloat cx = (edge == ObackEdgeLeft) ? (halfW * s)
+                                         : (win.bounds.size.width - halfW * s);
+    return CGPointMake(cx, y);
+}
+
 - (void)dismissIndicatorCommitted:(BOOL)committed params:(ObackParams *)p window:(UIWindow *)win {
     UIView *ind = _indicator;
     _indicator = nil;
@@ -2547,24 +2565,38 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     [self _stopIndicatorLink];   // 手势结束：停平滑插值，胶囊交给 UIView 动画淡出/弹回
     [(ObackEdgeIndicator *)ind stopEffectAnimations];   // 停渐变等循环动画，避免与下方淡出动画冲突
     if (!ind) return;
+    BOOL slime = [(ObackEdgeIndicator *)ind isSlime];
     if (committed) {
         // 提交返回：放大淡出（液体本身已很大，放大幅度收敛，避免糊成一片白）
-        CGFloat endScale = [(ObackEdgeIndicator *)ind isSlime] ? 1.12 : 1.35;
+        CGFloat endScale = slime ? 1.12 : 1.35;
+        // 液滴：放大也要以屏幕边缘为支点，贴边侧始终留在边线上（居中放大会往屏内缩出一条缝）
+        CGPoint target = slime ? [self _slimeEdgeAnchoredCenterForScale:endScale
+                                                                      y:ind.center.y
+                                                                 window:win
+                                                                   edge:self.currentEdge]
+                               : ind.center;
         [UIView animateWithDuration:MAX(0.18, p.duration * 0.6) delay:0
                              options:UIViewAnimationOptionCurveEaseIn
                           animations:^{
             ind.alpha = 0.0;
+            ind.center = target;
             ind.transform = CGAffineTransformMakeScale(endScale, endScale);
         } completion:^(BOOL f) { [ind removeFromSuperview]; }];
     } else {
         // 取消：弹回边缘并缩小消失
-        CGFloat backScale = [(ObackEdgeIndicator *)ind isSlime] ? 0.72 : 0.6;
+        CGFloat backScale = slime ? 0.72 : 0.6;
         CGPoint home = [self indicatorHomeCenterForEdge:self.currentEdge
                                               basePoint:_indicatorAnchor window:win];
+        // 液滴：缩小同样以屏幕边缘为支点（否则「弹回边缘」的过程反而是从边缘缩开）
+        CGPoint target = slime ? [self _slimeEdgeAnchoredCenterForScale:backScale
+                                                                      y:home.y
+                                                                 window:win
+                                                                   edge:self.currentEdge]
+                               : home;
         [UIView animateWithDuration:MAX(0.22, p.duration * 0.7) delay:0
                              options:UIViewAnimationOptionCurveEaseOut
                           animations:^{
-            ind.center = home;
+            ind.center = target;
             ind.alpha = 0.0;
             ind.transform = CGAffineTransformMakeScale(backScale, backScale);
         } completion:^(BOOL f) { [ind removeFromSuperview]; }];
