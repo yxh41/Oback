@@ -271,6 +271,19 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     return v ? [v boolValue] : NO;   // 未设置 → 默认关
 }
 
+// [A'] 「接管即独占」开关（设置面板「接管即独占」key=exclusivePop），默认关。
+// 开 → Oback 一旦确认接管本次返回手势（手势 Began），就在本次手势期间临时禁用 App 自带的返回手势：
+//     含系统/插件的边缘返回 pan、挂在 nav.view 树上的全屏返回 pan、以及类名含返回语义词
+//     （PushPop/SlideBack/SwipeBack/PopGesture/BackGesture/PanPop）的自研全屏返回 pan
+//     —— 覆盖「挂在独立 overlay window 上、抢同一次滑动」的 QQ NTPushPopLib 这类手势；
+//     滚动、文本选择/光标、列表左滑操作一律放行，绝不禁用。松手/取消后 0.12s 自动恢复。
+// 关（默认）→ 完全不改任何 App 手势的 enabled 状态，行为与加本开关之前逐字一致。
++ (BOOL)exclusivePopEnabled {
+    NSDictionary *d = [self _mergedPrefs];
+    id v = [d objectForKey:@"exclusivePop"];
+    return v ? [v boolValue] : NO;   // 未设置 → 默认关
+}
+
 // 诊断横幅独立隐藏开关：key=diagBanner，默认关（设置面板「诊断横幅」开关控制，无需手动写 plist）。
 // 开 → 每次注入在 start 打印 [Oback-diag] 横幅（真实 bid / 名单状态 / isAllowed），用于排查黑名单命中、装包来源；
 // 关（默认）→ 完全不打印，日用机零日志噪声。此前该横幅为常开且绕过「调试日志」开关，

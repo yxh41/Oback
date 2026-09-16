@@ -15,6 +15,7 @@
 + (BOOL)debugLogEnabled;  // 调试日志总开关（设置面板「调试日志」），默认关（批次A 改为关 + 缓存 + 30min 自动过期）
 + (BOOL)debugLogEnabledLive;  // [v11] 实时读调试日志开关（去缓存，开关即生效）
 + (BOOL)doubleReturnDiagEnabled;  // 双返回诊断（设置面板「双返回诊断」），默认关
++ (BOOL)exclusivePopEnabled;  // [A'] 「接管即独占」（key=exclusivePop），默认关：Oback 确认接管本次返回手势期间，临时禁用 App 自带的返回手势（滚动/文本选择/左滑一律放行），松手后自动恢复
 + (BOOL)diagBannerEnabled;  // 诊断横幅独立隐藏开关（key=diagBanner），默认关；开→每次注入打印 [Oback-diag] 横幅，关→完全静默
 + (NSInteger)capsuleEffect;        // 胶囊特效（设置面板「胶囊风格」key=capsuleEffect），0=经典，1=发光，2=霓虹，3=流光，4=毛玻璃，5=呼吸
 // 内部：合并后的偏好字典（全局文件优先 + NSUserDefaults 域兜底），供读取与诊断复用。

@@ -260,6 +260,28 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
+			<string>某些 App 自带全屏返回手势（如 QQ 的 NTPushPopLib），会与 Oback 抢同一次滑动，表现为一次滑动返回两层 / 返回抢跑。开启后：Oback 一旦确认接管本次手势，就在手势期间临时禁用这些返回手势，松手后自动恢复；滚动、文本选择、列表左滑一律放行不禁用。</string>
+			<key>label</key>
+			<string>手势独占</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.zlhkf.oback</string>
+			<key>footnote</key>
+			<string>关（默认）：不动 App 自己的手势，行为与以前一致。开：Oback 接管期间临时禁用 App 自带的返回手势，松手后 0.12s 自动恢复。若发现某个 App 的滚动/选字受影响，关掉即可。</string>
+			<key>key</key>
+			<string>exclusivePop</string>
+			<key>label</key>
+			<string>接管即独占</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
 			<string>开启后把每次手势判定写入 /var/mobile/oback_debug.log（可用 Filza 抓取发我分析）。日用机建议关闭，避免日志频繁写盘。另：「立即打印诊断」按钮可向各 App 广播一次诊断（无需重启、无需 Mac）：各 App 把结果写入 /var/mobile/oback_diag.log 并在手机上直接弹文本框展示，用于核对当前 App 真实 bid / 名单命中 / 视差状态；也可随时用 Filza 看该文件。</string>
 			<key>label</key>
 			<string>调试</string>

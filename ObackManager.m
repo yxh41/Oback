@@ -16,13 +16,20 @@
 - (void)_obInterruptActiveInteraction;   // [P8] 进后台/自愈看门狗强制收尾进行中交互（防 QQ 快照 watchdog 闪退）
 - (void)_obEnterForeground;              // [2026-09-16 watchdog 修复] 回前台解除后台禁令并补一次链接
 - (void)_linkNavPopGesturesInWindow:(UIWindow *)win;  // 全窗口链接（超时早退/后台早退）
+- (void)_suppressOpponentPansForPan:(UIPanGestureRecognizer *)pan;  // [A'] 接管即独占：本次手势期间压制 App 自带返回手势（面板开关 exclusivePop，默认关）
+- (void)_restoreOpponentPansDeferred;                               // [A'] 松手/取消后延后恢复（防对手基于残留 touch 瞬判返回 → 瞬闪）
+- (void)_restoreOpponentPans;                                      // [A'] 立即恢复（进后台强制收尾时用）
+- (NSHashTable *)_suppressedPanTable;                              // [A'] 被压制手势的弱引用表（MRC 下由关联对象持有）
+- (BOOL)_isNavInteractivePop:(UIGestureRecognizer *)g;             // [A'] 是否为某 nav 的系统原生 interactivePop（放行不碰）
+- (BOOL)_isAllowlistedOpponentPan:(UIPanGestureRecognizer *)g view:(UIView *)v;  // [A'] 放行清单
+- (BOOL)_isPopLikeOpponentPan:(UIPanGestureRecognizer *)g view:(UIView *)v nav:(UINavigationController *)nav;  // [A'] 命中「返回语义」
 @property (nonatomic, retain) UIActivityViewController *logActivityVC;  // [v11c] retain 防活动视图控制器提前释放(MRC 陷阱)
 @end
 
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"handle-small"
+#define OBACK_BUILD_TAG @"qq-excl"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -249,6 +256,7 @@ static void *kObackPopNavKey = &kObackPopNavKey;
 // [2026-08-09] kYieldActiveKey 机制已彻底移除（多次引发回归），声明一并删除——无任何引用。
 static void *kDiagLastLogKey = &kDiagLastLogKey;  // 双返回诊断：同一 window 日志节流（每 2s 最多打一次手势清单）
 static void *kGlobalPanKey = &kGlobalPanKey;        // 全屏 pan 引用（绑到 window，gestureRecognizerShouldBegin 识别用）
+static void *kObackSuppressedPansKey = &kObackSuppressedPansKey;  // [A'] 本次接管期间被临时禁用的对手返回手势（NSHashTable 弱引用）
 static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指移动的距离 (pt)
 // 【2026-09-16 修正：液滴不做任何横向平移】
 // 用户报「贴不了边缘，一定要距离边缘有距离？」——根因就是这里给了 40pt 跟手位移：
@@ -1902,6 +1910,7 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
     _navPopTarget = nil;
     _currentPercent = 0;
     _transitionTriggered = NO;
+    [self _restoreOpponentPans];                // [A'] 进后台：立即恢复对手手势（不带 0.12s 延迟，防残留禁用）
     [self dismissIndicatorSafety];              // 收起胶囊（interacting 已置 NO，会执行）
 }
 
@@ -1937,6 +1946,9 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(dismissIndicatorSafety) object:nil];
 
     self.interacting = YES;
+    // [A' 接管即独占] 确认接管（手势 Began）后立即压制 App 自带的返回手势（QQ 全屏 NTPushPopLib 等），
+    // 本次手势期间由 Oback 独占返回；松手/取消后自动恢复。默认关（面板「接管即独占」），关时本行为空操作。
+    [self _suppressOpponentPansForPan:pan];
     // [2026-07-29 误触修复 v2] 接管型 nav 真实滑动（rightSimplePop）期间吞掉底层触摸：UIKit 向底层 view
     // 及其手势识别器发 touchesCancelled，手指滑过的小程序卡片等不会被误触激活（松手不再 touchUpInside/选中）。
     // 方案 A（rightSimplePop=NO）保持 NO——系统原生交互转场自行处理 touch 取消，无需我们干预。
@@ -2270,6 +2282,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 }
 
 - (void)endTransition:(UIPanGestureRecognizer *)pan {
+    [self _restoreOpponentPansDeferred];   // [A'] 排恢复（0.12s 后且未再次接管才真正恢复；覆盖下方所有 return 分支）
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(dismissIndicatorSafety) object:nil];
     pan.cancelsTouchesInView = NO;   // [2026-07-29 误触修复 v2] 复位：下一轮手势起始 cancelsTouchesInView 回到默认 NO（纯点击不误吞）
     // [2026-07-28 崩溃修复] 收尾 release+nil _simulOpponent。该指针已改为 retain 自持(994 行赋值处)，
@@ -2440,6 +2453,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 
 // 手势意外失败(Failed/超时等)时的紧急清理：取消转场+消除胶囊，防止残留
 - (void)abortTransition:(UIPanGestureRecognizer *)pan {
+    [self _restoreOpponentPansDeferred];   // [A'] 同上：手势失败/被取消也要恢复对手手势
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(dismissIndicatorSafety) object:nil];
     pan.cancelsTouchesInView = NO;   // [2026-07-29 误触修复 v2] 复位：下一轮手势起始 cancelsTouchesInView 回到默认 NO（纯点击不误吞）
     // [2026-07-28 崩溃修复] 同 endTransition：手势失败/被取消时 release+nil _simulOpponent
@@ -2477,6 +2491,142 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     if ([objc_getAssociatedObject(pan, kPanKindKey) isEqualToString:@"nav"]) {
         objc_setAssociatedObject(pan, kObackPopNavKey, nil, OBJC_ASSOCIATION_ASSIGN);
     }
+}
+
+#pragma mark - [A'] 接管即独占：本次手势期间压制 App 自带返回手势
+
+// [A' 方案] 通用化的「Oback 接管即独占」。
+// 背景：QQ 自带全屏返回手势（NTPushPopLib —— 一个挂在**独立 overlay window** 上的 plain
+//   UIPanGestureRecognizer），与 Oback 的边缘 pan 抢同一次滑动 → 抢跑 / 双返回。历史实证（见 _pub_p8 备份）：
+//   · A 方案（requireGestureRecognizerToFail: 跨 window 建依赖）对 QQ **无效**——跨 window 依赖不可靠，对手先抢跑；
+//   · B 方案（Oback 接管时直接把对手 pan 置 enabled=NO）**有效**，但当时写死了大量 QQ 私有类名。
+//   ⇒ 本方案把 B 通用化：命中与放行都用**通用 UIKit 语义**，不写死任何 App 私有类名，做成面板开关（默认关）。
+//
+// 命中（会被临时禁用）任一条件：
+//   ① UIScreenEdgePanGestureRecognizer（系统 / App / 插件的边缘返回手势，跨 window 也抓得到）
+//   ② 挂在 nav.view 树上（原生 pop 与多数自研全屏返回都挂在导航容器视图上）
+//   ③ 手势类名含返回语义词（PushPop / SlideBack / SwipeBack / PopGesture / BackGesture / PanPop）
+//      —— 覆盖「挂在独立 window 上、不在 nav 树里」的自研全屏返回（QQ 属此类）
+// 一律放行（绝不禁用）：
+//   · Oback 自己的 pan（delegate == self）
+//   · 滚动手势（UIScrollView.panGestureRecognizer + 私有 UIScrollViewPanGestureRecognizer）
+//   · 文本视图内的 pan（UITextView / UITextField：拖光标、选词）
+//   · 选择 / 手柄 / 放大镜类（类名含 Handle/Select/Caret/Drag/Loupe/Magnifier/Range/Text）
+//   · 左滑操作容器（类名含 Swipe：列表项左滑引用 / 删除 / 侧滑菜单）
+//   · **nav 的 interactivePopGestureRecognizer**：Oback 既有逻辑把它**永久**禁用（1273/1619/1832 行），
+//     若被 A' 记录在案并在恢复时重新置 YES，就会破坏该不变量、重新引入双返回 ⇒ 直接放行不碰。
+// ⚠️ 存储必须用 NSHashTable weakObjectsHashTable：pan 一旦 dealloc 条目自动消失，延后恢复循环
+//    绝不会向野指针发消息（历史用 NSMutableSet 装 NSValue 曾致 EXC_BAD_ACCESS 崩溃）。
+- (NSHashTable *)_suppressedPanTable {
+    NSHashTable *t = objc_getAssociatedObject(self, kObackSuppressedPansKey);
+    if (!t) {
+        t = [NSHashTable weakObjectsHashTable];
+        objc_setAssociatedObject(self, kObackSuppressedPansKey, t, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return t;
+}
+
+// 是否某个 UINavigationController 的系统原生 interactivePopGestureRecognizer。
+// 判据：该手势挂在 nav.view 上，而 UIViewController 的 view 的 nextResponder 就是 VC 本身 ⇒ 可直接向
+// nextResponder 取 interactivePopGestureRecognizer 比对，无需遍历，也不依赖任何私有类名。
+- (BOOL)_isNavInteractivePop:(UIGestureRecognizer *)g {
+    if (!g) return NO;
+    UIView *v = g.view;
+    if (!v) return NO;
+    @try {
+        UIResponder *r = v.nextResponder;
+        if ([r isKindOfClass:[UINavigationController class]])
+            return (g == ((UINavigationController *)r).interactivePopGestureRecognizer);
+    } @catch (NSException *e) {}
+    return NO;
+}
+
+- (BOOL)_isAllowlistedOpponentPan:(UIPanGestureRecognizer *)g view:(UIView *)v {
+    if (!g) return YES;
+    if (g.delegate == self) return YES;                     // 自己的 pan：绝不自压
+    if ([self _isNavInteractivePop:g]) return YES;          // 系统 ipg：Oback 已永久禁用，A' 不碰（见上方说明）
+    Class scrollPanCls = NSClassFromString(@"UIScrollViewPanGestureRecognizer");
+    if (scrollPanCls && [g isKindOfClass:scrollPanCls]) return YES;
+    if (v) {
+        if ([v isKindOfClass:[UIScrollView class]] && g == ((UIScrollView *)v).panGestureRecognizer) return YES;
+        if ([v isKindOfClass:[UITextView class]] || [v isKindOfClass:[UITextField class]]) return YES;
+    }
+    NSString *gcls = NSStringFromClass([g class]);
+    NSString *vcls = v ? NSStringFromClass([v class]) : nil;
+    NSArray *allow = @[@"Handle", @"Select", @"Caret", @"Drag", @"Loupe", @"Magnifier", @"Range", @"Swipe", @"Text"];
+    for (NSString *w in allow) {
+        if (gcls && [gcls rangeOfString:w options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
+        if (vcls && [vcls rangeOfString:w options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
+    }
+    return NO;
+}
+
+- (BOOL)_isPopLikeOpponentPan:(UIPanGestureRecognizer *)g view:(UIView *)v nav:(UINavigationController *)nav {
+    if (!g) return NO;
+    if ([g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return YES;                    // ① 边缘返回手势
+    if (nav && nav.view && v && (v == nav.view || [v isDescendantOfView:nav.view])) return YES;    // ② nav 树上
+    NSString *gcls = NSStringFromClass([g class]);                                                 // ③ 类名含返回语义
+    NSArray *popWords = @[@"PushPop", @"SlideBack", @"SwipeBack", @"PopGesture", @"BackGesture", @"PanPop"];
+    for (NSString *w in popWords) {
+        if (gcls && [gcls rangeOfString:w options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
+    }
+    return NO;
+}
+
+- (void)_suppressOpponentPansForPan:(UIPanGestureRecognizer *)pan {
+    if (!pan) return;
+    if (![ObackPreferences exclusivePopEnabled]) return;   // 面板开关默认关：不开则完全不改 App 手势状态
+    UIWindow *win = [self _windowForPan:pan];
+    UINavigationController *nav = [self _popNavForPan:pan];
+    if (!nav) {
+        UIViewController *top = [self topMost:win.rootViewController];
+        nav = top.navigationController;
+        if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
+    }
+    NSHashTable *suppressed = [self _suppressedPanTable];
+    __block NSUInteger n = 0;
+    NSArray *windows = nil;
+    @try { windows = [self _allVisibleWindows]; } @catch (NSException *e) { windows = nil; }
+    if (windows.count == 0) windows = win ? [NSArray arrayWithObject:win] : [NSArray array];
+    for (UIWindow *w in windows) {
+        if (!w) continue;
+        [self _enumeratePansInView:w depth:0 block:^(UIPanGestureRecognizer *g){
+            if (g == pan) return;                                    // 触发本次接管的那一个：不动
+            UIView *v = g.view;
+            if (!g.enabled) return;                                  // 已禁用：不重复记录
+            if ([self _isAllowlistedOpponentPan:g view:v]) return;
+            if (![self _isPopLikeOpponentPan:g view:v nav:nav]) return;
+            g.enabled = NO;
+            [suppressed addObject:g];
+            n++;
+            OBLog(@"[独占] 禁用对手返回手势 %@ (view=%@ window=%@)",
+                  NSStringFromClass([g class]), NSStringFromClass([v class]), NSStringFromClass([w class]));
+        }];
+    }
+    if (n > 0) OBLog(@"[独占] 本次接管共压制 %lu 个对手手势", (unsigned long)n);
+}
+
+- (void)_restoreOpponentPans {
+    NSHashTable *suppressed = objc_getAssociatedObject(self, kObackSuppressedPansKey);
+    if (!suppressed || suppressed.count == 0) return;
+    NSUInteger n = suppressed.count;
+    for (UIGestureRecognizer *g in suppressed) {
+        if (g) g.enabled = YES;   // 弱引用表已自动剔除 dealloc 的 pan，此处 g 必存活（view 已脱离也照常恢复，避免残留禁用）
+    }
+    [suppressed removeAllObjects];
+    OBLog(@"[独占] 已恢复 %lu 个对手手势", (unsigned long)n);
+}
+
+// ⚠️ 历史坑：不能立即恢复 —— 对手 pan 同步收到过同一串 touch，一恢复就会基于已收到的位移瞬间判定返回 → 瞬闪。
+// 故延后 0.12s，且执行时确认 Oback 没有再次接管（interacting==NO）才恢复。
+- (void)_restoreOpponentPansDeferred {
+    NSHashTable *suppressed = objc_getAssociatedObject(self, kObackSuppressedPansKey);
+    if (!suppressed || suppressed.count == 0) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (self.interacting) return;   // Oback 又接管了（新一次滑动）：保持压制，由该次手势的 end/abort 再排恢复
+        [self _restoreOpponentPans];
+    });
 }
 
 #pragma mark - 方案 A：驱动系统原生 nav pop
