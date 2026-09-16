@@ -25,13 +25,15 @@
 - (BOOL)_isAllowlistedOpponentPan:(UIPanGestureRecognizer *)g view:(UIView *)v;  // [A'] 放行清单
 - (BOOL)_isPopLikeOpponentPan:(UIPanGestureRecognizer *)g view:(UIView *)v nav:(UINavigationController *)nav;  // [A'] 命中「返回语义」
 - (void)_obDiagArenaSnapshotForPan:(UIPanGestureRecognizer *)pan window:(UIWindow *)win nav:(UINavigationController *)nav edge:(ObackEdge)edge point:(CGPoint)loc;  // [R3 诊断] 仲裁现场快照（谁已经赢了 / 对手是谁 / 有没有被咨询）
+- (void)_obLinkLeftEdgeOpponentPansInWindow:(UIWindow *)win;   // [R4 甲] 左缘对手链接器（镜像右缘）：对手须等我们的左缘 pan 失败
+- (void)_obLinkLeftEdgeOpponentPansIfStale:(UIWindow *)win;   // [R4 甲] 左缘懒补链（2s 节流，抓晚到的新手势）
 @property (nonatomic, retain) UIActivityViewController *logActivityVC;  // [v11c] retain 防活动视图控制器提前释放(MRC 陷阱)
 @end
 
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"qq-excl3"
+#define OBACK_BUILD_TAG @"qq-excl4"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -1338,6 +1340,7 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
     // 不引入感知延迟；仅在右缘才短暂等待 Oback 判定，符合"边缘=Oback/中间=QQ"。
     // 右缘对手 pan 链接抽取到 _obLinkRightEdgeOpponentPansInWindow:（同款逻辑，现已供懒补链复用）
     [self _obLinkRightEdgeOpponentPansInWindow:win];
+    [self _obLinkLeftEdgeOpponentPansInWindow:win];   // [R4 甲] 左缘同款持久链接（受 exclusivePop 门控，见方法内边界①）
     CFTimeInterval dt = (CACurrentMediaTime() - t0) * 1000.0;
     OBLog(@"linkNav: 链接 %lu 个返回手势 (耗时 %.2f ms) @window=%@",
           (unsigned long)linked, dt, NSStringFromClass([win class]));
@@ -1405,6 +1408,89 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
     if (now - __lastRightLinkTS < 2.0) return;
     __lastRightLinkTS = now;
     [self _obLinkRightEdgeOpponentPansInWindow:win];
+}
+
+// =====================================================================================
+// [R4 甲 2026-09-17] 左缘对手链接器 —— 让「窗口内 pop-like 且非 allowlist 的对手 pan」
+// **必须等我们的左缘 pan 失败**才能识别。
+// 为什么必须做（日志6 实证）：左缘触摸时 QQ 自有的 RightDragPanGestureRecognizer 已处于 Began(state=1)，
+// 我们的 pan 判 YES 后整份日志 beginTransition 仍为 0 次 ⇒ pop 由 App 侧执行且 interacting=0 = 瞬闪。
+// **事后压制（_suppressOpponentPansForPan）已经太晚**：对手业已 Began，再禁用它只能把它 Cancel，
+// 不能把「谁赢」还给我们。右缘之所以长期 1/1，正因为右缘有本方法的镜像
+// (_obLinkRightEdgeOpponentPansInWindow) —— 同一份日志里两边差别只在这一个链接器。
+// 安全边界（逐条对应历史副作用，勿删）：
+//  ① 与 A' 同开关（exclusivePop，默认关）⇒ 没开开关的用户左缘行为一字不改，爆炸半径受限；
+//  ② 跳过「接管型 nav」（微信类，_navPopShouldDriveSystemNav:==NO）⇒ 不动微信现有的同时识别/让步体系；
+//  ③ **只链非屏幕边缘对手**：屏幕边缘对手（含系统 ipg）与我们存在 shouldRequireFailureOf 的同边依赖，
+//     反向再建链会成环死锁；且铁律规定 A' 绝不能碰 nav 系统 ipg；
+//  ④ 过滤复用 _isAllowlistedOpponentPan（文本选择手柄/滚动/文本视图不动）+ _isPopLikeOpponentPan
+//     （只链返回类对手，不链 App 的普通拖拽），与压制清单同源，不擅自扩大打击面；
+//  ⑤ 单向 requireToFail（对手依赖我们，我们不依赖它）⇒ 无死锁；对手从非边缘起滑时我们的边缘 pan
+//     会即刻 Failed ⇒ 依赖立即解除、不引入感知延迟（与右缘同款机制，右缘已长期验证）；
+//  ⑥ 遍历走 _enumeratePansInView（自带 kOBEnumMaxNodes 预算）+ 只在 1.5s/2s 节流后的挂点调用。
+// =====================================================================================
+- (void)_obLinkLeftEdgeOpponentPansInWindow:(UIWindow *)win {
+    if (!win) return;
+    if (![ObackPreferences exclusivePopEnabled]) {
+        static BOOL __obLeftLinkWarned = NO;
+        if (!__obLeftLinkWarned) { __obLeftLinkWarned = YES; OBLog(@"[独占] 左缘链接跳过：开关未开(exclusivePop=0)"); }
+        return;
+    }
+    if (_inBackground) return;   // watchdog 修复①：后台一律不遍历（同 _linkNavPopGesturesInWindow）
+    NSMutableArray *leftPans = [NSMutableArray array];
+    NSArray *pans = objc_getAssociatedObject(win, kPanKey);
+    if ([pans isKindOfClass:[NSArray class]]) {
+        for (ObackPanGestureRecognizer *op in pans) {
+            if (op.edges & UIRectEdgeLeft) [leftPans addObject:op];
+        }
+    }
+    [self _enumerateEdgeGesturesInView:win depth:0 block:^(UIScreenEdgePanGestureRecognizer *g){
+        if (g.delegate == self && (g.edges & UIRectEdgeLeft)) [leftPans addObject:g];
+    }];
+    if (leftPans.count == 0) return;
+    // 边界②：接管型 nav（微信类）不动
+    UINavigationController *nav = nil;
+    UIViewController *top = [self topMost:win.rootViewController];
+    if ([top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
+    if (!nav) nav = top.navigationController;
+    if (nav && ![self _navPopShouldDriveSystemNav:nav]) {
+        static BOOL __obLeftLinkTakeoverWarned = NO;
+        if (!__obLeftLinkTakeoverWarned) {
+            __obLeftLinkTakeoverWarned = YES;
+            OBLog(@"[独占] 左缘链接跳过：接管型 nav=%@（保微信现有体系不动）", NSStringFromClass([nav class]));
+        }
+        return;
+    }
+    if (!nav) {
+        // 静默失败警戒：nav 判不出来时 pop-like ② 无法命中 ⇒ 链接等于没做，必须留痕以便下次日志区分。
+        static BOOL __obLeftLinkNoNavWarned = NO;
+        if (!__obLeftLinkNoNavWarned) { __obLeftLinkNoNavWarned = YES; OBLog(@"[独占] 左缘链接：nav=nil，仅按边缘/类名词表匹配"); }
+    }
+    __block NSUInteger n = 0;
+    [self _enumeratePansInView:win depth:0 block:^(UIPanGestureRecognizer *g){
+        if (g.delegate == self) return;                                         // 边界⑤：绝不链自己（防自引用）
+        if ([g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return;  // 边界③：屏幕边缘对手不链（防成环 / 不碰 ipg）
+        if ([self _isAllowlistedOpponentPan:g view:g.view]) return;              // 边界④
+        if (![self _isPopLikeOpponentPan:g view:g.view nav:nav]) return;         // 边界④
+        if (!g.enabled) return;
+        for (ObackPanGestureRecognizer *lp in leftPans) {
+            @try { [g requireGestureRecognizerToFail:lp]; } @catch (NSException *e) {}
+        }
+        n++;
+    }];
+    if (n > 0) {
+        OBLog(@"[独占] 左缘链接 %lu 个对手 pan（须等我们的左缘 pan 失败才可识别）nav=%@",
+              (unsigned long)n, nav ? NSStringFromClass([nav class]) : @"nil");
+    }
+}
+
+// 左缘懒补链：镜像右缘（2s 节流）。链接是持久依赖，此处只为发现「进页面后才懒加载挂上」的晚到对手。
+- (void)_obLinkLeftEdgeOpponentPansIfStale:(UIWindow *)win {
+    static NSTimeInterval __lastLeftLinkTS = 0;
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (now - __lastLeftLinkTS < 2.0) return;
+    __lastLeftLinkTS = now;
+    [self _obLinkLeftEdgeOpponentPansInWindow:win];
 }
 
 
@@ -1737,6 +1823,9 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
     // 对手 pan 链接（2s 节流，仅抓晚到的新手势），确保右缘 Oback 独占、中间仍归 App 原生。
     if (edge == ObackEdgeRight) {
         [self _obLinkRightEdgeOpponentPansIfStale:win];
+    } else {
+        // [R4 甲] 左缘：进会话后才懒加载挂上的对手（RightDragPan 等）在此补链，使其在本轮触摸前就欠我们一次失败。
+        [self _obLinkLeftEdgeOpponentPansIfStale:win];
     }
     // 关键修复：胶囊在 shouldBegin=YES 时即显示，而非等 Began。左边缘会被系统原生
     // interactivePopGestureRecognizer（UIScreenEdgePanGestureRecognizer）抢走，导致我们的手势
@@ -2604,7 +2693,12 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     }
     NSString *gcls = NSStringFromClass([g class]);
     NSString *vcls = v ? NSStringFromClass([v class]) : nil;
-    NSArray *allow = @[@"Handle", @"Select", @"Caret", @"Drag", @"Loupe", @"Magnifier", @"Range", @"Swipe", @"Text"];
+    // [R4 乙 2026-09-17] 裸 @"Drag" 是**子串**匹配 ⇒ 把 QQ 的返回手势 RightDragPanGestureRecognizer 一起放行了
+    // （日志6 实证：它因此整轮不被压制，且在我们判 YES 之前就已 Began ⇒ 左缘永不接管 + 非交互 pop = 瞬闪）。
+    // 收窄为它原本想覆盖的两个文本选择手柄类名 —— 手柄侧靠 "Handle"/"DragAnimation"/"DragHandle" 覆盖。
+    // ⚠️ 本函数对手势类名**和宿主类名**共用这张表：宿主侧靠 @"Select" 兜住 SwiftUI 的
+    //    PlatformViewHost<…SelectionManagerBox…>（2026-09-17 P0 修复），故宿主侧词表刻意保持不变。
+    NSArray *allow = @[@"Handle", @"Select", @"Caret", @"DragAnimation", @"DragHandle", @"Loupe", @"Magnifier", @"Range", @"Swipe", @"Text"];
     for (NSString *w in allow) {
         if (gcls && [gcls rangeOfString:w options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
         if (vcls && [vcls rangeOfString:w options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
