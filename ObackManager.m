@@ -24,13 +24,14 @@
 - (BOOL)_isNavInteractivePop:(UIGestureRecognizer *)g;             // [A'] 是否为某 nav 的系统原生 interactivePop（放行不碰）
 - (BOOL)_isAllowlistedOpponentPan:(UIPanGestureRecognizer *)g view:(UIView *)v;  // [A'] 放行清单
 - (BOOL)_isPopLikeOpponentPan:(UIPanGestureRecognizer *)g view:(UIView *)v nav:(UINavigationController *)nav;  // [A'] 命中「返回语义」
+- (void)_obDiagArenaSnapshotForPan:(UIPanGestureRecognizer *)pan window:(UIWindow *)win nav:(UINavigationController *)nav edge:(ObackEdge)edge point:(CGPoint)loc;  // [R3 诊断] 仲裁现场快照（谁已经赢了 / 对手是谁 / 有没有被咨询）
 @property (nonatomic, retain) UIActivityViewController *logActivityVC;  // [v11c] retain 防活动视图控制器提前释放(MRC 陷阱)
 @end
 
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"qq-excl2"
+#define OBACK_BUILD_TAG @"qq-excl3"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -234,6 +235,41 @@ static void OBRecordVCChain(UIViewController *vc, BOOL conflict) {
 #else
 #define OBDIAG(fmt, ...) do {} while (0)
 #endif
+
+// =====================================================================================
+// [R3 诊断 2026-09-17] 仲裁探针：统计 UIKit 是否真的把「我们的边缘 pan vs 对手手势」递进三个仲裁回调。
+// 用途：区分「对手不是边缘手势（我们静默 return NO）」与「UIKit 压根没问过我们」。
+// 历史教训（必须照抄）：单凭「某诊断行 0 次出现」下结论曾绕 5 个版本（2026-08-09 手柄专项 —— 判「手柄从未
+// 进仲裁」，后被铁证推翻：真因是手柄在独立 overlay window）。故本探针改为打「累计计数 + 最近对手」，
+// 一次实测即三态可分：没装对版本(build tag 不带 R3) / 对手类型不符 / UIKit 真没问(计数=0)。
+// =====================================================================================
+static NSUInteger _obArbReqFail   = 0;   // shouldRequireFailureOfGestureRecognizer: 被调用次数
+static NSUInteger _obArbReqFailBy = 0;   // shouldBeRequiredToFailByGestureRecognizer: 被调用次数
+static NSUInteger _obArbSimul     = 0;   // shouldRecognizeSimultaneouslyWithGestureRecognizer: 被调用次数
+static NSString  *_obArbLastOpp   = nil; // 最近一次仲裁里 other 的「类名@宿主类名」（MRC 自持，每次替换前 release）
+
+static void _obArbRec(NSUInteger *ctr, UIGestureRecognizer *other) {
+    if (ctr) (*ctr)++;
+    NSString *s = [NSString stringWithFormat:@"%@@%@",
+                   other ? NSStringFromClass([other class]) : @"nil",
+                   (other && other.view) ? NSStringFromClass([other.view class]) : @"nil"];
+    [_obArbLastOpp release];
+    _obArbLastOpp = [s copy];
+}
+
+// =====================================================================================
+// [R3 2026-09-17] 「手指仍在屏幕上」探针 —— 安全阀恢复时机守卫。
+// 只用我们自己的 pan 收到的触摸事件时间戳：touchesBegan/touchesMoved 刷新、touchesEnded/Cancelled 清零。
+// 取 1.5s 失联兜底（若某次 touchesEnded 因被抢走而未送达 → 时间戳不再刷新 → 自动视为已离屏），
+// 保证「对手手势被永久禁死」不可能发生（这是历史 6614322 花了大代价才修掉的双返回家族风险）。
+// =====================================================================================
+static NSTimeInterval __obLastTouchTS = 0;   // 引用基准时间；0 = 无在途触摸
+
+static BOOL _obTouchInFlight(void) {
+    if (__obLastTouchTS <= 0) return NO;
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    return ((now - __obLastTouchTS) < 1.5);
+}
 
 #pragma mark - 仅识别横向的 pan（避免纵向滑动误触发返回）
 @interface ObackPanGestureRecognizer : UIScreenEdgePanGestureRecognizer
@@ -1716,6 +1752,8 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
     // 另：该 pan 进不了 Began 的旧因（本文件 1704 行注释已记）正是「被同边的原生/App 边缘手势抢走」——
     // 而 A' 的命中条件①（UIScreenEdgePanGestureRecognizer）/②（nav.view 树上）恰好覆盖这些抢跑者，
     // 故前移压制点不仅让 A' 生效，还有望顺带治好「有胶囊没返回」（此前只剩 beginTransition 一次调用时无解）。
+    // [R3 诊断] 压制之前先抓一次仲裁现场 —— 此处 state 才是「谁已经赢了」的原始证据。
+    [self _obDiagArenaSnapshotForPan:pan window:win nav:nav edge:edge point:loc];
     [self _suppressOpponentPansForPan:pan];
     return YES;
 }
@@ -2063,6 +2101,7 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
 // 注意：scrollView 的 pan 协调仍由 shouldBegin 内的 requireGestureRecognizerToFail: 显式处理（other 非边缘，此处不拦）。
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)g
  shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)other {
+    _obArbRec(&_obArbReqFail, other);   // [R3] 探针：被咨询了就打计数（在全部 early return 之前）
     if (g == other || other == nil) return NO;
     // [2026-08-09→修复 文本选择手柄/光标] 关键修复：Oback 全屏 pan 必须等「文本选择手柄/光标」失败
     // 再 begin。之前只在 shouldBeRequiredToFailBy 让路，但日志实证(oback_debug 28)：手柄手势
@@ -2151,6 +2190,7 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
 // 以独占返回；标准 nav 与其他边保持默认(不影响现有让步/右缘独占逻辑)。
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)g
 shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
+    _obArbRec(&_obArbSimul, other);   // [R3] 探针
     if (g == other || other == nil) return NO;
     if (other.delegate == self) return NO;   // 自身另一个 pan(左/右/modal): 不与之同时识别, 更不记录为对手(否则 beginTransition 会误取消自身 → 右缘被取消 abort)
     if ([other isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return NO; // 同边屏幕边缘手势(微信自带左边缘返回)交 shouldBeRequiredToFailBy 压制, 不在此同时识别(否则双 Began → 双返回)
@@ -2177,6 +2217,7 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
 // 系统/插件单返回。
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)g
 shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
+    _obArbRec(&_obArbReqFailBy, other);   // [R3] 探针
     if (g == other || other == nil) return NO;
     if (other.delegate == self) return NO;   // 自身另一个 pan：不互相要求失败(防死锁/互消)
     if (![g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return NO;
@@ -2583,6 +2624,75 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     return NO;
 }
 
+// =====================================================================================
+// [R3 诊断 2026-09-17] 仲裁现场快照 —— 在 shouldBegin=YES 那一刻抓，一次实测回答三问：
+//   ① 谁已经赢了：全场 state != Possible 的手势（含类名@宿主 view@window；ours 标出我们自己的）
+//   ② 对手是谁：nav 系统 ipg 的 类名/enabled/state/targets/delegate + 触摸点祖先链上的全部边缘手势
+//   ③ 有没有被咨询：三个仲裁回调的累计计数 + 最近对手（区分「对手类型不符」与「UIKit 真没问」）
+// ⚠️ 只打日志、不改任何状态；遍历一律带节点预算（历史 watchdog 根因就是「无预算的全树遍历被快照争锁」）。
+// ⚠️ **不受面板「接管即独占」开关门控** —— 否则「谁抢了左缘手势」这个结论又会被「开关没开」这个变量污染
+//    （上一轮 文本(4) 就是这么被绕进去的：A' 零日志，无法区分开关没开 / 逻辑不触发）。
+// ⚠️ 每条都带 build tag：历史三次「诊断全空」其实都是没装对版本（2026-08-04/08-09/09-16），必须一次排除。
+// =====================================================================================
+- (void)_obDiagArenaSnapshotForPan:(UIPanGestureRecognizer *)pan window:(UIWindow *)win
+                               nav:(UINavigationController *)nav edge:(ObackEdge)edge point:(CGPoint)loc {
+    NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
+    // ① nav 系统 ipg 详表（nil nav 也要能打，故全程判空）
+    UIGestureRecognizer *ipg = nav ? nav.interactivePopGestureRecognizer : nil;
+    NSString *ipgDesc = @"nil";
+    if (ipg) {
+        NSArray *targets = nil;
+        @try { targets = [ipg valueForKey:@"_targets"]; } @catch (NSException *e) { targets = nil; }
+        ipgDesc = [NSString stringWithFormat:@"%@ enabled=%d state=%ld targets=%lu delegate=%@",
+                   NSStringFromClass([ipg class]), (int)ipg.enabled, (long)ipg.state,
+                   (unsigned long)(targets ? targets.count : 0),
+                   ipg.delegate ? NSStringFromClass([ipg.delegate class]) : @"nil"];
+    }
+    OBDIAG(@"[diag-arena@%@] edge=%@ bid=%@ pan=%@ win=%@ ipg=%@",
+           OBACK_BUILD_TAG, (edge == ObackEdgeLeft ? @"左" : @"右"), bid,
+           NSStringFromClass([pan class]), win ? NSStringFromClass([win class]) : @"nil", ipgDesc);
+    // ② 全场「已不在 Possible」的手势 = 已经赢的 / 正在赢的
+    NSArray *wins = nil;
+    @try { wins = [self _allVisibleWindows]; } @catch (NSException *e) { wins = nil; }
+    if (wins.count == 0) wins = win ? [NSArray arrayWithObject:win] : [NSArray array];
+    NSMutableArray *active = [NSMutableArray array];
+    for (UIWindow *w in wins) {
+        if (!w) continue;
+        NSUInteger budget = kOBEnumMaxNodes;
+        [self _enumerateGestureViewsIn:w depth:0
+                             predicate:^BOOL(UIView *v, UIGestureRecognizer *g){
+                                 return (g.state != UIGestureRecognizerStatePossible);
+                             }
+                                  emit:^(UIGestureRecognizer *g){
+            [active addObject:[NSString stringWithFormat:@"%@@%@@win:%@(state=%ld%@)",
+                               NSStringFromClass([g class]),
+                               g.view ? NSStringFromClass([g.view class]) : @"nil",
+                               NSStringFromClass([w class]), (long)g.state,
+                               (g.delegate == self ? @",ours" : @"")]];
+        } budget:&budget];
+    }
+    OBDIAG(@"[diag-arena] 已识别手势(%lu): %@", (unsigned long)active.count, active);
+    // ③ 仲裁计数
+    OBDIAG(@"[diag-arena] 仲裁计数 reqFail=%lu reqFailBy=%lu simul=%lu 最近对手=%@",
+           (unsigned long)_obArbReqFail, (unsigned long)_obArbReqFailBy, (unsigned long)_obArbSimul,
+           _obArbLastOpp ? _obArbLastOpp : @"-");
+    // ④ 触摸点祖先链上的边缘手势（一眼看出同边对手是谁 / 是不是我们自己的）
+    UIView *hv = (win && !CGRectIsEmpty(win.bounds)) ? [win hitTest:loc withEvent:nil] : nil;
+    NSMutableArray *chain = [NSMutableArray array];
+    for (UIView *v = hv; v; v = v.superview) {
+        for (UIGestureRecognizer *g in v.gestureRecognizers) {
+            if (![g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) continue;
+            UIScreenEdgePanGestureRecognizer *eg = (UIScreenEdgePanGestureRecognizer *)g;
+            [chain addObject:[NSString stringWithFormat:@"%@@%@(edges=%lu state=%ld en=%d%@)",
+                              NSStringFromClass([g class]), NSStringFromClass([v class]),
+                              (unsigned long)eg.edges, (long)g.state, (int)g.enabled,
+                              (g.delegate == self ? @",ours" : @"")]];
+        }
+    }
+    OBDIAG(@"[diag-arena] 触摸点(%.0f,%.0f)链上边缘手势(%lu): %@",
+           loc.x, loc.y, (unsigned long)chain.count, chain);
+}
+
 - (void)_suppressOpponentPansForPan:(UIPanGestureRecognizer *)pan {
     if (!pan) return;
     if (![ObackPreferences exclusivePopEnabled]) {
@@ -2624,13 +2734,24 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     // endTransition/abortTransition 都不会来，若不兜底，被禁用的对手手势会**永久失效**。
     // 故排一个 0.6s 定时器：到时若仍未接管（interacting==NO）就恢复。正常接管时该定时器空转（表已空）。
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(_restoreOpponentPansIfIdle) object:nil];
-    [self performSelector:@selector(_restoreOpponentPansIfIdle) withObject:nil afterDelay:0.6];
+    [self performSelector:@selector(_restoreOpponentPansIfIdle) withObject:nil afterDelay:0.9];   // [R3] 0.6→0.9：给正常滑动留足时间，减少误判为「未接管」
 }
 
 // 安全阀体：仅当 Oback 没有真正接管时才恢复（interacting==NO）
+// [R3 2026-09-17 丙 —— 必须修] 安全阀改为**延后**恢复（走 _restoreOpponentPansDeferred）。
+// 原实现直接调 _restoreOpponentPans（立即恢复）绕过了 0.12s 延后保护：左缘「判 YES 却从不 Began」时
+// end/abort 永不触发 ⇒ 恢复只走本安全阀 ⇒ 每次都在触摸中途把对手手势放出去 ⇒ 对手基于已收到的位移
+// 瞬间判定 pop = 瞬闪。这正是 2026-08-06（95f0c49 `_restoreQQNativePopDeferred`）与 2026-09-17 两次
+// 记在 _restoreOpponentPansDeferred 头上的历史坑，不要再绕过去。
 - (void)_restoreOpponentPansIfIdle {
     if (self.interacting) return;
-    [self _restoreOpponentPans];
+    // [R3] 手指仍在屏幕上 → 绝不恢复（否则对手 pan 拿着同一串 touch 立刻判定 pop = 瞬闪）。
+    // 只把安全阀往后重排一轮；离屏判定带 1.5s 失联兜底，故不会永久禁死对手手势。
+    if (_obTouchInFlight()) {
+        [self performSelector:@selector(_restoreOpponentPansIfIdle) withObject:nil afterDelay:0.9];
+        return;
+    }
+    [self _restoreOpponentPansDeferred];   // 离屏了才恢复，且仍走 0.12s 延后 + interacting 守卫（丙）
 }
 
 - (void)_restoreOpponentPans {
@@ -3373,6 +3494,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 @implementation ObackPanGestureRecognizer
 
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    __obLastTouchTS = [NSDate timeIntervalSinceReferenceDate];   // [R3] 手指在屏幕上（安全阀据此不恢复对手手势）
     [super touchesBegan:touches withEvent:event];
     UITouch *touch = [touches anyObject];
     if (touch) self.startPoint = [touch locationInView:self.view];
@@ -3392,6 +3514,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 }
 
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    __obLastTouchTS = [NSDate timeIntervalSinceReferenceDate];   // [R3] 仍在拖动
     if (self.state == UIGestureRecognizerStatePossible) {
         UITouch *touch = [touches anyObject];
         if (touch) {
@@ -3411,6 +3534,17 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         }
     }
     [super touchesMoved:touches withEvent:event];
+}
+
+// [R3] 手指离开屏幕：清除在途标记，安全阀下一轮即可恢复对手手势。
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    __obLastTouchTS = 0;
+    [super touchesEnded:touches withEvent:event];
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    __obLastTouchTS = 0;
+    [super touchesCancelled:touches withEvent:event];
 }
 
 @end
