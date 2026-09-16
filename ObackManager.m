@@ -22,7 +22,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"slime-pinned"
+#define OBACK_BUILD_TAG @"slime-arrow"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -261,6 +261,8 @@ static CGFloat const kSlimeMaxTravel = 0.0;
 //   ⑥ 动画：起手几乎为零（视频 t=6.2s 时完全看不见）→ 随拖动「长」出来 → 松手收回，**全程表面无波纹**；
 //   ⑦ **全程钉在屏幕边缘**：视频里指示器始终贴着侧边，只「长」不「移」——故 kSlimeMaxTravel = 0，
 //      并保证缩放（dismiss）也以屏幕边缘为支点（见 _slimeEdgeAnchoredCenterForScale:y:window:edge:）。
+//   ⑧ **箭头是「长出来」的、不是「蹦出来」的**：视频里白色箭头随液体浮现而渐显。
+//      ⇒ 箭头尺寸按液滴当前尺寸比例给出（aReach/aStep）+ 线宽与不透明度起手趋零。
 // 坐标系：x = 屏幕横向（向屏内为 +x）；y = 屏幕纵向（沿屏幕边缘延伸）。
 static CGFloat const kSlimeFrameW   = 44.0;   // 包围盒宽（容纳 36pt 最大鼓出 + 余量）
 static CGFloat const kSlimeFrameH   = 240.0;  // 包围盒高（容纳 220pt 沿边展开 + 余量）
@@ -509,15 +511,24 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     [path addLineToPoint:CGPointMake(baseX, cy - halfH)];
     [path closePath];
 
-    // 箭头：跟着液滴一起「张开」，置于液滴鼓出的中段（不贴在边缘上，否则会被屏幕边裁掉）
-    CGFloat reach = 7.0 + 7.0 * e;                     // 箭头张开的半高
-    CGFloat step  = 4.5 + 3.5 * e;                     // 箭头横向步长
-    CGFloat dir   = outDir;                            // 箭头指向「向屏内」= 返回方向
-    CGFloat cx    = baseX + outDir * (gIn * 0.5);      // 置于液滴腰部
+    // ── 箭头 ────────────────────────────────────────────────────────────────
+    // 尺寸**全部按液滴「当前」尺寸的比例**给出 → 与液体同源生长，永远落在液滴内部，
+    // 起手趋零 + 透明度淡入 ⇒ 视觉是「液体先长出来，箭头随后在液体里浮现」，不再是硬蹦出来。
+    // ⚠️ 早前实现是固定基准（reach 7→14 / step 4.5→8 / lineWidth 2.8→3.8 / 不透明恒为 1）：
+    //    起手时液滴只有 3pt 宽的一线，箭头却已是接近满尺寸的纯白图形，且中心落在 x≈1.5
+    //    → 箭头一半被屏幕边裁掉 ⇒ 观感就是「边上一闪蹦出个白箭头」（用户 2026-09-16 反馈「有点突兀」）。
+    //    固定基准还导致中途箭头相对液滴过大（两者不同步）。
+    CGFloat aReach = halfH * 0.16;                     // 半高：随液滴沿边长度走，完全展开 ≈ 17.6
+    CGFloat aStep  = gIn   * 0.24;                     // 横向半跨：随液滴鼓出走，完全展开 ≈ 8.6
+    CGFloat aLine  = 0.4 + 2.8 * e;                    // 线宽：0.4 → 3.2（起手趋零，不显硬边）
+    CGFloat aAlpha = pow(e, 1.2);                      // 淡入：比尺寸稍晚一点，杜绝「边上一闪」
+    CGFloat dir    = outDir;                           // 箭头尖端朝屏幕外侧 = 返回方向（左缘朝左 / 右缘朝右）
+    // 中腰「略偏屏内」放置：整枚箭头（±aStep）都落在液滴轮廓内，既不被屏幕边裁掉、也不戳出液滴外沿。
+    CGFloat cx     = baseX + outDir * (gIn * 0.54);
     UIBezierPath *cp = [UIBezierPath bezierPath];
-    [cp moveToPoint:CGPointMake(cx + dir * step, cy - reach)];
-    [cp addLineToPoint:CGPointMake(cx - dir * step, cy)];
-    [cp addLineToPoint:CGPointMake(cx + dir * step, cy + reach)];
+    [cp moveToPoint:CGPointMake(cx + dir * aStep, cy - aReach)];
+    [cp addLineToPoint:CGPointMake(cx - dir * aStep, cy)];
+    [cp addLineToPoint:CGPointMake(cx + dir * aStep, cy + aReach)];
 
     // ⚠️ 必须关掉隐式动画：这里是被 CADisplayLink 逐帧调用的，
     //    若走 CA 默认的 0.25s 隐式动画，形变会滞后于手指（看起来「跟不上手」）。
@@ -526,7 +537,8 @@ typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     _body.path = path.CGPath;
     _body.shadowPath = path.CGPath;                    // 阴影跟着轮廓走，而不是一个矩形糊边
     _chevron.path = cp.CGPath;
-    _chevron.lineWidth = 2.8 + 1.0 * e;
+    _chevron.lineWidth = aLine;
+    _chevron.opacity = (float)aAlpha;                  // 与液滴一起淡入（起手为 0 ⇒ 不先于液体出现）
     [CATransaction commit];
 }
 
