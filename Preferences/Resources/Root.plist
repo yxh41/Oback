@@ -265,18 +265,14 @@
 			<string>手势独占</string>
 		</dict>
 		<dict>
+			<key>action</key>
+			<string>toggleExclusivePop</string>
 			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>default</key>
-			<false/>
-			<key>defaults</key>
-			<string>com.zlhkf.oback</string>
+			<string>PSButtonCell</string>
 			<key>footnote</key>
-			<string>关（默认）：不动 App 自己的手势，行为与以前一致。开：Oback 接管期间临时禁用 App 自带的返回手势，松手后 0.12s 自动恢复。若发现某个 App 的滚动/选字受影响，关掉即可。</string>
-			<key>key</key>
-			<string>exclusivePop</string>
+			<string>关（默认）：不动 App 自己的手势，行为与以前一致。开：Oback 接管期间临时禁用 App 自带的返回手势，松手后 0.12s 自动恢复。若发现某个 App 的滚动/选字受影响，关掉即可。（注：本开关改为「按钮直写」，点一下即生效，不依赖系统回调，避免 roothide 下「拨了 tweak 却读不到、日志显示没开」的问题。）</string>
 			<key>label</key>
-			<string>接管即独占</string>
+			<string>接管即独占：关</string>
 		</dict>
 		<dict>
 			<key>cell</key>

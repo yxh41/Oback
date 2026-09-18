@@ -78,15 +78,28 @@ static NSDictionary *_obSliderUnits(void) {
         id val = [d objectForKey:key];
         if (val) oback_setGlobalPref(key, val);   // 仅镜像有显式值的 key；nil 跳过，避免清掉未设置项的默认
     }
-    // [P9] 同步「调试日志」按钮标题（开关改为直写，标题反映文件真实状态）
-    BOOL _dl = NO;
+    // [P9/R5] 同步直写按钮标题（开关走直写，标题反映全局文件真实状态）
     NSDictionary *_dg = [NSDictionary dictionaryWithContentsOfFile:kOBGlobalPlist];
-    if (_dg) { id _dv = [_dg objectForKey:@"debugLog"]; if (_dv) _dl = [_dv boolValue]; }
+    BOOL _dl = NO, _ep = NO;
+    if (_dg) {
+        id _dv;
+        if ((_dv = [_dg objectForKey:@"debugLog"]))     _dl = [_dv boolValue];
+        if ((_dv = [_dg objectForKey:@"exclusivePop"])) _ep = [_dv boolValue];
+    }
     for (PSSpecifier *spec in _specifiers) {
-        if ([[spec propertyForKey:@"action"] isEqualToString:@"toggleDebugLog"]) {
+        NSString *act = [spec propertyForKey:@"action"];
+        if ([act isEqualToString:@"toggleDebugLog"]) {
             [spec setProperty:(_dl ? @"调试日志：开" : @"调试日志：关") forKey:@"label"];
-            break;
+        } else if ([act isEqualToString:@"toggleExclusivePop"]) {
+            [spec setProperty:(_ep ? @"接管即独占：开" : @"接管即独占：关") forKey:@"label"];
         }
+    }
+    // [R5] 迁移：老 PSSwitchCell 时代若已在「设置」suite 写入 exclusivePop=1，搬到全局文件
+    // （按钮改直写后只读全局，否则用户先前拨过的开关会显示「关」需重拨）。suite 无值则跳过。
+    NSUserDefaults *_suite = [[NSUserDefaults alloc] initWithSuiteName:@"com.zlhkf.oback"];
+    id _epSuite = [_suite objectForKey:@"exclusivePop"];
+    if (_epSuite && ![_dg objectForKey:@"exclusivePop"]) {
+        oback_setGlobalPref(@"exclusivePop", _epSuite);
     }
 }
 
@@ -301,6 +314,30 @@ static NSDictionary *_obSliderUnits(void) {
     UIAlertController *a = [UIAlertController
         alertControllerWithTitle:@"调试日志"
                          message:(next ? @"已开启。回 QQ 做几次手势，再用「显示调试日志」查看内存日志。" : @"已关闭。")
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+// [R5] 接管即独占开关改为按钮直写：与调试日志同机制。roothide 下 PSSwitchCell 的
+// setPreferenceValue: 回调不可靠，拨动后值只留在「设置」App 的 suite，全局文件不更新，
+// 导致 tweak 注入其它 App 读到恒为默认 NO（即「开关拨了、日志却显示没开、瞬闪还在」）。
+// 点按直接 oback_setGlobalPref 写全局文件，确保 toggle 一定落到 tweak 可读的位置。
+- (void)toggleExclusivePop {
+    BOOL cur = NO;
+    NSDictionary *g = [NSDictionary dictionaryWithContentsOfFile:kOBGlobalPlist];
+    if (g) { id v = [g objectForKey:@"exclusivePop"]; if (v) cur = [v boolValue]; }
+    BOOL next = !cur;
+    oback_setGlobalPref(@"exclusivePop", @(next));
+    for (PSSpecifier *spec in _specifiers) {
+        if ([[spec propertyForKey:@"action"] isEqualToString:@"toggleExclusivePop"]) {
+            [spec setProperty:(next ? @"接管即独占：开" : @"接管即独占：关") forKey:@"label"];
+            break;
+        }
+    }
+    UIAlertController *a = [UIAlertController
+        alertControllerWithTitle:@"接管即独占"
+                         message:(next ? @"已开启。回目标 App 做一次边缘滑动即可生效（瞬闪/抢手势应消失）。" : @"已关闭。")
                   preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:a animated:YES completion:nil];
