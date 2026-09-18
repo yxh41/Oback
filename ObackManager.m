@@ -39,7 +39,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"qq-excl10"
+#define OBACK_BUILD_TAG @"qq-excl11"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -2982,6 +2982,9 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     // 而旧实现只在 added>0 时留痕 ⇒ 三种情况日志长得一模一样、无法区分。以下计数把它们彻底分开。
     __block NSUInteger scanned = 0;
     __block NSUInteger hits = 0;
+    // [R11 2026-09-18] 只计「**真正写回 NO**」的个数：hits 在 enabled 判断之前就 ++，
+    // 于是「命中 1 / 本轮新增 0」同时兼容两种互斥含义（一直 NO ／ 又被 QQ enable），长相完全相同。
+    __block NSUInteger wrote = 0;
     for (UIWindow *w in wins) {
         if (!w) continue;
         [self _enumeratePansInView:w depth:0 block:^(UIPanGestureRecognizer *g){
@@ -2989,7 +2992,8 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
             if (![self _isSwipeRightPopOpponentPan:g]) return;
             hits++;
             BOOL known = [excl containsObject:g];
-            if (g.enabled) g.enabled = NO;
+            // [R11] 只在此处（真正从 YES 翻成 NO）计数 —— 这是把「我们压着」与「被 QQ 压回又启用」分开的唯一证据。
+            if (g.enabled) { g.enabled = NO; wrote++; }
             if (!known) {
                 [excl addObject:g];
                 added++;
@@ -3001,14 +3005,16 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     if (added > 0) OBLog(@"[独占] 本轮常驻压制新增 %lu 个（累计 %lu）", (unsigned long)added, (unsigned long)excl.count);
     // [R8] 每次对账都留痕（≤1s 节流，防边缘起滑高频触发刷屏）。三态读法：
     //   有本行且「命中 0 / 常驻集 >0」 ⇒ 新页面重造了实例（旧实例随页面释放，弱表已自动出表）；
-    //   有本行且「命中 N / 本轮新增 0」 ⇒ 实例已在集内但被 QQ 重新 enabled（本行前刚被压回 NO）；
+    //   有本行且「命中 N / 本轮新增 0」 ⇒ 实例已在集内；此时**再看「真正写回 NO」**：
+    //                                   M>0 = 它当时是 YES（QQ 又启用了，本行刚压回）；
+    //                                   M=0 = 它一直就是 NO（我们压着，本行什么也没做）——R10 前无法区分这两态。
     //   完全没有本行                ⇒ 对账根本没跑（调用点缺失）—— 这正是 R8 要区分的那三态。
     static NSTimeInterval __lastExclReconcileTS = 0;
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     if (now - __lastExclReconcileTS >= 1.0) {
         __lastExclReconcileTS = now;
-        OBLog(@"[独占] 对账：扫描 pan %lu / 命中右滑返回类 %lu / 本轮新增 %lu / 常驻集 %lu",
-              (unsigned long)scanned, (unsigned long)hits, (unsigned long)added, (unsigned long)excl.count);
+        OBLog(@"[独占] 对账：扫描 pan %lu / 命中右滑返回类 %lu / 真正写回 NO %lu / 本轮新增 %lu / 常驻集 %lu",
+              (unsigned long)scanned, (unsigned long)hits, (unsigned long)wrote, (unsigned long)added, (unsigned long)excl.count);
     }
 }
 
@@ -3822,8 +3828,49 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 #pragma mark - 仅识别横向的 pan 实现
 @implementation ObackPanGestureRecognizer
 
+// [R11 2026-09-18] 触摸起点重压常驻集 —— 治「QQ 在触摸/转场时把 RightDrag 重新 enabled」这个**时序**窗口。
+//
+// 为什么挂在这里（R10 日志实测，非推断）：两次漏网瞬返（06:34:50 / 06:35:19）**前 2s 刚跑过对账**
+//   （06:34:48 / 06:35:17，均「命中 1 / 新增 0」）却照样被偷 pop ⇒ 根因不是「对账点太稀」（2s 空档远短于原假设），
+//   而是离散时间点上的压回挡不住 QQ 在触摸那一刻的重新启用。手势识别发生在 touchesBegan 之后，
+//   故在此时压回可抢在对手 pan 进入 Began 之前。
+//
+// 成本（实测口径，勿再重复推算）：**只遍历常驻集**（R10 日志 13/15 次对账显示常驻集恒为 1 个对象），
+//   零视图树遍历 ⇒ 亚微秒/触摸，低于本函数里已有的那行 NSDate 取时间；常驻集为空（未开开关 / 无对手）时
+//   一次 count 判断即返回。触摸是前台事件 + 本方法不新建对象 ⇒ 无额外唤醒、无内存增长。
+//   ⚠️ 绝不可改成调用 _obReconcileExclusivePersistentSuppress：那是**全可见窗口整树遍历**
+//      （kOBEnumMaxNodes = 4000/窗口，且第 3008 行那个 1s 只节流日志不节流遍历），实测反推单趟 0.5~2ms、
+//      本 pan 与 window pan 各收一份触摸 ⇒ 1~4ms/触摸；而设置 App 正是 2026-09-16 scene-update watchdog
+//      的同源最坏场景。本方法刻意不碰任何遍历。
+//
+// 与对账的分工：本方法只管「**已在集内**的实例被重新 enable」；**新实例**仍由 push 对账（+0.35s 补扫）
+//   与「命中即自愈」（_obAdoptExclusiveSuppressForPan:）收编 —— 后者会打「自愈：漏网 pop 凶手」。
+- (void)_obRepressExclusiveResidentPans {
+    id mgr = self.delegate;   // pan 的 delegate 恒为 ObackManager（创建处统一赋值），常驻集挂在它身上
+    if (!mgr) return;
+    // 刻意用 objc_getAssociatedObject 直读而**不**调 [mgr _exclusiveDisabledPanTable]：
+    // 后者在表不存在时会新建并挂关联对象 —— 热路径上不该产生分配。表不存在 ⇒ nil ⇒ count==0 ⇒ 立即返回。
+    NSHashTable *excl = objc_getAssociatedObject(mgr, kObackExclusiveDisabledPansKey);
+    if (excl.count == 0) return;                            // 常态：未开开关 / 无对手 ⇒ 零开销
+    if (![ObackPreferences exclusivePopEnabled]) return;    // 开关已关：交给对账路径统一还原，此处不复活压制
+    NSUInteger wrote = 0;
+    for (UIGestureRecognizer *g in excl) { if (g && g.enabled) { g.enabled = NO; wrote++; } }
+    // 诊断（节流 1s）：OBLog 命中时会真写日志文件，绝不能每次触摸都调。
+    // 读法：写回 > 0 就是「QQ 确实又 enable 过」的铁证；长期恒为 0 则说明压制其实一直有效、漏因在别处。
+    static NSTimeInterval sLastR11Log = 0;
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (now - sLastR11Log > 1.0) {
+        sLastR11Log = now;
+        OBLog(@"[独占] 触摸起点重压常驻集 %lu 个：本次写回 NO %lu 个（R11；写回>0 ⇒ 被 QQ 重新启用过）",
+              (unsigned long)excl.count, (unsigned long)wrote);
+    }
+}
+
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     __obLastTouchTS = [NSDate timeIntervalSinceReferenceDate];   // [R3] 手指在屏幕上（安全阀据此不恢复对手手势）
+    // [R11 2026-09-18] 触摸起点重压常驻集（成本与依据见 _obRepressExclusiveResidentPans 注释）。
+    // 刻意放在 [super touchesBegan:] **之前**：越早执行，越有机会抢在对手 pan 进入 Began 之前把它压回 NO。
+    [self _obRepressExclusiveResidentPans];
     [super touchesBegan:touches withEvent:event];
     UITouch *touch = [touches anyObject];
     if (touch) self.startPoint = [touch locationInView:self.view];
