@@ -39,7 +39,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"qq-excl12"
+#define OBACK_BUILD_TAG @"qq-excl13"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -1448,7 +1448,9 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
     if (!win) return;
     if (![ObackPreferences exclusivePopEnabled]) {
         static BOOL __obLeftLinkWarned = NO;
-        if (!__obLeftLinkWarned) { __obLeftLinkWarned = YES; OBLog(@"[独占] 左缘链接跳过：开关未开(exclusivePop=0)"); }
+        // [R13] 两种早退原因必须分开：「开关没开」与「本 App 被加进独占排除名单」在旧文案下长得一样，
+        // 会把「按 App 排除生效了」误读成「开关没读到（roothide 跨进程）」——正是历史上踩过的坑。
+        if (!__obLeftLinkWarned) { __obLeftLinkWarned = YES; OBLog(@"[独占] 左缘链接跳过：%@", [ObackPreferences isExclusivePopExcluded] ? @"本 App 在独占排除名单(exclusivePopExcludeApps)" : @"开关未开(exclusivePop=0)"); }
         return;
     }
     if (_inBackground) return;   // watchdog 修复①：后台一律不遍历（同 _linkNavPopGesturesInWindow）
@@ -2858,7 +2860,8 @@ static BOOL _obDiagArenaAllowed(void) {
         // 只在每次启动打一条：日志里有没有这一行，一锤定音区分
         // 「开关没读到（roothide 跨进程）」与「读到了但没走到挂点」——上次只能靠猜。
         static BOOL __obExclWarned = NO;
-        if (!__obExclWarned) { __obExclWarned = YES; OBLog(@"[独占] 开关未开(exclusivePop=0)，本次启动不做任何压制"); }
+        // [R13] 同 A2：区分「开关没开」与「本 App 在独占排除名单」。
+        if (!__obExclWarned) { __obExclWarned = YES; OBLog(@"[独占] 本次启动不做任何压制：%@", [ObackPreferences isExclusivePopExcluded] ? @"本 App 在独占排除名单(exclusivePopExcludeApps)" : @"开关未开(exclusivePop=0)"); }
         return;   // 面板开关默认关：不开则完全不改 App 手势状态
     }
     UIWindow *win = [self _windowForPan:pan];

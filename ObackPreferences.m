@@ -278,10 +278,31 @@ static NSTimeInterval __obMergedPrefsTS = 0;
 //     —— 覆盖「挂在独立 overlay window 上、抢同一次滑动」的 QQ NTPushPopLib 这类手势；
 //     滚动、文本选择/光标、列表左滑操作一律放行，绝不禁用。松手/取消后 0.12s 自动恢复。
 // 关（默认）→ 完全不改任何 App 手势的 enabled 状态，行为与加本开关之前逐字一致。
+// [R13 2026-09-18] 「独占排除」名单（key=exclusivePopExcludeApps，默认空 = 全局生效）。
+// 语义刻意选**排除列表**而非白名单：默认空 ⇒ 不开名单者行为与 R13 之前逐字一致，只增能力、不改现网默认。
+// 命中 App ⇒ exclusivePopEnabled 返回 NO ⇒ 独占功能的 7 个调用点（左缘链接 / 接管期压制 / 常驻对账含还原 /
+// push 对账早退 / 自愈收编 / pop-firer 诊断自愈门控 / touchesBegan 重压）全部走「开关已关」分支：
+// 既不再压制该 App 的任何手势，也会把此前已常驻禁用的对手手势还原 ⇒ 「这个 App 不要独占」是**可撤销**的。
+// ⚠️ 只作用于独占功能：Oback 的基础边缘返回、胶囊、黑/白名单、左缘排除、全局返回等一律不受影响。
+// ⚠️ 与「整 App 黑名单」的区别：黑名单是不注入（连基础返回/胶囊都没有）；本名单只退掉独占。
++ (BOOL)isExclusivePopExcluded {
+    NSDictionary *d = [self _mergedPrefs];
+    NSArray *list = [d objectForKey:@"exclusivePopExcludeApps"];
+    if (![list isKindOfClass:[NSArray class]] || list.count == 0) return NO;
+    NSString *bid = NSBundle.mainBundle.bundleIdentifier;
+    if (!bid) return NO;
+    return [self _bid:bid matchesList:list];
+}
+
 + (BOOL)exclusivePopEnabled {
     NSDictionary *d = [self _mergedPrefs];
     id v = [d objectForKey:@"exclusivePop"];
-    return v ? [v boolValue] : NO;   // 未设置 → 默认关
+    if (!(v ? [v boolValue] : NO)) return NO;   // 未设置 → 默认关
+    // [R13 2026-09-18] 按 App 排除（key=exclusivePopExcludeApps，默认空）：命中者视同「开关未开」。
+    // 本函数是独占的**唯一总闸**（7 个调用点全经此处取开关值）⇒ 一处判断即 7 处生效，零调用点改动。
+    // 语义 = 排除列表而非白名单：默认空时此处恒不成立，行为与加本能力之前逐字一致。
+    if ([self isExclusivePopExcluded]) return NO;
+    return YES;
 }
 
 // 诊断横幅独立隐藏开关：key=diagBanner，默认关（设置面板「诊断横幅」开关控制，无需手动写 plist）。

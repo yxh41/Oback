@@ -276,6 +276,16 @@
 		</dict>
 		<dict>
 			<key>cell</key>
+			<string>PSLinkCell</string>
+			<key>detail</key>
+			<string>ObackExclusiveExcludeListController</string>
+			<key>footnote</key>
+			<string>把「不需要独占」的 App 加进来：命中后该 App 内的独占视同关闭（不再压制它的返回手势，并还原已常驻禁用的对手手势，可随时移出撤销）；不影响 Oback 的基础边缘返回、胶囊、黑/白名单、左缘排除、全屏返回。≠ 黑名单（黑名单是整 App 不注入，连基础返回也没有）。适合「某个 App 自带返回已经好用、四处开独占反而多余」的场景。默认空，仅勾选 App 生效，其他 App 行为零变化。</string>
+			<key>label</key>
+			<string>选独占排除程序</string>
+		</dict>
+		<dict>
+			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
 			<string>开启后把每次手势判定写入 /var/mobile/oback_debug.log（可用 Filza 抓取发我分析）。日用机建议关闭，避免日志频繁写盘。另：「立即打印诊断」按钮可向各 App 广播一次诊断（无需重启、无需 Mac）：各 App 把结果写入 /var/mobile/oback_diag.log 并在手机上直接弹文本框展示，用于核对当前 App 真实 bid / 名单命中 / 视差状态；也可随时用 Filza 看该文件。</string>

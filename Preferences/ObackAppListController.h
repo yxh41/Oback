@@ -29,3 +29,8 @@
 @interface ObackNavPopFallbackController : ObackAppListController
 @end
 
+// [R13] 独占排除列表：命中的 App 不启用「接管即独占」（exclusivePop 在该 App 内视同关闭、
+// 已常驻禁用的对手手势会被还原），Oback 基础返回/胶囊/其他名单一律不受影响。用法同黑白名单。
+@interface ObackExclusiveExcludeListController : ObackAppListController
+@end
+
