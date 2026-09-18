@@ -33,7 +33,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"qq-excl5"
+#define OBACK_BUILD_TAG @"qq-excl6"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -1449,10 +1449,17 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
     }];
     if (leftPans.count == 0) return;
     // 边界②：接管型 nav（微信类）不动
+    // [R6 修复] nav 解析改用「窗口根枚举所有 nav，取最深层」——与 shouldBegin 通过 pan 绑定 kObackNavKey
+    // 拿到 nav 同效。旧写法 topMost:win.rootViewController 在 QQ 下返回 DrawerViewController（window 根 VC），
+    // 其 .navigationController 为 nil ⇒ nav=nil ⇒ _isPopLikeOpponentPan 的「nav 树」判定(②)失效、
+    // RightDragPanGestureRecognizer 被过滤、requireToFail 持久依赖从未建立 ⇒ 左缘仍与 QQ 抢跑、
+    // 对手先 Began 即驱动非交互 pop＝全屏瞬返（日志实证：RightDrag state=1 且从不出现「左缘链接 N」）。
     UINavigationController *nav = nil;
-    UIViewController *top = [self topMost:win.rootViewController];
-    if ([top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
-    if (!nav) nav = top.navigationController;
+    NSMutableArray *allNavs = [NSMutableArray array];
+    [self _enumerateNavControllersFrom:win.rootViewController block:^(UINavigationController *n){ if (n) [allNavs addObject:n]; }];
+    for (NSInteger i = (NSInteger)allNavs.count - 1; i >= 0; i--) {
+        nav = allNavs[i];   // 取最深层（最靠近用户的）nav 作为「nav 树」判定基准
+    }
     if (nav && ![self _navPopShouldDriveSystemNav:nav]) {
         static BOOL __obLeftLinkTakeoverWarned = NO;
         if (!__obLeftLinkTakeoverWarned) {
@@ -1465,6 +1472,9 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
         // 静默失败警戒：nav 判不出来时 pop-like ② 无法命中 ⇒ 链接等于没做，必须留痕以便下次日志区分。
         static BOOL __obLeftLinkNoNavWarned = NO;
         if (!__obLeftLinkNoNavWarned) { __obLeftLinkNoNavWarned = YES; OBLog(@"[独占] 左缘链接：nav=nil，仅按边缘/类名词表匹配"); }
+    } else {
+        // [R6 诊断] 确认 nav 解析已修正（此前恒为 nil）：打印实际拿到的 nav，便于日志核对链接是否生效。
+        OBLog(@"[独占] 左缘链接解析 nav=%@（窗口内 nav 共 %lu 个）", NSStringFromClass([nav class]), (unsigned long)allNavs.count);
     }
     __block NSUInteger n = 0;
     [self _enumeratePansInView:win depth:0 block:^(UIPanGestureRecognizer *g){
