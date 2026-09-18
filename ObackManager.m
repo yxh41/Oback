@@ -39,7 +39,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"qq-excl9"
+#define OBACK_BUILD_TAG @"qq-excl10"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -2831,12 +2831,10 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         return;   // 面板开关默认关：不开则完全不改 App 手势状态
     }
     UIWindow *win = [self _windowForPan:pan];
-    UINavigationController *nav = [self _popNavForPan:pan];
-    if (!nav) {
-        UIViewController *top = [self topMost:win.rootViewController];
-        nav = top.navigationController;
-        if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
-    }
+    // [R10 2026-09-18] 本条路径原先还要解析 nav，供旧判据的「挂在 nav.view 树上」那一条使用。
+    // 判据收窄后 nav 已不被任何一行读取，这里一并删掉那两三次树遍历：既省掉 shouldBegin 热路径上的开销，
+    // 也避免「赋值未读取」在 -Werror 下直接编译失败。
+    // ⚠️ 只删**本条路径**的解析。左缘链接器（_obLinkLeftEdgeOpponentPansInWindow）仍需要 nav，未动。
     NSHashTable *suppressed = [self _suppressedPanTable];
     __block NSUInteger n = 0;
     NSArray *windows = nil;
@@ -2849,7 +2847,17 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
             UIView *v = g.view;
             if (!g.enabled) return;                                  // 已禁用：不重复记录
             if ([self _isAllowlistedOpponentPan:g view:v]) return;
-            if (![self _isPopLikeOpponentPan:g view:v nav:nav]) return;
+            // [R10 2026-09-18] (a) 判据收窄：由旧的「边缘类 / nav 树 / 类名」三合一，改为**仅类名精确命中返回语义**，
+            // 与常驻压制所用的那套判据完全对齐（同一个方法）。
+            // 依据 = R8 日志实测（非推断）：每次边缘起滑此处会禁用 7~8 个，且**全部是无辜方** ——
+            //   NTAISummaryFloatEar（智能体浮耳）/ NTAIOQuickReplyGestureRecognizer / NTAIONoticeCollectionView ×2 /
+            //   UICollectionView / 裸 UIView ×2；而真凶 RightDragPanGestureRecognizer **不在其中**：
+            //   它早已被常驻压制置为不可用，被上面那行「已禁用则直接跳过」短路。
+            // ⇒ 本压制对「治瞬返」的净贡献为 0，纯属误伤（与历史 T4 删掉整套 B 方案同一成因）。
+            // 另：「边缘类」那一条在本场景贡献同样为 0 —— 触摸链上唯一的非 Oback 边缘手势是 nav 系统 ipg，早已被禁用。
+            // ⚠️ 不得改动被共享的旧判据方法本身：左缘链接器（约 1495 行）正是靠它的「nav 树」分支命中 RightDrag
+            //    才修好 R6 的全屏瞬返；整体删掉那条分支会让瞬返立刻回归。
+            if (![self _isSwipeRightPopOpponentPan:g]) return;
             g.enabled = NO;
             [suppressed addObject:g];
             n++;
@@ -2857,7 +2865,9 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
                   NSStringFromClass([g class]), NSStringFromClass([v class]), NSStringFromClass([w class]));
         }];
     }
-    if (n > 0) OBLog(@"[独占] 本次接管共压制 %lu 个对手手势", (unsigned long)n);
+    // [R10] 判据收窄后此处应恒为 0~1 个（收窄前实测每次 7~8 个）。改为**始终**打一行：
+    // 这就是「误伤已消除」的证据行；否则 n==0 时静默，无法区分「收窄生效」与「这条路径根本没走到」。
+    OBLog(@"[独占] 本次接管压制对手手势 %lu 个（R10 收窄判据）", (unsigned long)n);
     // [A' 安全阀] 挂点前移到 shouldBegin 后新增：日志实证「判 YES 却从未 Began」是常态 ⇒
     // endTransition/abortTransition 都不会来，若不兜底，被禁用的对手手势会**永久失效**。
     // 故排一个 0.6s 定时器：到时若仍未接管（interacting==NO）就恢复。正常接管时该定时器空转（表已空）。
