@@ -39,7 +39,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"qq-excl11"
+#define OBACK_BUILD_TAG @"qq-excl12"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -238,6 +238,10 @@ static void OBRecordVCChain(UIViewController *vc, BOOL conflict) {
 
 // 所有 [diag-*] 诊断日志统一走本宏。当前在 Makefile 定义 OBACK_DIAG=1（真机调试需要），故照常输出；
 // 若需极简 release 包，去掉 Makefile 的 -DOBACK_DIAG 即可把全部诊断日志整体编译剔除（含参数计算），进一步减负。
+// [R12 2026-09-18] ⚠️ 上面这句此前对 arena **不成立**：日志行受宏控，但它的整树遍历/字符串构造是裸代码，
+//   关了宏照跑（本文件里唯一的例外，同类诊断 _obDiagLogPopFirerForNav: 早已是正确范式）。
+//   现已用 #ifdef 包住 _obDiagArenaSnapshotForPan: 整个函数体兑现该承诺；另外它还叠了一层**运行时**门控
+//   （调试日志关 → 立即 return），故即便宏开着（当前正式包即是），不开调试日志也不为诊断付遍历代价。
 #ifdef OBACK_DIAG
 #define OBDIAG(fmt, ...) OBLog(fmt, ##__VA_ARGS__)
 #else
@@ -2752,6 +2756,21 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     return NO;
 }
 
+// [R12 2026-09-18] arena 重活前的**廉价运行时门控**：调试日志关着时直接跳过全部遍历与字符串构造。
+// 复用 OBLog 的 0.3s 开关微缓存（同一组 static：__obLogEnabledCache / __obLogEnabledCacheTS /
+// OB_LOG_ENABLED_TTL）⇒ 本函数不引入额外读盘，命中缓存时为亚微秒级。
+// ⚠️ 仅在 OBACK_DIAG 下编译：未定义该宏时它没有任何调用者，留着会触发 -Wunused-function（-Werror 下即编译失败）。
+#ifdef OBACK_DIAG
+static BOOL _obDiagArenaAllowed(void) {
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if ((now - __obLogEnabledCacheTS) < OB_LOG_ENABLED_TTL) return __obLogEnabledCache;
+    BOOL en = [ObackPreferences debugLogEnabledLive];
+    __obLogEnabledCache = en;
+    __obLogEnabledCacheTS = now;
+    return en;
+}
+#endif
+
 // =====================================================================================
 // [R3 诊断 2026-09-17] 仲裁现场快照 —— 在 shouldBegin=YES 那一刻抓，一次实测回答三问：
 //   ① 谁已经赢了：全场 state != Possible 的手势（含类名@宿主 view@window；ours 标出我们自己的）
@@ -2760,10 +2779,17 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 // ⚠️ 只打日志、不改任何状态；遍历一律带节点预算（历史 watchdog 根因就是「无预算的全树遍历被快照争锁」）。
 // ⚠️ **不受面板「接管即独占」开关门控** —— 否则「谁抢了左缘手势」这个结论又会被「开关没开」这个变量污染
 //    （上一轮 文本(4) 就是这么被绕进去的：A' 零日志，无法区分开关没开 / 逻辑不触发）。
+// ⚠️ [R12 2026-09-18] 但**受「调试日志」开关门控**：日志关着时本函数立即 return（否则每次边缘起手都白跑一遍
+//    全树遍历 + 字符串构造，而产出会被 OBLog 直接丢弃）。与上一条不矛盾 —— 独占开关是**功能**变量，
+//    调试日志是**取证**变量：要取证的人本来就会开日志，关日志的人不需要这份数据。
 // ⚠️ 每条都带 build tag：历史三次「诊断全空」其实都是没装对版本（2026-08-04/08-09/09-16），必须一次排除。
 // =====================================================================================
 - (void)_obDiagArenaSnapshotForPan:(UIPanGestureRecognizer *)pan window:(UIWindow *)win
                                nav:(UINavigationController *)nav edge:(ObackEdge)edge point:(CGPoint)loc {
+#ifdef OBACK_DIAG
+    // [R12 2026-09-18] 运行时门控：日志关着 ⇒ 本函数的遍历与字符串构造全是白费（OBDIAG 最终会被 OBLog 丢弃）。
+    // 必须置于一切计算之前：首个代价点是下面取 ipg 的 valueForKey:，其后还有两次全树遍历。
+    if (!_obDiagArenaAllowed()) return;
     NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
     // ① nav 系统 ipg 详表（nil nav 也要能打，故全程判空）
     UIGestureRecognizer *ipg = nav ? nav.interactivePopGestureRecognizer : nil;
@@ -2819,6 +2845,11 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     }
     OBDIAG(@"[diag-arena] 触摸点(%.0f,%.0f)链上边缘手势(%lu): %@",
            loc.x, loc.y, (unsigned long)chain.count, chain);
+#else
+    // [R12 2026-09-18] 极简 release 包（未定义 OBACK_DIAG）：整段诊断计算编译期剔除，兑现头部宏注释的承诺。
+    // 这里必须显式 (void) 掉全部形参，否则未使用形参在某些告警档位下会与 -Werror 冲突。
+    (void)pan; (void)win; (void)nav; (void)edge; (void)loc;
+#endif
 }
 
 - (void)_suppressOpponentPansForPan:(UIPanGestureRecognizer *)pan {
