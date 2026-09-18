@@ -51,6 +51,11 @@ static BOOL oback_shouldBackOff(void) {
                                                  toViewController:(UIViewController *)to {
     BOOL interacting = [ObackManager shared].interacting;
     OBLog(@"nav-anim query (op=%ld interacting=%d)", (long)operation, interacting);
+    // [R7 诊断] 非 Oback 驱动的 pop（op=2 且 interacting=0）→ 抓出当时已不在 Possible 的手势 = 真正发起 pop 的凶手。
+    // 用途：验证方案A 打击面是否命中真凶（RightDragPan）；若日志仍冒出别的类名 = 漏网的第二凶手。
+    if (operation == UINavigationControllerOperationPop && !interacting) {
+        [[ObackManager shared] _obDiagLogPopFirerForNav:nav];
+    }
     // 仅在我们手势驱动返回时接管 pop 动画；普通返回按钮走 App 原生转场（避免破坏/黑屏）
     if (operation == UINavigationControllerOperationPop && interacting) {
         // 方案 A：返回 nil → 系统原生交互 pop（toView 由 UIKit 原生处理，

@@ -21,6 +21,9 @@
 - (void)_restoreOpponentPans;                                      // [A'] 立即恢复（进后台强制收尾时用）
 - (void)_restoreOpponentPansIfIdle;                                // [A'] 安全阀：未真正接管时恢复（shouldBegin YES 却从未 Began 的兜底）
 - (NSHashTable *)_suppressedPanTable;                              // [A'] 被压制手势的弱引用表（MRC 下由关联对象持有）
+- (NSHashTable *)_exclusiveDisabledPanTable;                       // [R7 方案A] 独占常驻禁用的对手手势（弱引用；开关关时统一还原）
+- (BOOL)_isSwipeRightPopOpponentPan:(UIPanGestureRecognizer *)g;    // [R7 方案A] 是否「右滑返回」类对手手势（方案A 打击面）
+- (void)_obReconcileExclusivePersistentSuppress:(UIWindow *)win;    // [R7 方案A] 独占常驻压制：开→持久禁右滑返回类；关→统一还原
 - (BOOL)_isNavInteractivePop:(UIGestureRecognizer *)g;             // [A'] 是否为某 nav 的系统原生 interactivePop（放行不碰）
 - (BOOL)_isAllowlistedOpponentPan:(UIPanGestureRecognizer *)g view:(UIView *)v;  // [A'] 放行清单
 - (BOOL)_isPopLikeOpponentPan:(UIPanGestureRecognizer *)g view:(UIView *)v nav:(UINavigationController *)nav;  // [A'] 命中「返回语义」
@@ -33,7 +36,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"qq-excl6"
+#define OBACK_BUILD_TAG @"qq-excl7"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -296,6 +299,10 @@ static void *kObackPopNavKey = &kObackPopNavKey;
 static void *kDiagLastLogKey = &kDiagLastLogKey;  // 双返回诊断：同一 window 日志节流（每 2s 最多打一次手势清单）
 static void *kGlobalPanKey = &kGlobalPanKey;        // 全屏 pan 引用（绑到 window，gestureRecognizerShouldBegin 识别用）
 static void *kObackSuppressedPansKey = &kObackSuppressedPansKey;  // [A'] 本次接管期间被临时禁用的对手返回手势（NSHashTable 弱引用）
+// [R7 方案A] 「独占常驻压制」集合：exclusivePop 开启期间被**持久**禁用的对手 pop 手势（仅右滑返回类）。
+// 与 kObackSuppressedPansKey 的分工：后者随本次接管 end/abort 恢复；本集合在开关开启期间**不恢复**，
+// 只在开关关闭时统一还原（治「中屏 QQ 自己非交互 pop」）。同样必须用 NSHashTable 弱引用（历史野指针坑）。
+static void *kObackExclusiveDisabledPansKey = &kObackExclusiveDisabledPansKey;
 static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指移动的距离 (pt)
 // 【2026-09-16 修正：液滴不做任何横向平移】
 // 用户报「贴不了边缘，一定要距离边缘有距离？」——根因就是这里给了 40pt 跟手位移：
@@ -1341,6 +1348,7 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
     // 右缘对手 pan 链接抽取到 _obLinkRightEdgeOpponentPansInWindow:（同款逻辑，现已供懒补链复用）
     [self _obLinkRightEdgeOpponentPansInWindow:win];
     [self _obLinkLeftEdgeOpponentPansInWindow:win];   // [R4 甲] 左缘同款持久链接（受 exclusivePop 门控，见方法内边界①）
+    [self _obReconcileExclusivePersistentSuppress:win];  // [R7 方案A] 独占常驻压制（含开关关时的还原）；受 exclusivePop 门控
     CFTimeInterval dt = (CACurrentMediaTime() - t0) * 1000.0;
     OBLog(@"linkNav: 链接 %lu 个返回手势 (耗时 %.2f ms) @window=%@",
           (unsigned long)linked, dt, NSStringFromClass([win class]));
@@ -1501,6 +1509,7 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
     if (now - __lastLeftLinkTS < 2.0) return;
     __lastLeftLinkTS = now;
     [self _obLinkLeftEdgeOpponentPansInWindow:win];
+    [self _obReconcileExclusivePersistentSuppress:win];   // [R7 方案A] 中屏也要生效：懒补链时顺手对账一次（同 2s 节流）
 }
 
 
@@ -2676,6 +2685,18 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     return t;
 }
 
+// [R7 方案A] 独占常驻禁用集合（弱引用，MRC 下由关联对象持有）。
+// 与 _suppressedPanTable 的区别：那个随本次接管 end/abort 恢复；本集合在开关开启期间**不恢复**。
+- (NSHashTable *)_exclusiveDisabledPanTable {
+    NSHashTable *t = objc_getAssociatedObject(self, kObackExclusiveDisabledPansKey);
+    if (!t) {
+        t = [NSHashTable weakObjectsHashTable];
+        objc_setAssociatedObject(self, kObackExclusiveDisabledPansKey, t, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return t;
+}
+
+
 // 是否某个 UINavigationController 的系统原生 interactivePopGestureRecognizer。
 // 判据：该手势挂在 nav.view 上，而 UIViewController 的 view 的 nextResponder 就是 VC 本身 ⇒ 可直接向
 // nextResponder 取 interactivePopGestureRecognizer 比对，无需遍历，也不依赖任何私有类名。
@@ -2861,12 +2882,18 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 - (void)_restoreOpponentPans {
     NSHashTable *suppressed = objc_getAssociatedObject(self, kObackSuppressedPansKey);
     if (!suppressed || suppressed.count == 0) return;
-    NSUInteger n = suppressed.count;
+    NSHashTable *excl = objc_getAssociatedObject(self, kObackExclusiveDisabledPansKey);
+    NSUInteger n = 0, kept = 0;
     for (UIGestureRecognizer *g in suppressed) {
-        if (g) g.enabled = YES;   // 弱引用表已自动剔除 dealloc 的 pan，此处 g 必存活（view 已脱离也照常恢复，避免残留禁用）
+        if (!g) continue;
+        // [R7 方案A] 常驻压制集合内的手势**不恢复**：否则一次边缘滑动结束就把中屏返回手势放回去，
+        // 中屏瞬闪立刻复现（方案A 等于白做）。它只在开关关闭时由 _obReconcile… 统一还原。
+        if (excl && [excl containsObject:g]) { kept++; continue; }
+        g.enabled = YES;   // 弱引用表已自动剔除 dealloc 的 pan，此处 g 必存活（view 已脱离也照常恢复，避免残留禁用）
+        n++;
     }
     [suppressed removeAllObjects];
-    OBLog(@"[独占] 已恢复 %lu 个对手手势", (unsigned long)n);
+    OBLog(@"[独占] 已恢复 %lu 个对手手势（%lu 个仍常驻压制）", (unsigned long)n, (unsigned long)kept);
 }
 
 // ⚠️ 历史坑：不能立即恢复 —— 对手 pan 同步收到过同一串 touch，一恢复就会基于已收到的位移瞬间判定返回 → 瞬闪。
@@ -2880,6 +2907,105 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         [self _restoreOpponentPans];
     });
 }
+
+#pragma mark - [R7 方案A] 独占常驻压制（治「中屏任意处轻滑即非交互瞬返」）
+
+// [R7 方案A 2026-09-18] 方案A 的**打击面 = 右滑返回类对手手势**。刻意不用 _isPopLikeOpponentPan ②(nav 树)：
+// ② 会把快速回复（NTAIOQuickReply）、滑动删除（_UISwipeActionPan）、页面内浮层一并纳入 —— 那正是历史 B 方案
+// 「抑制过广 → 误伤 overlay（元宝浮耳滑不出 / 引用左滑失效）」的老路，T4 正因此删掉整套（-813 行）。
+- (BOOL)_isSwipeRightPopOpponentPan:(UIPanGestureRecognizer *)g {
+    if (!g) return NO;
+    if (g.delegate == self) return NO;                                         // 自己的 pan：绝不碰
+    if ([g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return NO; // 屏幕边缘手势：不碰（防成环 / 不碰系统 ipg）
+    if ([self _isNavInteractivePop:g]) return NO;                              // nav 系统 ipg：Oback 已永久禁用，不碰
+    NSString *gcls = NSStringFromClass([g class]);
+    if (!gcls) return NO;
+    // QQ 私有右滑返回 RightDragPanGestureRecognizer 是本次日志实证的凶手；其余为同类返回语义兜底。
+    NSArray *popWords = @[@"RightDrag", @"PushPop", @"SlideBack", @"SwipeBack", @"PopGesture", @"BackGesture", @"PanPop"];
+    for (NSString *w in popWords) {
+        if ([gcls rangeOfString:w options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
+    }
+    return NO;
+}
+
+// [R7 方案A 2026-09-18] 「独占常驻压制」：exclusivePop 开启期间，持久禁用窗口内「右滑返回」类对手手势，
+// 使**中屏任意处**轻滑不再触发 App 自有的非交互 pop（= 用户报的「全屏瞬闪」），返回只走 Oback 跟手的左缘。
+//
+// 为什么中屏必须来这一刀（日志8 实证）：中屏触摸（x∈[116,299]）不触发 Oback 左缘 pan（门限 x<triggerWidth），
+// R6 给 RightDrag 加的 requireToFail 在中屏会**立即解除** ⇒ 它自由触发 QQ 非交互 pop
+// （nav-anim query op=2 interacting=0，且该触摸无任何 shouldBegin=YES）⇒ 全屏瞬闪。
+//
+// 与 _suppressOpponentPansForPan:（接管期压制）的分工：后者只在边缘接管时做、end/abort 后 0.12s 恢复（治「左缘抢跑」）；
+// 本压制与触摸无关、常驻，只在**开关关闭**时统一还原（治「中屏 QQ 自己 pop」）。
+//
+// 安全边界（逐条对应历史副作用，勿删）：
+//   ① 与 A' 同开关 exclusivePop（默认关）⇒ 不开开关者左缘/中屏行为一字不改；
+//   ② 打击面 = _isSwipeRightPopOpponentPan（**仅类名精确命中返回语义**）⇒ 快速回复/滑动删除/滚动/文本选择一律不碰；
+//   ③ 屏幕边缘手势 / 系统 ipg 不碰（防成环；不做历史 B 那套「必须同时禁 ipg」）；
+//   ④ 弱引用集合 ⇒ pan 释放自动出表，无野指针（历史 EXC_BAD_ACCESS 坑）；开关关闭时统一还原（可撤销）；
+//   ⑤ 后台早退 + 走带 kOBEnumMaxNodes 预算的 _enumeratePansInView。
+- (void)_obReconcileExclusivePersistentSuppress:(UIWindow *)win {
+    if (!win) return;
+    NSHashTable *excl = [self _exclusiveDisabledPanTable];
+    // 开关关闭：把上次常驻禁用的全部还原（T4 删除历史 B 的理由之一正是「不可撤销」，本方案刻意保留可撤销性）
+    if (![ObackPreferences exclusivePopEnabled]) {
+        if (excl.count > 0) {
+            NSUInteger n = excl.count;
+            for (UIGestureRecognizer *g in excl) { if (g) g.enabled = YES; }
+            [excl removeAllObjects];
+            OBLog(@"[独占] 常驻压制：开关已关，还原 %lu 个对手手势", (unsigned long)n);
+        }
+        return;
+    }
+    if (_inBackground) return;   // watchdog：后台不遍历（同 _linkNavPopGesturesInWindow）
+    NSArray *wins = nil;
+    @try { wins = [self _allVisibleWindows]; } @catch (NSException *e) { wins = nil; }
+    if (wins.count == 0) wins = [NSArray arrayWithObject:win];
+    __block NSUInteger added = 0;
+    for (UIWindow *w in wins) {
+        if (!w) continue;
+        [self _enumeratePansInView:w depth:0 block:^(UIPanGestureRecognizer *g){
+            if (![self _isSwipeRightPopOpponentPan:g]) return;
+            BOOL known = [excl containsObject:g];
+            if (g.enabled) g.enabled = NO;
+            if (!known) {
+                [excl addObject:g];
+                added++;
+                OBLog(@"[独占] 常驻禁用右滑返回手势 %@ (view=%@ window=%@)",
+                      NSStringFromClass([g class]), NSStringFromClass([g.view class]), NSStringFromClass([w class]));
+            }
+        }];
+    }
+    if (added > 0) OBLog(@"[独占] 本轮常驻压制新增 %lu 个（累计 %lu）", (unsigned long)added, (unsigned long)excl.count);
+}
+
+// [R7 诊断 2026-09-18] 每次「非 Oback 驱动的 nav pop」发生时，抓出当时**已不在 Possible** 的手势
+// = 真正发起 pop 的凶手。用途：验证方案A 打击面是否命中真凶（RightDragPan）；若仍冒出别的类名 = 漏网第二凶手。
+// ⚠️ 由 Tweak.xm 在 op=2(Pop) 且 interacting=0 时调用；带 build tag（防「没装对版本」被误读为「诊断为空」）。
+- (void)_obDiagLogPopFirerForNav:(UINavigationController *)nav {
+    if (![ObackPreferences debugLogEnabledLive]) return;   // 不开调试日志时不遍历（避免无谓开销）
+    UIWindow *win = nav.view.window;
+    if (!win) return;
+    NSMutableArray *hits = [NSMutableArray array];
+    NSUInteger budget = kOBEnumMaxNodes;
+    [self _enumerateGestureViewsIn:win depth:0
+                         predicate:^BOOL(UIView *v, UIGestureRecognizer *g){
+                             UIGestureRecognizerState s = g.state;
+                             return (s == UIGestureRecognizerStateBegan
+                                     || s == UIGestureRecognizerStateChanged
+                                     || s == UIGestureRecognizerStateEnded);
+                         }
+                              emit:^(UIGestureRecognizer *g){
+        [hits addObject:[NSString stringWithFormat:@"%@@%@(state=%ld%@)",
+                         NSStringFromClass([g class]),
+                         g.view ? NSStringFromClass([g.view class]) : @"nil",
+                         (long)g.state,
+                         (g.delegate == self ? @",ours" : @"")]];
+    } budget:&budget];
+    OBDIAG(@"[pop-firer@%@] Oback 未驱动的 pop 发起者候选(%lu): %@",
+           OBACK_BUILD_TAG, (unsigned long)hits.count, hits);
+}
+
 
 #pragma mark - 方案 A：驱动系统原生 nav pop
 
