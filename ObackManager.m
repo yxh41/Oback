@@ -24,6 +24,9 @@
 - (NSHashTable *)_exclusiveDisabledPanTable;                       // [R7 方案A] 独占常驻禁用的对手手势（弱引用；开关关时统一还原）
 - (BOOL)_isSwipeRightPopOpponentPan:(UIPanGestureRecognizer *)g;    // [R7 方案A] 是否「右滑返回」类对手手势（方案A 打击面）
 - (void)_obReconcileExclusivePersistentSuppress:(UIWindow *)win;    // [R7 方案A] 独占常驻压制：开→持久禁右滑返回类；关→统一还原
+- (void)_obReconcileExclusivePersistentSuppressForNav:(UINavigationController *)nav;  // [R8] push 时对账（push 后 0.35s 再补扫一次，抓懒建的对手手势）
+- (void)_obReconcileExclusiveSuppressDeferred;                       // [R8] push 后的延后补扫（幂等）
+- (BOOL)_obAdoptExclusiveSuppressForPan:(UIPanGestureRecognizer *)g reason:(NSString *)reason;  // [R8 自愈] 漏网 pop 凶手即时收编
 - (BOOL)_isNavInteractivePop:(UIGestureRecognizer *)g;             // [A'] 是否为某 nav 的系统原生 interactivePop（放行不碰）
 - (BOOL)_isAllowlistedOpponentPan:(UIPanGestureRecognizer *)g view:(UIView *)v;  // [A'] 放行清单
 - (BOOL)_isPopLikeOpponentPan:(UIPanGestureRecognizer *)g view:(UIView *)v nav:(UINavigationController *)nav;  // [A'] 命中「返回语义」
@@ -36,7 +39,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"qq-excl7"
+#define OBACK_BUILD_TAG @"qq-excl8"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -2945,9 +2948,10 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
 //   ④ 弱引用集合 ⇒ pan 释放自动出表，无野指针（历史 EXC_BAD_ACCESS 坑）；开关关闭时统一还原（可撤销）；
 //   ⑤ 后台早退 + 走带 kOBEnumMaxNodes 预算的 _enumeratePansInView。
 - (void)_obReconcileExclusivePersistentSuppress:(UIWindow *)win {
-    if (!win) return;
     NSHashTable *excl = [self _exclusiveDisabledPanTable];
     // 开关关闭：把上次常驻禁用的全部还原（T4 删除历史 B 的理由之一正是「不可撤销」，本方案刻意保留可撤销性）
+    // ⚠️ [R8] 本分支必须留在 `if (!win) return;` **之前**：还原不依赖窗口；若因 win=nil 提前返回，
+    //    关开关后会残留永久禁用的对手手势（不可撤销 ⇒ 正是 T4 删历史 B 的理由）。潜在缺陷，一并修掉。
     if (![ObackPreferences exclusivePopEnabled]) {
         if (excl.count > 0) {
             NSUInteger n = excl.count;
@@ -2957,15 +2961,23 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         }
         return;
     }
+    if (!win) return;
     if (_inBackground) return;   // watchdog：后台不遍历（同 _linkNavPopGesturesInWindow）
     NSArray *wins = nil;
     @try { wins = [self _allVisibleWindows]; } @catch (NSException *e) { wins = nil; }
     if (wins.count == 0) wins = [NSArray arrayWithObject:win];
     __block NSUInteger added = 0;
+    // [R8 可观测性] 扫描数/命中数是判定「对账到底跑没跑、跑的时候命中几个」的唯一证据。
+    // 日志9 的残留瞬返卡在三种可能（对账没跑 / 跑了但实例当时还没建 / 实例被 QQ 重新 enabled），
+    // 而旧实现只在 added>0 时留痕 ⇒ 三种情况日志长得一模一样、无法区分。以下计数把它们彻底分开。
+    __block NSUInteger scanned = 0;
+    __block NSUInteger hits = 0;
     for (UIWindow *w in wins) {
         if (!w) continue;
         [self _enumeratePansInView:w depth:0 block:^(UIPanGestureRecognizer *g){
+            scanned++;
             if (![self _isSwipeRightPopOpponentPan:g]) return;
+            hits++;
             BOOL known = [excl containsObject:g];
             if (g.enabled) g.enabled = NO;
             if (!known) {
@@ -2977,16 +2989,82 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         }];
     }
     if (added > 0) OBLog(@"[独占] 本轮常驻压制新增 %lu 个（累计 %lu）", (unsigned long)added, (unsigned long)excl.count);
+    // [R8] 每次对账都留痕（≤1s 节流，防边缘起滑高频触发刷屏）。三态读法：
+    //   有本行且「命中 0 / 常驻集 >0」 ⇒ 新页面重造了实例（旧实例随页面释放，弱表已自动出表）；
+    //   有本行且「命中 N / 本轮新增 0」 ⇒ 实例已在集内但被 QQ 重新 enabled（本行前刚被压回 NO）；
+    //   完全没有本行                ⇒ 对账根本没跑（调用点缺失）—— 这正是 R8 要区分的那三态。
+    static NSTimeInterval __lastExclReconcileTS = 0;
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (now - __lastExclReconcileTS >= 1.0) {
+        __lastExclReconcileTS = now;
+        OBLog(@"[独占] 对账：扫描 pan %lu / 命中右滑返回类 %lu / 本轮新增 %lu / 常驻集 %lu",
+              (unsigned long)scanned, (unsigned long)hits, (unsigned long)added, (unsigned long)excl.count);
+    }
+}
+
+// [R8 覆盖] push 时对账：新页面的对手手势（QQ 逐页新建 RightDragPan）是在 push 时/后才挂上的。
+// 日志9 实证：push 03:51:50 -> pop 03:51:51 仅隔 1s，期间常驻对账一次都没跑（旧实现对账只在启动链接
+// 与边缘懒补链[2s 节流]时触发）=> 群聊页那个 RightDrag 实例从未被收编 => 非交互瞬返仍出现 1 次。
+// 故：push 转场开始即对账一次（抓已存在的实例），再延后 0.35s 补一次（抓转场中/后才懒建的实例）。
+- (void)_obReconcileExclusivePersistentSuppressForNav:(UINavigationController *)nav {
+    UIWindow *win = nil;
+    @try { win = nav.view.window; } @catch (NSException *e) { win = nil; }
+    if (!win) {
+        @try { NSArray *w = [self _allVisibleWindows]; win = w.count ? w.firstObject : nil; } @catch (NSException *e) { win = nil; }
+    }
+    [self _obReconcileExclusivePersistentSuppress:win];
+    if (![ObackPreferences exclusivePopEnabled]) return;   // 关开关：上面那次调用已负责还原，无需延后补扫
+    // 延后补扫（幂等；节流日志会体现本次补扫是否真抓到新实例）
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(_obReconcileExclusiveSuppressDeferred) object:nil];
+    [self performSelector:@selector(_obReconcileExclusiveSuppressDeferred) withObject:nil afterDelay:0.35];
+}
+
+// [R8] push 后的延后补扫：刻意不持有 nav（避免强引用已 pop 的控制器），只按当前可见 window 重扫一次。
+- (void)_obReconcileExclusiveSuppressDeferred {
+    UIWindow *win = nil;
+    @try { NSArray *w = [self _allVisibleWindows]; win = w.count ? w.firstObject : nil; } @catch (NSException *e) { win = nil; }
+    if (!win) { @try { win = [self currentKeyWindow]; } @catch (NSException *e) { win = nil; } }
+    [self _obReconcileExclusivePersistentSuppress:win];
+}
+
+// [R8 自愈] 把「已经赢了我们的」漏网 pop 凶手即时并入常驻集并禁用 —— 即便对账漏掉某个新实例，
+// 也只可能漏一次：pop 发生的那一刻就把它收编，此后同一实例永久失效。
+// 返回 YES = 本次真新增压制（调用方据此决定是否额外留痕）。
+- (BOOL)_obAdoptExclusiveSuppressForPan:(UIPanGestureRecognizer *)g reason:(NSString *)reason {
+    if (!g) return NO;
+    if (![ObackPreferences exclusivePopEnabled]) return NO;   // 与常驻压制同开关：关开关者行为一字不改
+    if (![self _isSwipeRightPopOpponentPan:g]) return NO;      // 只收编打击面内（返回语义）的对手，不扩大打击面
+    NSHashTable *excl = [self _exclusiveDisabledPanTable];
+    if ([excl containsObject:g]) {
+        if (g.enabled) g.enabled = NO;    // 已知实例被 QQ 重新 enabled：重新压回去（不重复计数）
+        return NO;
+    }
+    g.enabled = NO;
+    [excl addObject:g];
+    OBLog(@"[独占] 自愈：漏网 pop 凶手 %@ 已即时压制并收编（常驻集 %lu，%@）",
+          NSStringFromClass([g class]), (unsigned long)excl.count, reason ? reason : @"-");
+    return YES;
 }
 
 // [R7 诊断 2026-09-18] 每次「非 Oback 驱动的 nav pop」发生时，抓出当时**已不在 Possible** 的手势
 // = 真正发起 pop 的凶手。用途：验证方案A 打击面是否命中真凶（RightDragPan）；若仍冒出别的类名 = 漏网第二凶手。
 // ⚠️ 由 Tweak.xm 在 op=2(Pop) 且 interacting=0 时调用；带 build tag（防「没装对版本」被误读为「诊断为空」）。
+// [R7 诊断 / R8 升级] 每次「非 Oback 驱动的 nav pop」发生时，抓出当时**已不在 Possible** 的手势
+// = 真正发起 pop 的凶手；R8 起**当场自愈**：把命中打击面的漏网凶手收编进常驻集并禁用。
+// 用途：验证方案A 打击面是否命中真凶（RightDragPan）；若仍冒出别的类名 = 漏网第二凶手（下一次即被自愈收编）。
+// ⚠️ 由 Tweak.xm 在 op=2(Pop) 且 interacting=0 时调用；带 build tag（防「没装对版本」被误读为「诊断为空」）。
+// ⚠️ 遍历开销大，故门控分开：自愈只受 exclusivePop（要治漏网，不能依赖调试日志）；凶手清单打印只受 debugLog；
+//    两者都关时直接 return（零开销）。
 - (void)_obDiagLogPopFirerForNav:(UINavigationController *)nav {
-    if (![ObackPreferences debugLogEnabledLive]) return;   // 不开调试日志时不遍历（避免无谓开销）
-    UIWindow *win = nav.view.window;
+    if (!nav) return;
+    BOOL wantLog  = [ObackPreferences debugLogEnabledLive];
+    BOOL wantHeal = [ObackPreferences exclusivePopEnabled];
+    if (!wantLog && !wantHeal) return;
+    UIWindow *win = nil;
+    @try { win = nav.view.window; } @catch (NSException *e) { win = nil; }
     if (!win) return;
     NSMutableArray *hits = [NSMutableArray array];
+    NSMutableArray *adopt = [NSMutableArray array];   // 先收集，枚举结束后再改状态（不在遍历中动手势图）
     NSUInteger budget = kOBEnumMaxNodes;
     [self _enumerateGestureViewsIn:win depth:0
                          predicate:^BOOL(UIView *v, UIGestureRecognizer *g){
@@ -2996,14 +3074,25 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
                                      || s == UIGestureRecognizerStateEnded);
                          }
                               emit:^(UIGestureRecognizer *g){
-        [hits addObject:[NSString stringWithFormat:@"%@@%@(state=%ld%@)",
-                         NSStringFromClass([g class]),
-                         g.view ? NSStringFromClass([g.view class]) : @"nil",
-                         (long)g.state,
-                         (g.delegate == self ? @",ours" : @"")]];
+        if (wantLog) {
+            [hits addObject:[NSString stringWithFormat:@"%@@%@(state=%ld%@)",
+                             NSStringFromClass([g class]),
+                             g.view ? NSStringFromClass([g.view class]) : @"nil",
+                             (long)g.state,
+                             (g.delegate == self ? @",ours" : @"")]];
+        }
+        if (wantHeal && g.enabled && [g isKindOfClass:[UIPanGestureRecognizer class]]) {
+            if ([self _isSwipeRightPopOpponentPan:(UIPanGestureRecognizer *)g])
+                [adopt addObject:(UIPanGestureRecognizer *)g];
+        }
     } budget:&budget];
-    OBDIAG(@"[pop-firer@%@] Oback 未驱动的 pop 发起者候选(%lu): %@",
-           OBACK_BUILD_TAG, (unsigned long)hits.count, hits);
+    for (UIPanGestureRecognizer *p in adopt) {
+        [self _obAdoptExclusiveSuppressForPan:p reason:@"pop 现场自愈"];
+    }
+    if (wantLog) {
+        OBDIAG(@"[pop-firer@%@] Oback 未驱动的 pop 发起者候选(%lu): %@",
+               OBACK_BUILD_TAG, (unsigned long)hits.count, hits);
+    }
 }
 
 

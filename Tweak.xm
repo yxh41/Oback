@@ -56,6 +56,12 @@ static BOOL oback_shouldBackOff(void) {
     if (operation == UINavigationControllerOperationPop && !interacting) {
         [[ObackManager shared] _obDiagLogPopFirerForNav:nav];
     }
+    // [R8] push 时对账「独占常驻压制」：新页面（QQ 逐页新建 RightDragPan）的对手手势是 push 时/后才挂上的；
+    // 旧实现对账只在启动链接与边缘懒补链(2s 节流)时跑 ⇒ 用户 push 后立刻滑回（日志9 仅隔 1s）时该实例还没被收编，
+    // 非交互瞬返仍可能出现 1 次。这里 push 转场开始即对账，并在 0.35s 后补扫一次（抓懒建的实例）。
+    if (operation == UINavigationControllerOperationPush) {
+        [[ObackManager shared] _obReconcileExclusivePersistentSuppressForNav:nav];
+    }
     // 仅在我们手势驱动返回时接管 pop 动画；普通返回按钮走 App 原生转场（避免破坏/黑屏）
     if (operation == UINavigationControllerOperationPop && interacting) {
         // 方案 A：返回 nil → 系统原生交互 pop（toView 由 UIKit 原生处理，

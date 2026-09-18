@@ -9,6 +9,7 @@
 - (void)_attachNavPanToNav:(UINavigationController *)nav win:(UIWindow *)win;  // 给 nav.view 挂左右边缘 pan（swizzle UINavigationController 时调用）
 - (void)_linkNavPopGesturesInWindow:(UIWindow *)win;   // 全窗口链接（禁用原生 interactivePop / 让插件边缘手势与 scrollView 失败于我们的 pan）；每 window/nav 出现跑一次，不在手势热路径
 - (void)_obDiagLogPopFirerForNav:(UINavigationController *)nav;   // [R7 诊断] 非 Oback 驱动的 pop 发生时抓凶手手势（由 Tweak.xm 调用）
+- (void)_obReconcileExclusivePersistentSuppressForNav:(UINavigationController *)nav;  // [R8] push 时对账独占常驻压制（push 后 0.35s 再补扫一次）
 
 @property (nonatomic, assign) ObackEdge currentEdge;                  // 本次手势触发边缘
 @property (nonatomic, assign) BOOL interacting;                          // 是否正在交互返回
