@@ -25,10 +25,22 @@
 - (void)setProperty:(id)property forKey:(NSString *)key;
 @end
 
+// [R9] PSListController 的 cachedCellForSpecifier: 未在公开头声明，补前向声明以便拿到**屏幕上那个 cell**
+// 直接改文字（PSButtonCell 只在创建时读一次 label，只改 specifier 属性屏幕不会重绘）。
+@interface PSListController (ObackCachedCellForward)
+- (UITableViewCell *)cachedCellForSpecifier:(PSSpecifier *)specifier;
+- (void)reloadSpecifier:(PSSpecifier *)specifier animated:(BOOL)animated;
+@end
+
 // 方案B（弹窗/sheet 下拉返回）专属设置项——关掉「弹窗返回增强设置」开关时整体隐藏，
 // 避免用户在日常用方案A（原生 nav pop）时误调这些"调了无变化"的滑块。
 @interface ObackSettingsController ()
 @property (nonatomic, strong) NSMutableArray *allSpecifiers;   // 完整 specifier 列表（过滤前），供按开关显隐方案B 项
+// [R9] 直写按钮（接管即独占 / 调试日志）标题同步：见实现处注释
+- (NSString *)_obButtonTitleForAction:(NSString *)action;
+- (BOOL)_obSetCellTitle:(UITableViewCell *)cell text:(NSString *)text;
+- (void)_obApplyButtonTitleToSpecifier:(PSSpecifier *)spec;
+- (void)_obRefreshToggleButtonForAction:(NSString *)action;
 @end
 
 // ── 每个滑块 key 对应的单位后缀 ──────────────────────────────
@@ -75,31 +87,26 @@ static NSDictionary *_obSliderUnits(void) {
     for (PSSpecifier *spec in _specifiers) {
         NSString *key = [spec propertyForKey:@"key"];
         if (!key) continue;
+        // [R9] 直写按钮两键以全局文件为真值，不走 suite 镜像（见下方专用分支）
+        if ([key isEqualToString:@"exclusivePop"] || [key isEqualToString:@"debugLog"]) continue;
         id val = [d objectForKey:key];
         if (val) oback_setGlobalPref(key, val);   // 仅镜像有显式值的 key；nil 跳过，避免清掉未设置项的默认
     }
-    // [P9/R5] 同步直写按钮标题（开关走直写，标题反映全局文件真实状态）
+    // [R9] 两个「直写按钮」键以**全局文件**为唯一真值：禁止用 suite 旧值回写覆盖。
+    // 旧实现会对所有 key 一律 suite → 全局镜像，若 suite 里残留历史值（PSSwitchCell 时代），
+    // 打开设置页就会把刚开启的功能改回关闭。这里对这两键单独走「只迁移、不复写」。
     NSDictionary *_dg = [NSDictionary dictionaryWithContentsOfFile:kOBGlobalPlist];
-    BOOL _dl = NO, _ep = NO;
-    if (_dg) {
-        id _dv;
-        if ((_dv = [_dg objectForKey:@"debugLog"]))     _dl = [_dv boolValue];
-        if ((_dv = [_dg objectForKey:@"exclusivePop"])) _ep = [_dv boolValue];
-    }
-    for (PSSpecifier *spec in _specifiers) {
-        NSString *act = [spec propertyForKey:@"action"];
-        if ([act isEqualToString:@"toggleDebugLog"]) {
-            [spec setProperty:(_dl ? @"调试日志：开" : @"调试日志：关") forKey:@"label"];
-        } else if ([act isEqualToString:@"toggleExclusivePop"]) {
-            [spec setProperty:(_ep ? @"接管即独占：开" : @"接管即独占：关") forKey:@"label"];
-        }
-    }
-    // [R5] 迁移：老 PSSwitchCell 时代若已在「设置」suite 写入 exclusivePop=1，搬到全局文件
-    // （按钮改直写后只读全局，否则用户先前拨过的开关会显示「关」需重拨）。suite 无值则跳过。
     NSUserDefaults *_suite = [[NSUserDefaults alloc] initWithSuiteName:@"com.zlhkf.oback"];
-    id _epSuite = [_suite objectForKey:@"exclusivePop"];
-    if (_epSuite && ![_dg objectForKey:@"exclusivePop"]) {
-        oback_setGlobalPref(@"exclusivePop", _epSuite);
+    for (NSString *bk in @[@"exclusivePop", @"debugLog"]) {
+        if ([_dg objectForKey:bk]) continue;      // 全局已有真值 → 不回写
+        id _sv = [_suite objectForKey:bk];
+        if (_sv) oback_setGlobalPref(bk, _sv);    // 仅老值迁移一次
+    }
+    // [R9] 同步两个直写按钮标题：specifier + 可见 cell 一起改。
+    // viewWillAppear 时 cell 可能尚未创建，未建的那部分由 willDisplayCell: 在显示时补齐（双保险）。
+    for (PSSpecifier *spec in _specifiers) {
+        if ([self _obButtonTitleForAction:[spec propertyForKey:@"action"]])
+            [self _obApplyButtonTitleToSpecifier:spec];
     }
 }
 
@@ -154,6 +161,19 @@ static NSDictionary *_obSliderUnits(void) {
     // （注意：tableView:didSelectRowAtIndexPath: 与之不同——PSListController 确实实现了它，黑白名单页长期稳定即实证。）
     PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
     if (!spec) return;
+
+    // [R9] 两个「直写按钮」（接管即独占 / 调试日志）的文字必须**每次显示**都按全局文件真值重设。
+    // 原因：PSButtonCell 的文字只在 cell 创建时读一次 specifier 的 label；之后仅
+    // [spec setProperty:@"label"] **不会**重绘屏幕（本类又从不 reloadSpecifier）
+    // ⇒ 出现「功能已开、按钮却一直显示：关」，用户无法从界面确认状态。
+    // 这里直接用 cell.textLabel 落地（与 ObackAppListController 同一套已验证写法），
+    // 并顺手把 specifier 的 label 对齐，供 reload/兜底路径复用。
+    NSString *btnTitle = [self _obButtonTitleForAction:[spec propertyForKey:@"action"]];
+    if (btnTitle) {
+        [spec setProperty:btnTitle forKey:@"label"];
+        [self _obSetCellTitle:cell text:btnTitle];
+        return;   // 按钮行不参与滑块标签逻辑（且本方法绝不调 super）
+    }
 
     NSString *key = [spec propertyForKey:@"key"];
     if (!_obSliderUnits()[key]) return;   // 非滑块行，跳过（不调 super）
@@ -295,6 +315,60 @@ static NSDictionary *_obSliderUnits(void) {
     [self presentViewController:a animated:YES completion:nil];
 }
 
+#pragma mark - [R9] 直写按钮标题同步（治「功能已开、按钮仍显示：关」）
+
+// 传 action 名 → 返回该按钮当前应显示的标题（读**全局文件真值**，即按钮直写的那个文件）；
+// 非直写按钮返回 nil，调用方据此判断「这是不是按钮行」。
+- (NSString *)_obButtonTitleForAction:(NSString *)action {
+    if (!action) return nil;
+    BOOL isExcl = [action isEqualToString:@"toggleExclusivePop"];
+    BOOL isDbg  = [action isEqualToString:@"toggleDebugLog"];
+    if (!isExcl && !isDbg) return nil;
+    BOOL on = NO;
+    NSDictionary *g = [NSDictionary dictionaryWithContentsOfFile:kOBGlobalPlist];
+    id v = [g objectForKey:(isExcl ? @"exclusivePop" : @"debugLog")];
+    if (v) on = [v boolValue];
+    if (isExcl) return on ? @"接管即独占：开" : @"接管即独占：关";
+    return on ? @"调试日志：开" : @"调试日志：关";
+}
+
+// 落地文字：优先 textLabel，找不到就扫 contentView 里的 UILabel（防某些版本 PSButtonCell 自带 label）。
+// 返回 YES 表示确实改到了某个 label。
+- (BOOL)_obSetCellTitle:(UITableViewCell *)cell text:(NSString *)text {
+    if (!cell || !text) return NO;
+    if (cell.textLabel) { cell.textLabel.text = text; return YES; }
+    for (UIView *sub in cell.contentView.subviews) {
+        if ([sub isKindOfClass:[UILabel class]]) { ((UILabel *)sub).text = text; return YES; }
+    }
+    return NO;
+}
+
+// 把标题同时落到 specifier 与**当前屏幕上**的 cell（点按后立即生效）。
+- (void)_obApplyButtonTitleToSpecifier:(PSSpecifier *)spec {
+    if (!spec) return;
+    NSString *t = [self _obButtonTitleForAction:[spec propertyForKey:@"action"]];
+    if (!t) return;
+    [spec setProperty:t forKey:@"label"];
+    BOOL painted = NO;
+    if ([self respondsToSelector:@selector(cachedCellForSpecifier:)]) {
+        UITableViewCell *c = [self cachedCellForSpecifier:spec];
+        if (c) painted = [self _obSetCellTitle:c text:t];
+    }
+    // 拿不到可见 cell（未上屏 / 该版本无此 API）时退化为只刷这一行：会重走 willDisplayCell:，结果一致。
+    if (!painted) [self reloadSpecifier:spec animated:NO];
+}
+
+// 按 action 名找到对应 specifier 并刷新它。
+- (void)_obRefreshToggleButtonForAction:(NSString *)action {
+    if (!action) return;
+    for (PSSpecifier *spec in _specifiers) {
+        if ([[spec propertyForKey:@"action"] isEqualToString:action]) {
+            [self _obApplyButtonTitleToSpecifier:spec];
+            return;
+        }
+    }
+}
+
 // [P9] 调试日志开关改为按钮直写：点按直接 oback_setGlobalPref 写全局文件，
 // 不依赖 PreferenceLoader 的 setPreferenceValue: 回调（用户 roothide 下该回调不可靠，开关拨了 tweak 读不到）。
 // 复用与黑名单相同的写路径（ObackAppListController 直写，已证明 tweak 可读到），确保 toggle 一定生效。
@@ -304,13 +378,9 @@ static NSDictionary *_obSliderUnits(void) {
     if (g) { id v = [g objectForKey:@"debugLog"]; if (v) cur = [v boolValue]; }
     BOOL next = !cur;
     oback_setGlobalPref(@"debugLog", @(next));
-    // 刷新标题（下次进设置页也会由 viewWillAppear 同步）
-    for (PSSpecifier *spec in _specifiers) {
-        if ([[spec propertyForKey:@"action"] isEqualToString:@"toggleDebugLog"]) {
-            [spec setProperty:(next ? @"调试日志：开" : @"调试日志：关") forKey:@"label"];
-            break;
-        }
-    }
+    // [R9] 刷新标题：只改 specifier 属性屏幕**不会**变（PSButtonCell 不重读 label），
+    // 故同时把文字落到当前可见的 cell（治「已开却仍显示：关」）。
+    [self _obRefreshToggleButtonForAction:@"toggleDebugLog"];
     UIAlertController *a = [UIAlertController
         alertControllerWithTitle:@"调试日志"
                          message:(next ? @"已开启。回 QQ 做几次手势，再用「显示调试日志」查看内存日志。" : @"已关闭。")
@@ -329,12 +399,8 @@ static NSDictionary *_obSliderUnits(void) {
     if (g) { id v = [g objectForKey:@"exclusivePop"]; if (v) cur = [v boolValue]; }
     BOOL next = !cur;
     oback_setGlobalPref(@"exclusivePop", @(next));
-    for (PSSpecifier *spec in _specifiers) {
-        if ([[spec propertyForKey:@"action"] isEqualToString:@"toggleExclusivePop"]) {
-            [spec setProperty:(next ? @"接管即独占：开" : @"接管即独占：关") forKey:@"label"];
-            break;
-        }
-    }
+    // [R9] 同 toggleDebugLog：specifier 与可见 cell 一起刷
+    [self _obRefreshToggleButtonForAction:@"toggleExclusivePop"];
     UIAlertController *a = [UIAlertController
         alertControllerWithTitle:@"接管即独占"
                          message:(next ? @"已开启。回目标 App 做一次边缘滑动即可生效（瞬闪/抢手势应消失）。" : @"已关闭。")
