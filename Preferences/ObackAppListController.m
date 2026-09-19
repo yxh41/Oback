@@ -4,6 +4,8 @@
 //
 //  枚举设备已装、桌面可见的 App，按「用户应用 / 越狱应用 / 巨魔应用 / 系统程序」四类分组，每行用系统原生
 //  PSTitleValueCell 显示图标 + 名称，图标从 .app 包直接读取（**读不到只是这一行没图，不影响勾选与生效**）
+//  [applist7 2026-09-20] 每行**必定**带图（读不到就塞 29pt 透明占位），且图标一律渲染成 29pt 恒定画布
+//  ⇒ 所有行的 App 名称左起点落在同一条竖线上（修用户实测「部分 app 没有左对齐」）。
 //  （UIImage imageWithContentsOfFile:，无私有 API、零自定义 cell 类，roothide/iOS16.4.1 下稳定）。
 //  注：PSApplicationCell 在本项目的 theos 头文件集合（theos/headers）未声明，
 //  直接用会因 -Werror 编译失败、不出 .deb，故改用 PSTitleValueCell + 手动图标加载。
@@ -285,7 +287,8 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
         //   ② 图标只是装饰，而「判无图标 = 整条丢弃」的代价是名单**结构性失效**：
         //      用户点名要屏蔽的 App（deb 装的、只在 App 资源库的、Info.plist 不规范的）根本加不进来，
         //      这比「少一张缩略图」严重得多。
-        // 现在：能否配到图标由 _loadIconImageForApp: 单独负责，配不到只是这一行没图。
+        // 现在：能否配到图标由 _loadIconImageForApp: 单独负责，配不到**用透明占位图顶上**——
+        // [applist7] 起「没图」绝不允许影响文字左对齐（见 _addAppSpecifier: / _blankIconImage）。
         // 「是否算已装可见 App」由上面的主屏过滤判据负责（[applist6] 起对所有根生效，见该处说明），
         // 不再叠加图标键这道伪判据。
 
@@ -649,8 +652,14 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
     // 直接用会因 -Werror 编译失败、不出 .deb。
     // 点按切换不靠 specifier 的 setAction:（roothide/headers 的 PSSpecifier 未声明该方法），
     // 改由控制器 tableView:didSelectRowAtIndexPath: 处理。
+    // [applist7 2026-09-20] 「部分 app 没有左对齐」的修复：**每一行都必须带图**。
+    // 之前是「有图标才设」——没图标时 cell 的 imageView 宽度塌成 0，文字直接顶到最左；
+    // 有图标的行文字从图标右侧起 ⇒ 同一列表出现两条左边线（用户实测）。
+    // 现在没图标就塞一张 29pt **透明占位图**把位置撑住；有图标的也统一渲染成 29pt 画布
+    //（见 _scaledIcon:）⇒ 所有行的文字左起点完全一致。
     UIImage *icon = [self _iconImageForApp:app];
-    if (icon) [s setProperty:icon forKey:@"iconImage"];
+    if (!icon) icon = [self _blankIconImage];
+    [s setProperty:icon forKey:@"iconImage"];
     [s setProperty:bid forKey:@"appBundleID"];
     [specs addObject:s];
 }
@@ -730,13 +739,35 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
 // 修正：阈值与目标统一用 29pt(点)，渲染器自行处理 scale。
 - (UIImage *)_scaledIcon:(UIImage *)img {
     if (!img) return nil;
-    CGFloat pt = 29.0; // 与系统「设置」App 列表图标同尺寸
-    if (img.size.width <= pt && img.size.height <= pt) return img;
-    CGSize target = CGSizeMake(pt, pt); // 点；渲染器按设备 scale 出图
+    CGFloat side = 29.0; // 行内图标**统一画布边长**（点），与系统「设置」App 列表图标同尺寸
+    // [applist7 2026-09-20] **画布尺寸必须恒定**：此前「本来就 ≤29pt 的图标原样返回」，
+    // 于是 20pt / 24pt / 29pt 的图标宽度不一，紧随其后的文字起点也就参差不齐
+    //（用户实测「部分 app 没有左对齐」）。现在一律渲染到 29×29 画布：
+    //   · 大于画布：等比缩到画布内（不拉伸，保比例）；
+    //   · 小于画布：居中摆放、**不放大**（避免小图标被拉糊）。
+    // 每行 imageView 宽度因此完全相同 ⇒ 文字左起点严格对齐。
+    CGSize target = CGSizeMake(side, side); // 点；渲染器按设备 scale 出图
     UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:target];
     return [r imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull ctx) {
-        [img drawInRect:CGRectMake(0, 0, target.width, target.height)];
+        (void)ctx;
+        CGFloat w = img.size.width, h = img.size.height;
+        if (w <= 0.0 || h <= 0.0) return;
+        CGFloat k = MIN(side / w, side / h);
+        if (k > 1.0) k = 1.0;                       // 不放大
+        CGFloat dw = w * k, dh = h * k;
+        [img drawInRect:CGRectMake((side - dw) / 2.0, (side - dh) / 2.0, dw, dh)];
     }];
+}
+
+// [applist7] 无图标行的**透明占位图**（29×29，与真图标同画布）。
+// 目的：让「有图标 / 没图标」两种行拥有**相同的左边距** —— 没图时 imageView 宽度会塌成 0，
+// 文字顶到最左，与有图标的行对不齐（用户实测「部分 app 没有左对齐」）。
+- (UIImage *)_blankIconImage {
+    static UIImage *ph = nil;
+    if (ph) return ph;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(29.0, 29.0)];
+    ph = [r imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull ctx) { (void)ctx; }];
+    return ph;
 }
 
 // 点按切换：加入 / 移出当前名单（whitelistApps / blacklistApps）
