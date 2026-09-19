@@ -217,7 +217,7 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
 #pragma mark App 枚举
 
 // 扫描指定目录，返回 App 数组（元素为 @{path, bundleID, name, exe}）。
-// homeScreenOnly=YES 时只保留主屏可见的 App —— **只给用户容器根用**（理由见 _addAppAtPath:）。
+// homeScreenOnly=YES 时只保留主屏可见的 App —— 除**越狱根**外都传 YES（理由见 _addAppAtPath:）。
 - (NSArray *)_scanAppsAtPath:(NSString *)basePath homeScreenOnly:(BOOL)homeScreenOnly {
     @try {
         NSMutableArray *result = [NSMutableArray array];
@@ -261,11 +261,14 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
         NSString *bid = info[@"CFBundleIdentifier"];
         if (!bid.length) return;
 
-        // [applist3 2026-09-18] 主屏过滤**收窄到只作用于用户容器根**（homeScreenOnly）。
-        // 为什么收窄：这道过滤原先对**所有**扫描根生效（R23 的「deb 装的应用搜不到」就是它干的），
-        // 而越狱根 / 系统根里的 App 本来就是正经装上的、按「不在主屏」砍掉属于误伤 ——
-        // 刚修好的 <jbroot>/Applications 会被它二次清空（越狱 App 一进 App 资源库就看不到）。
-        // 用户容器根保留它，是因为那里可能残留无图标的隐藏条目。
+        // [applist4] 主屏过滤（homeScreenOnly）**只豁免越狱根**，逐根定：
+        //   · 用户容器根：过滤 —— 那里可能残留无图标的隐藏条目；
+        //   · <jbroot>/Applications（越狱根）：**不过滤** —— applist3 刚探测出来的越狱 App 不能被
+        //     「不在主屏」二次清空（越狱 App 一进 App 资源库就看不到），这正是 applist3 要保的；
+        //   · /Applications（系统程序）：过滤 —— 该根里躺着 Web / Diagnostics / Bridge 这类
+        //     **没有桌面图标**的系统 App，不过滤就会整齐地冒出来（用户 applist3 实测：没必要的都出来了）。
+        // 这道过滤原先对**所有**根生效（R23 的「deb 装的应用搜不到」就是它干的），
+        // 所以正解既不是全开也不是全关，而是**按根区分**。
         // _homeScreenSet 为 nil（读不到布局）时一律不过滤：宁可多列，不可漏列。
         if (homeScreenOnly && _homeScreenSet && ![_homeScreenSet containsObject:bid]) {
             _statDroppedByHome++;   // 诊断计数：底部统计行会显示被它砍掉多少条
@@ -301,7 +304,7 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
 }
 
 // 系统 App 候选根目录（越狱桶与系统程序桶都从这里出）：
-//   ① /Applications          真实系统卷（rootfs）；roothide 下原样，**只有苹果 App**；
+//   ① /Applications          真实系统卷（rootfs）；roothide 下原样，只有苹果 App（**仍过主屏过滤**）；
 //   ② <jbroot>/Applications  运行时探测到的越狱根，第三方 / 越狱 App（Sileo 等）的实际落点；
 //   ③ /var/jb/Applications   rootless 兜底（roothide 上不存在，扫到即空，无副作用）。
 // ⚠️ 不要加 <jbroot>/rootfs/Applications：那是 bind mount 回真实根的同一条路径，
@@ -359,7 +362,7 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
         NSString *jbRootPath = obJbrootPrefix();
 
         // 1) 用户容器目录：App Store / 侧载 / 巨魔。逐个判是否 TrollStore 安装。
-        //    这里是**唯一**保留主屏过滤的根（homeScreenOnly:YES）。
+        //    用户容器根保留主屏过滤（homeScreenOnly:YES）。
         NSArray *containerApps = [self _scanAppsAtPath:@"/var/containers/Bundle/Application"
                                         homeScreenOnly:YES];
         for (NSDictionary *app in containerApps) {
@@ -369,14 +372,16 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
         _statContainer = containerApps.count;
 
         // 2) 系统根：按「根 + bid 前缀」分类（越狱根一律越狱应用；/Applications 按 com.apple. 前缀取系统程序）。
-        //    这些根一律 homeScreenOnly:NO —— 理由见 _addAppAtPath: 里的说明。
+        //    /Applications 仍要过主屏过滤；越狱根一律不过滤 —— 见 _addAppAtPath: 里的说明。
         NSMutableSet *seen = [NSMutableSet set];
         _statRootApps = 0;
         _statJbrootApps = 0;
         _statLegacyJbApps = 0;
         for (NSString *base in [self _systemAppPaths]) {
             BOOL jbRoot = ![base isEqualToString:@"/Applications"];
-            NSArray *found = [self _scanAppsAtPath:base homeScreenOnly:NO];
+            // [applist4] 只豁免越狱根（jbRoot）：/Applications 必须继续过滤，
+            // 否则 Web / Diagnostics / Bridge 这类无桌面图标的系统 App 会整齐冒出来。
+            NSArray *found = [self _scanAppsAtPath:base homeScreenOnly:!jbRoot];
             if (!jbRoot) {
                 _statRootApps = found.count;
             } else if (jbRootPath.length && [base hasPrefix:jbRootPath]) {
@@ -847,7 +852,7 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
                 for (NSDictionary *app in unselTroll) [self _addAppSpecifier:app toSpecifiers:specs];
             }
             if (unselSystem.count) {
-                [self _addGroupHeader:@"系统程序" footer:@"" toSpecifiers:specs];
+                [self _addGroupHeader:@"系统程序" footer:@"系统自带 App（只列主屏可见的）" toSpecifiers:specs];
                 for (NSDictionary *app in unselSystem) [self _addAppSpecifier:app toSpecifiers:specs];
             }
 
