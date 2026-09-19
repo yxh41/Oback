@@ -2,8 +2,8 @@
 //  ObackAppListController.m
 //  Oback 设置页 —— App 选择器（黑白名单）
 //
-//  枚举设备已装、桌面有图标的 App，按「用户应用 / 系统程序」分组，每行用系统原生
-//  PSTitleValueCell 显示图标 + 名称，图标从 .app 包直接读取
+//  枚举设备已装、桌面可见的 App，按「用户应用 / 系统程序」分组，每行用系统原生
+//  PSTitleValueCell 显示图标 + 名称，图标从 .app 包直接读取（**读不到只是这一行没图，不影响勾选与生效**）
 //  （UIImage imageWithContentsOfFile:，无私有 API、零自定义 cell 类，roothide/iOS16.4.1 下稳定）。
 //  注：PSApplicationCell 在本项目的 theos 头文件集合（theos/headers）未声明，
 //  直接用会因 -Werror 编译失败、不出 .deb，故改用 PSTitleValueCell + 手动图标加载。
@@ -75,14 +75,14 @@ static NSString *const kDomain = @"com.zlhkf.oback";
         // 仅保留主屏幕可见的 App（_homeScreenSet 为 nil 表示读不到布局，则显示全部）
         if (_homeScreenSet && ![_homeScreenSet containsObject:bid]) return;
 
-        // 只保留在桌面上有图标的 App
-        id iconName = info[@"CFBundleIconName"];
-        id iconFiles = info[@"CFBundleIconFiles"];
-        id icons = info[@"CFBundleIcons"];
-        BOOL hasIcon = ([iconName isKindOfClass:[NSString class]] && [iconName length])
-                    || ([iconFiles isKindOfClass:[NSArray class]] && [iconFiles count])
-                    || ([icons isKindOfClass:[NSDictionary class]] && [icons count]);
-        if (!hasIcon) return;
+        // [P0 2026-09-19] 此处原有「只保留声明了图标键的 App」过滤（认 CFBundleIconName /
+        // CFBundleIconFiles / CFBundleIcons），命中失败直接 return 丢弃整条。两处硬伤，已移除：
+        //   ① 漏了**单数字段 CFBundleIconFile**（老 deb / 老 SDK 工程最常见的写法）⇒ 有图标也判「无」；
+        //   ② 图标只是装饰，而「判无图标 = 整条丢弃」的代价是名单**结构性失效**：
+        //      用户点名要屏蔽的 App（deb 装的、只在 App 资源库的、Info.plist 不规范的）根本加不进来，
+        //      这比「少一张缩略图」严重得多。
+        // 现在：能否配到图标由 _loadIconImageForApp: 单独负责，配不到只是这一行没图。
+        // 「是否算已装可见 App」由上面的 _homeScreenSet 判据负责，不再叠加图标键这道伪判据。
 
         NSString *name = info[@"CFBundleDisplayName"];
         if (![name isKindOfClass:[NSString class]] || !name.length) {
@@ -223,6 +223,19 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     self.definesPresentationContext = YES;
 }
 
+// [P0 2026-09-19] 每次进入本页**重新扫描**。
+// 此前 _allApps 是实例级缓存（只在控制器重建时刷新），而 updateSearchResults... 只清 _specifiers、
+// 不清 _allApps ⇒ 停留本页期间新装的 App / 新做的改动永远搜不到（必须杀掉设置 App 重开才行）。
+// 重扫不额外读图标：图标另有 bid 级缓存 _iconCache。
+// ⚠️ super 可以调：只有 willDisplayCell 不能调 super（本环境 PSListController 未实现该方法），
+//    viewWillAppear: 是 UIViewController 的标准方法，必然实现。
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    _allApps = nil;
+    _specifiers = nil;
+    [self reloadSpecifiers];
+}
+
 - (void)updateSearchResultsForSearchController:(UISearchController *)searchController {
     NSString *text = [searchController.searchBar.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] ?: @"";
     _searchText = text.length ? text : nil;
@@ -310,15 +323,23 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 
     NSMutableArray<NSString *> *candidates = [NSMutableArray array];
     void (^addName)(id) = ^(id n) {
-        if ([n isKindOfClass:[NSString class]] && [n length]) {
-            [candidates addObject:n];
-            [candidates addObject:[NSString stringWithFormat:@"%@@2x", n]];
-            [candidates addObject:[NSString stringWithFormat:@"%@@3x", n]];
-        }
+        if (![n isKindOfClass:[NSString class]] || ![n length]) return;
+        // [P0 2026-09-19] CFBundleIconFile 的值常**自带 .png 扩展名**（如 "Icon.png"），
+        // 而下面的加载端还会再补 ""/".png"、并生成 @2x/@3x 变体 ⇒ 必须先剥掉扩展名，
+        // 否则会拼出 "Icon.png.png" / "Icon.png@2x" 这类永远读不到的路径。
+        NSString *base = n;
+        if ([[base lowercaseString] hasSuffix:@".png"]) base = [base substringToIndex:base.length - 4];
+        if (!base.length) return;
+        [candidates addObject:base];
+        [candidates addObject:[NSString stringWithFormat:@"%@@2x", base]];
+        [candidates addObject:[NSString stringWithFormat:@"%@@3x", base]];
     };
 
     // 现代：CFBundleIconName
     addName(info[@"CFBundleIconName"]);
+    // [P0 2026-09-19] 老式**单数字段** CFBundleIconFile：老 deb / 老 SDK 产物最常见的写法，
+    // 此前完全没被读取 ⇒ 即使图就散放在 .app 里也配不出来。
+    addName(info[@"CFBundleIconFile"]);
     // CFBundleIcons -> PrimaryIcon（CFBundleIconName / CFBundleIconFiles）
     id icons = info[@"CFBundleIcons"];
     if ([icons isKindOfClass:[NSDictionary class]]) {
@@ -366,17 +387,89 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 - (void)_toggleApp:(PSSpecifier *)spec {
     NSString *bid = [spec propertyForKey:@"appBundleID"];
     if (!bid) return;
-    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
-    NSMutableArray *arr = [[d arrayForKey:[self _storeKey]] mutableCopy] ?: [NSMutableArray array];
+    // [P0 2026-09-19] 读源改为 _selectedApps（**全局文件优先**、suite 仅兜底），不再直接读 NSUserDefaults。
+    // 原写法在 roothide 下若 suite 副本为空、而全局文件里已有名单，就会把「空数组 + 本次 bid」
+    // 整份写回全局文件 ⇒ 静默清空用户此前选的全部条目（同类坑见 ObackPreferences.m 顶部注释）。
+    NSMutableArray *arr = [[self _selectedApps] mutableCopy] ?: [NSMutableArray array];
     if ([arr containsObject:bid]) [arr removeObject:bid];
     else [arr addObject:bid];
-    [d setObject:arr forKey:[self _storeKey]];
-    [d synchronize];
-    // 同时写全局文件（roothide 跨 App 共享来源）：手动 NSUserDefaults 写入会被容器化到「设置」App 副本，
-    // tweak 读不到；直接写全局文件才能被注入到其它 App 的 tweak 读到，黑名单/白名单才真正生效。
-    oback_setGlobalPref([self _storeKey], arr);
+    [self _writeList:arr];
     _specifiers = nil;   // 清空以触发重建，使「选中项置顶」排序生效
     [self reloadSpecifiers];
+}
+
+#pragma mark 手动添加 bundle id（扫描/过滤拿不到时的兜底入口）
+
+// [P0 2026-09-19] 顶部那一行「＋ 手动输入 bundle id 添加」。
+// ⚠️ 刻意用 PSTitleValueCell 而不是 PSButtonCell：本仓库 theos/headers 未声明 setAction:，
+//    按钮行在 -Werror 下编译不过；且本文件所有行本来就统一走 didSelectRow 这一条已验证路径。
+- (PSSpecifier *)_manualAddSpecifier {
+    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:@"＋ 手动输入 bundle id 添加"
+                                                  target:self
+                                                     set:nil
+                                                     get:nil
+                                                 detail:nil
+                                                     cell:PSTitleValueCell
+                                                     edit:nil];
+    [s setProperty:@(YES) forKey:@"obManualAdd"];
+    return s;
+}
+
+// 写名单：suite + 全局文件**双写**（roothide 下跨 App 真相源是全局文件，suite 仅兜底）。
+- (void)_writeList:(NSArray *)arr {
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kDomain];
+    [d setObject:(arr ?: @[]) forKey:[self _storeKey]];
+    [d synchronize];
+    oback_setGlobalPref([self _storeKey], (arr ?: @[]));
+}
+
+- (void)_addBidToStore:(NSString *)bid {
+    NSMutableArray *arr = [[self _selectedApps] mutableCopy] ?: [NSMutableArray array];
+    if (![arr containsObject:bid]) [arr addObject:bid];
+    [self _writeList:arr];
+}
+
+- (void)_alertInvalidBid:(NSString *)bid {
+    NSString *msg = bid.length
+        ? [NSString stringWithFormat:@"「%@」不像 bundle id。只能含字母、数字、点(.)、连字符(-)，例如 com.example.app。", bid]
+        : @"没有输入内容。bundle id 形如 com.example.app —— 可在 Filza 打开该 App 的 Info.plist 看 CFBundleIdentifier。";
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"格式不对"
+                                                               message:msg
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+// [P0] 手动添加：UIAlertController 文本框（标准 UIKit，必定可用；与 _editNoteForBid: 同款，
+// 刻意不用 PSTextFieldCell —— 本环境 PreferenceLoader 的文本框 cell 存在填不进去的问题）。
+// 校验字符集：bundle id 只允许 [A-Za-z0-9.-]；挡掉中文/空格/换行等手滑输入（写进去也永不命中）。
+- (void)_promptManualAddBid {
+    NSString *key = [self _storeKey];
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"手动添加 bundle id"
+                                                               message:[NSString stringWithFormat:@"填 App 的 bundle id（如 com.example.app），确定后写入「%@」。\n可在 Filza 打开该 App 的 Info.plist 查看 CFBundleIdentifier。", key]
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    [a addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"com.example.app";
+        tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+        tf.keyboardType = UIKeyboardTypeASCIICapable;
+    }];
+    [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [a addAction:[UIAlertAction actionWithTitle:@"添加" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
+        UITextField *tf = [[a textFields] firstObject];
+        NSString *bid = nil;
+        if (tf) bid = [tf.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        NSCharacterSet *okSet = [NSCharacterSet characterSetWithCharactersInString:
+                                 @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-"];
+        BOOL bad = (!bid.length || [bid rangeOfCharacterFromSet:[okSet invertedSet]].location != NSNotFound);
+        if (bad) { [self _alertInvalidBid:bid]; return; }
+        [self _addBidToStore:bid];
+        _allApps = nil;   // 让新加的 bid 在「已选」分组里以 name=bid 形式立即可见
+        _specifiers = nil;
+        [self reloadSpecifiers];
+    }]];
+    [self presentViewController:a animated:YES completion:nil];
 }
 
 - (NSArray *)specifiers {
@@ -388,6 +481,12 @@ static NSString *const kDomain = @"com.zlhkf.oback";
             NSUInteger cnt = [[self _selectedApps] count];
             [self _addGroupHeader:[NSString stringWithFormat:@"已选 %lu 个应用", (unsigned long)cnt]
                            footer:(cnt ? @"（以下为已加入本名单的应用，与下方列表分开）" : @"（尚未选择任何应用）") toSpecifiers:specs];
+
+            // [P0 2026-09-19] 手动添加入口：扫描根之外 / 被过滤 / Info.plist 不规范的 App
+            // （典型：deb 装到 /var/jb/Applications、只进 App 资源库、老 SDK 无图标键）一律可手填 bid 入名单。
+            // 位置固定在顶部且**不受搜索影响**——「搜不到」正是它要被用到的场景，
+            // 若跟着搜索一起被过滤掉，用户搜索无结果时就永远看不到它了。
+            [specs addObject:[self _manualAddSpecifier]];
 
             NSDictionary *apps = [self _installedApps];
             NSArray *userApps = [self _filteredApps:apps[@"user"]];
@@ -406,6 +505,24 @@ static NSString *const kDomain = @"com.zlhkf.oback";
             for (NSDictionary *app in systemApps) {
                 if ([sel containsObject:app[@"bundleID"]]) [selApps addObject:app];
                 else [unselSystem addObject:app];
+            }
+            // [P0 2026-09-19] 已选、但**不在扫描结果里**的 bid 也必须显示出来。
+            // 反例（用户实测 + 手动改 plist 场景）：名单里有它、顶部计数也 +1，但列表里既看不到、
+            // 也无法取消 ⇒ 名单堆着一批「隐形条目」，只能靠 Filza 改 plist 才能清掉。
+            // 这里把它们补成 name=bid 的条目并入「已选」分组，点按即可移除。
+            NSMutableSet *scannedBIDs = [NSMutableSet set];
+            for (NSDictionary *app in userApps) {
+                NSString *b = app[@"bundleID"];
+                if ([b isKindOfClass:[NSString class]] && b.length) [scannedBIDs addObject:b];
+            }
+            for (NSDictionary *app in systemApps) {
+                NSString *b = app[@"bundleID"];
+                if ([b isKindOfClass:[NSString class]] && b.length) [scannedBIDs addObject:b];
+            }
+            for (NSString *selBID in sel) {
+                if (![selBID isKindOfClass:[NSString class]] || !selBID.length) continue;
+                if ([scannedBIDs containsObject:selBID]) continue;
+                [selApps addObject:@{@"path": @"", @"bundleID": selBID, @"name": selBID}];
             }
             [selApps sortUsingDescriptors:@[[NSSortDescriptor sortDescriptorWithKey:@"name" ascending:YES]]];
             if (selApps.count) {
@@ -455,6 +572,12 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
+    // [P0 2026-09-19] 顶部「手动输入 bundle id」行：走同一套 didSelectRow 机制
+    //（不用 PSButtonCell + setAction:：本仓库 theos/headers 未声明 setAction:，-Werror 下编译不过）。
+    if ([[spec propertyForKey:@"obManualAdd"] boolValue]) {
+        [self _promptManualAddBid];
+        return;
+    }
     NSString *bid = [spec propertyForKey:@"appBundleID"];
     if (bid.length) {
         [self _toggleApp:spec];
