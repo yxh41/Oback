@@ -2,7 +2,7 @@
 //  ObackAppListController.m
 //  Oback 设置页 —— App 选择器（黑白名单）
 //
-//  枚举设备已装、桌面可见的 App，按「用户应用 / 系统程序」分组，每行用系统原生
+//  枚举设备已装、桌面可见的 App，按「用户应用 / 越狱应用 / 巨魔应用 / 系统程序」四类分组，每行用系统原生
 //  PSTitleValueCell 显示图标 + 名称，图标从 .app 包直接读取（**读不到只是这一行没图，不影响勾选与生效**）
 //  （UIImage imageWithContentsOfFile:，无私有 API、零自定义 cell 类，roothide/iOS16.4.1 下稳定）。
 //  注：PSApplicationCell 在本项目的 theos 头文件集合（theos/headers）未声明，
@@ -20,11 +20,130 @@
 
 static NSString *const kDomain = @"com.zlhkf.oback";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// [R26 2026-09-20] 巨魔（TrollStore）判定 —— 只看文件，零私有 API
+// 为什么不能只看路径：TrollStore 把 App 装在**用户容器目录**（和 App Store 应用同一层），
+// 容器文件系统里没有任何 per-app 标记文件，所以在路径上它与普通应用无法区分。
+// 唯一能只看文件就判出来的可靠特征是**代码签名**：TrollStore 用 ldid 风格签名，
+// entitlements 以 XML 明文写在签名里，其中含 platform-application / no-container
+// 这类「系统应用才有的」权限 —— 这正是它能被 installd 当成 System 类型注册的原因。
+// ⚠️ 若将来 TrollStore 改成只留 DER 编码（键名变 OID、明文不再出现），本判定会**失效并静默降级**
+//    为「用户应用」，绝不会把普通应用误判成巨魔（宁可漏判，不可误判）。
+//
+// 判定特征串 = 两条「系统应用才有的」权限（普通 App Store 应用与 AltStore/Sideloadly 侧载都不带）：
+static NSArray *obTrollMarkers(void) {
+    static NSArray *m = nil;
+    if (!m) {
+        m = @[[@"platform-application" dataUsingEncoding:NSUTF8StringEncoding],
+              [@"com.apple.private.security.no-container" dataUsingEncoding:NSUTF8StringEncoding]];
+    }
+    return m;
+}
+
+// 只读文件 [off, off+len) 一段。读不到 / 越界 / 抛异常一律返回 nil —— 列表构建绝不能被它打断。
+static NSData *obReadAt(NSString *path, unsigned long long off, NSUInteger len) {
+    if (!path.length || !len) return nil;
+    NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:path];
+    if (!fh) return nil;
+    NSData *d = nil;
+    @try {
+        [fh seekToFileOffset:off];
+        d = [fh readDataOfLength:len];
+    } @catch (NSException *e) { (void)e; d = nil; }
+    @try { [fh closeFile]; } @catch (NSException *e) { (void)e; }
+    return (d.length ? d : nil);
+}
+
+static uint32_t obU32(const uint8_t *p, BOOL big) {
+    if (big) return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+    return ((uint32_t)p[3] << 24) | ((uint32_t)p[2] << 16) | ((uint32_t)p[1] << 8) | (uint32_t)p[0];
+}
+
+// 从已读入的 Mach-O 头部 + 加载命令区里找 LC_CODE_SIGNATURE(0x1d)，回填它指向的文件区间。
+// 只走这一条路是为了**不把整个可执行文件读进内存**（App 的主二进制动辄几十 MB，逐个读会卡住列表）。
+static BOOL obCodeSigRange(const uint8_t *mh, NSUInteger len, uint64_t *outOff, uint32_t *outSize) {
+    if (len < 32) return NO;
+    uint32_t magic = obU32(mh, NO);
+    BOOL big;
+    NSUInteger hdr;
+    if (magic == 0xfeedface)      { big = NO;  hdr = 28; }   // 32 位小端
+    else if (magic == 0xfeedfacf) { big = NO;  hdr = 32; }   // 64 位小端（arm64 走这条）
+    else if (magic == 0xcefaedfe) { big = YES; hdr = 28; }
+    else if (magic == 0xcffaedfe) { big = YES; hdr = 32; }
+    else return NO;
+    uint32_t ncmds = obU32(mh + 16, big);
+    if (ncmds == 0 || ncmds > 4096) return NO;
+    NSUInteger off = hdr;
+    for (uint32_t i = 0; i < ncmds; i++) {
+        if (off + 8 > len) return NO;
+        uint32_t cmd = obU32(mh + off, big);
+        uint32_t sz  = obU32(mh + off + 4, big);
+        if (sz < 8) return NO;
+        if (cmd == 0x1d) {                                   // LC_CODE_SIGNATURE
+            if (off + 16 > len) return NO;
+            *outOff  = (uint64_t)obU32(mh + off + 8,  big);   // linkedit_data_command.dataoff
+            *outSize = obU32(mh + off + 12, big);             // ...datasize
+            return (*outSize > 0);
+        }
+        off += sz;
+    }
+    return NO;
+}
+
+// 在 off 处的那个 Mach-O 切片里，取代码签名区并找标记。
+static BOOL obSliceHasTrollMarker(NSString *exePath, uint64_t off) {
+    NSData *hdr = obReadAt(exePath, off, 16384);
+    if (!hdr || hdr.length < 32) return NO;
+    uint64_t csOff = 0;
+    uint32_t csSize = 0;
+    if (!obCodeSigRange(hdr.bytes, hdr.length, &csOff, &csSize)) return NO;
+    if (csSize > 262144) return NO;      // 异常值防护：正常签名 blob 远小于 256KB
+    NSData *sig = obReadAt(exePath, off + csOff, csSize);
+    if (!sig.length) return NO;
+    NSRange whole = NSMakeRange(0, sig.length);
+    for (NSData *mk in obTrollMarkers()) {
+        if (mk.length && [sig rangeOfData:mk options:0 range:whole].location != NSNotFound) return YES;
+    }
+    return NO;
+}
+
+// 主可执行文件（thin / fat / fat64 都支持）的签名里是否带系统级权限特征。
+static BOOL obExeHasTrollMarker(NSString *exePath) {
+    NSData *head = obReadAt(exePath, 0, 4096);
+    if (!head || head.length < 8) return NO;
+    const uint8_t *p = head.bytes;
+    uint32_t magicBE = obU32(p, YES);                 // fat 头是大端
+    BOOL isFat   = (magicBE == 0xCAFEBABE || magicBE == 0xBEBAFECA);
+    BOOL isFat64 = (magicBE == 0xCAFEBABF || magicBE == 0xBFBAFECA);
+    if (isFat || isFat64) {
+        BOOL big = (magicBE == 0xCAFEBABE || magicBE == 0xCAFEBABF);
+        NSUInteger ent = isFat64 ? 32 : 20;
+        uint32_t nfat = obU32(p + 4, big);
+        if (nfat == 0 || nfat > 16) return NO;
+        NSData *fh = obReadAt(exePath, 8, ent * nfat);
+        if (!fh || fh.length < ent * nfat) return NO;
+        const uint8_t *fp = fh.bytes;
+        for (uint32_t i = 0; i < nfat; i++) {
+            uint64_t coff;
+            if (isFat64) {
+                coff = ((uint64_t)obU32(fp + i * ent + 8, big) << 32) | obU32(fp + i * ent + 12, big);
+            } else {
+                coff = obU32(fp + i * ent + 8, big);
+            }
+            if (obSliceHasTrollMarker(exePath, coff)) return YES;
+        }
+        return NO;
+    }
+    return obSliceHasTrollMarker(exePath, 0);         // 非 fat：本身就是 Mach-O 头
+}
+
 @implementation ObackAppListController {
     NSDictionary *_allApps; // @{ @"user": [...], @"system": [...] }
     NSString *_searchText;
     NSSet *_homeScreenSet;   // 主屏可见的 bundle id 集合；nil = 读不到布局，回退显示全部
     NSMutableDictionary *_iconCache; // bid -> UIImage，避免每次 reload 重新读盘导致点按变慢
+    NSMutableDictionary *_trollCache; // [R26] bid -> NSNumber(BOOL)：是否 TrollStore（巨魔）安装。
+                                      // 判定要读主可执行文件的代码签名区，缓存后每次进页面只探测一次。
 }
 
 #pragma mark App 枚举
@@ -92,7 +211,11 @@ static NSString *const kDomain = @"com.zlhkf.oback";
             }
         }
 
-        [result addObject:@{@"path": appPath, @"bundleID": bid, @"name": name}];
+        // [R26] 顺带存下主可执行文件名：巨魔判定要按名去读 <App>.app/<exe> 的代码签名，
+        // 存这里可省掉「每个 App 再读一次 Info.plist」。
+        NSString *exe = info[@"CFBundleExecutable"];
+        if (![exe isKindOfClass:[NSString class]]) exe = @"";
+        [result addObject:@{@"path": appPath, @"bundleID": bid, @"name": name, @"exe": exe}];
     } @catch (NSException *e) {
         (void)e;
     }
@@ -106,10 +229,9 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 
 // 「设置」App 兜底条目（com.apple.Preferences）。
 // 背景：Oback 自 2c6b7f1 起在系统「设置」App 内也生效，用户需要在白名单/黑名单/左缘排除/全局返回等
-// 列表里能勾到它。但目录扫描常被两道过滤挡掉，导致搜索「设置」永远搜不到：
-//   ① _homeScreenSet：设置图标被移出主屏（进 App 资源库）时就不在 IconState.plist 里；
-//   ② hasIcon：Preferences.app 的 Info.plist 未必声明 CFBundleIconName/CFBundleIconFiles/
-//      CFBundleIcons（系统 App 图标由 Assets / SpringBoard 提供）。
+// 列表里能勾到它。但目录扫描仍可能被主屏过滤挡掉，导致搜索「设置」搜不到：
+//   _homeScreenSet：设置图标被移出主屏（进 App 资源库）时就不在 IconState.plist 里。
+//（原先还有第二道 hasIcon 过滤，已在 build applist1 删除，不再是原因。）
 // 故扫描不到时手工补一条：保证一定能被搜索到并勾选。图标读不到就无图标显示，不影响勾选与生效。
 - (void)_ensureSettingsAppIn:(NSMutableArray *)apps {
     for (NSDictionary *a in apps) {
@@ -124,27 +246,80 @@ static NSString *const kDomain = @"com.zlhkf.oback";
     [apps addObject:@{@"path": path, @"bundleID": bid, @"name": name}];
 }
 
+// [R26 2026-09-20] 四个分桶：用户应用 / 越狱应用 / 巨魔应用 / 系统程序。
+// 分类口径（**零私有 API**，全部由「路径 + 文件内容」判出）：
+//   · 用户应用：装在用户容器目录 /var/containers/Bundle/Application，且签名不带系统级权限；
+//   · 巨魔应用：同一目录（TrollStore 就装这儿），但主可执行文件签名里带 platform-application /
+//     com.apple.private.security.no-container。TrollStore 用 ldid 风格签名把 App 伪装成系统应用
+//     （这正是它能以 System 类型被 installd 注册、从而「卸载不掉」的原因），容器文件系统里没有任何
+//     per-app 标记文件 ⇒ **签名特征是唯一能只看文件判出来的可靠依据**。Apple 系统 App 也带该权限，
+//     但它们不在用户容器目录 ⇒ 不会误判。
+//   · 越狱应用：jbroot（/var/jb/Applications），或 /Applications 里 bid 不以 com.apple. 开头的第三方 App
+//     （Apple 自家 App 的 bid 全是 com.apple.*，第三方出现在 /Applications 必然是越狱 / dump 安装）；
+//   · 系统程序：/Applications 且 bid 以 com.apple. 开头。
 - (NSDictionary *)_installedApps {
     if (!_allApps) {
         if (!_homeScreenSet) _homeScreenSet = [self _homeScreenBundleIDs];
-        NSArray *userApps = [self _scanAppsAtPath:@"/var/containers/Bundle/Application"];
+
+        NSMutableArray *userApps = [NSMutableArray array];
+        NSMutableArray *trollApps = [NSMutableArray array];
+        NSMutableArray *jailApps = [NSMutableArray array];
         NSMutableArray *systemApps = [NSMutableArray array];
+
+        // 1) 用户容器目录：App Store / 侧载 / 巨魔。逐个判是否 TrollStore 安装。
+        for (NSDictionary *app in [self _scanAppsAtPath:@"/var/containers/Bundle/Application"]) {
+            if ([self _isTrollStoreApp:app]) [trollApps addObject:app];
+            else [userApps addObject:app];
+        }
+
+        // 2) 系统根：按「根 + bid 前缀」分类（jbroot 一律越狱应用；/Applications 按 com.apple. 前缀取系统程序）
         NSMutableSet *seen = [NSMutableSet set];
         for (NSString *base in [self _systemAppPaths]) {
+            BOOL jbRoot = ![base isEqualToString:@"/Applications"];
             for (NSDictionary *app in [self _scanAppsAtPath:base]) {
                 NSString *bid = app[@"bundleID"];
                 if ([bid isKindOfClass:[NSString class]] && bid.length) {
                     if ([seen containsObject:bid]) continue;
                     [seen addObject:bid];
                 }
-                [systemApps addObject:app];
+                BOOL appleSystem = (!jbRoot && [[bid lowercaseString] hasPrefix:@"com.apple."]);
+                [(appleSystem ? systemApps : jailApps) addObject:app];
             }
         }
+
         [self _ensureSettingsAppIn:systemApps];
-        [systemApps sortUsingDescriptors:@[[NSSortDescriptor sortDescriptorWithKey:@"name" ascending:YES]]];
-        _allApps = @{@"user": userApps, @"system": systemApps};
+        for (NSMutableArray *bucket in @[userApps, trollApps, jailApps, systemApps]) {
+            [bucket sortUsingDescriptors:@[[NSSortDescriptor sortDescriptorWithKey:@"name" ascending:YES]]];
+        }
+        _allApps = @{@"user": userApps, @"troll": trollApps, @"jailbreak": jailApps, @"system": systemApps};
     }
     return _allApps;
+}
+
+#pragma mark 巨魔（TrollStore）判定
+
+// 判定某个 App 是否为 TrollStore（巨魔）安装。结果按 bid 缓存（一次进页面只探测一次）。
+// 签名解析细节见文件作用域里的 obExeHasTrollMarker 系列自由函数。
+- (BOOL)_isTrollStoreApp:(NSDictionary *)app {
+    NSString *bid = app[@"bundleID"];
+    if ([bid isKindOfClass:[NSString class]] && bid.length) {
+        NSNumber *cached = _trollCache[bid];
+        if (cached) return [cached boolValue];
+    }
+    BOOL troll = NO;
+    @try {
+        NSString *path = app[@"path"];
+        NSString *exe  = app[@"exe"];
+        if (![exe isKindOfClass:[NSString class]] || !exe.length) exe = @"";
+        if (exe.length && [path isKindOfClass:[NSString class]] && path.length) {
+            troll = obExeHasTrollMarker([path stringByAppendingPathComponent:exe]);
+        }
+    } @catch (NSException *e) { (void)e; troll = NO; }
+    if ([bid isKindOfClass:[NSString class]] && bid.length) {
+        if (!_trollCache) _trollCache = [NSMutableDictionary dictionary];
+        _trollCache[bid] = @(troll);
+    }
+    return troll;
 }
 
 #pragma mark 仅显示主屏幕可见的 App（按 SpringBoard IconState 过滤）
@@ -489,35 +664,39 @@ static NSString *const kDomain = @"com.zlhkf.oback";
             [specs addObject:[self _manualAddSpecifier]];
 
             NSDictionary *apps = [self _installedApps];
-            NSArray *userApps = [self _filteredApps:apps[@"user"]];
+            // [R26] 四个分桶（顺序即下方分组显示顺序）
+            NSArray *userApps   = [self _filteredApps:apps[@"user"]];
+            NSArray *jailApps   = [self _filteredApps:apps[@"jailbreak"]];
+            NSArray *trollApps  = [self _filteredApps:apps[@"troll"]];
             NSArray *systemApps = [self _filteredApps:apps[@"system"]];
             NSSet *sel = [NSSet setWithArray:[self _selectedApps]];
 
-            // 选中项【单独成列】：用户+系统的已选项合并、按名称排序，列在顶部「已选 N 个应用」之下，
-            // 不再混入「用户应用/系统程序」原列表（之前是在原列表内置顶，不符合预期）。
+            // 选中项【单独成列】：各分类的已选项合并、按名称排序，列在顶部「已选 N 个应用」之下，
+            // 不再混入下面各分类原列表（之前是在原列表内置顶，不符合预期）。
             NSMutableArray *selApps = [NSMutableArray array];
             NSMutableArray *unselUser = [NSMutableArray array];
+            NSMutableArray *unselJail = [NSMutableArray array];
+            NSMutableArray *unselTroll = [NSMutableArray array];
             NSMutableArray *unselSystem = [NSMutableArray array];
-            for (NSDictionary *app in userApps) {
-                if ([sel containsObject:app[@"bundleID"]]) [selApps addObject:app];
-                else [unselUser addObject:app];
-            }
-            for (NSDictionary *app in systemApps) {
-                if ([sel containsObject:app[@"bundleID"]]) [selApps addObject:app];
-                else [unselSystem addObject:app];
+            // [R26] 四桶统一走一遍：命中名单的进「已选」，其余进各自未选组。
+            NSArray<NSArray *> *buckets = @[userApps, jailApps, trollApps, systemApps];
+            NSArray<NSMutableArray *> *sinks = @[unselUser, unselJail, unselTroll, unselSystem];
+            for (NSUInteger bi = 0; bi < buckets.count; bi++) {
+                for (NSDictionary *app in buckets[bi]) {
+                    if ([sel containsObject:app[@"bundleID"]]) [selApps addObject:app];
+                    else [sinks[bi] addObject:app];
+                }
             }
             // [P0 2026-09-19] 已选、但**不在扫描结果里**的 bid 也必须显示出来。
             // 反例（用户实测 + 手动改 plist 场景）：名单里有它、顶部计数也 +1，但列表里既看不到、
             // 也无法取消 ⇒ 名单堆着一批「隐形条目」，只能靠 Filza 改 plist 才能清掉。
             // 这里把它们补成 name=bid 的条目并入「已选」分组，点按即可移除。
             NSMutableSet *scannedBIDs = [NSMutableSet set];
-            for (NSDictionary *app in userApps) {
-                NSString *b = app[@"bundleID"];
-                if ([b isKindOfClass:[NSString class]] && b.length) [scannedBIDs addObject:b];
-            }
-            for (NSDictionary *app in systemApps) {
-                NSString *b = app[@"bundleID"];
-                if ([b isKindOfClass:[NSString class]] && b.length) [scannedBIDs addObject:b];
+            for (NSArray *bucket in buckets) {
+                for (NSDictionary *app in bucket) {
+                    NSString *b = app[@"bundleID"];
+                    if ([b isKindOfClass:[NSString class]] && b.length) [scannedBIDs addObject:b];
+                }
             }
             for (NSString *selBID in sel) {
                 if (![selBID isKindOfClass:[NSString class]] || !selBID.length) continue;
@@ -529,19 +708,29 @@ static NSString *const kDomain = @"com.zlhkf.oback";
                 for (NSDictionary *app in selApps) [self _addAppSpecifier:app toSpecifiers:specs];
             }
 
-            // 用户应用（仅未选中）
+            // [R26] 未选中项按四类分列：用户应用 -> 越狱应用 -> 巨魔应用 -> 系统程序（空组不显示）
             if (unselUser.count) {
-                [self _addGroupHeader:@"用户应用" footer:@"" toSpecifiers:specs];
+                [self _addGroupHeader:@"用户应用" footer:@"App Store / 侧载安装"
+                         toSpecifiers:specs];
                 for (NSDictionary *app in unselUser) [self _addAppSpecifier:app toSpecifiers:specs];
             }
-            // 系统程序（仅未选中）
+            if (unselJail.count) {
+                [self _addGroupHeader:@"越狱应用" footer:@"装在 jbroot，或 /Applications 里的第三方 App"
+                         toSpecifiers:specs];
+                for (NSDictionary *app in unselJail) [self _addAppSpecifier:app toSpecifiers:specs];
+            }
+            if (unselTroll.count) {
+                [self _addGroupHeader:@"巨魔应用" footer:@"TrollStore 安装（签名伪装成系统应用）"
+                         toSpecifiers:specs];
+                for (NSDictionary *app in unselTroll) [self _addAppSpecifier:app toSpecifiers:specs];
+            }
             if (unselSystem.count) {
                 [self _addGroupHeader:@"系统程序" footer:@"" toSpecifiers:specs];
                 for (NSDictionary *app in unselSystem) [self _addAppSpecifier:app toSpecifiers:specs];
             }
 
             // 搜索无结果时给个提示分组
-            if (!userApps.count && !systemApps.count) {
+            if (!userApps.count && !jailApps.count && !trollApps.count && !systemApps.count) {
                 [self _addGroupHeader:@"" footer:@"未找到匹配的应用" toSpecifiers:specs];
             }
 
