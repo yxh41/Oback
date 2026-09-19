@@ -212,12 +212,13 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
     NSUInteger _statJbrootApps;      // <jbroot>/Applications 命中数
     NSUInteger _statLegacyJbApps;    // /var/jb/Applications 命中数（rootless）
     NSUInteger _statDroppedByHome;   // 被主屏集合砍掉的条数
+    NSUInteger _statJbFallback;      // [applist6] 越狱根被主屏过滤清空后、整根兜底列出的条数（0=未触发）
 }
 
 #pragma mark App 枚举
 
 // 扫描指定目录，返回 App 数组（元素为 @{path, bundleID, name, exe}）。
-// homeScreenOnly=YES 时只保留主屏可见的 App —— 除**越狱根**外都传 YES（理由见 _addAppAtPath:）。
+// homeScreenOnly=YES 时只保留主屏可见的 App —— [applist6] 起**所有根都传 YES**（理由见 _addAppAtPath:）。
 - (NSArray *)_scanAppsAtPath:(NSString *)basePath homeScreenOnly:(BOOL)homeScreenOnly {
     @try {
         NSMutableArray *result = [NSMutableArray array];
@@ -261,14 +262,17 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
         NSString *bid = info[@"CFBundleIdentifier"];
         if (!bid.length) return;
 
-        // [applist4] 主屏过滤（homeScreenOnly）**只豁免越狱根**，逐根定：
+        // [applist6] 主屏过滤（homeScreenOnly）**对所有根一视同仁**：没主屏图标就不列。
         //   · 用户容器根：过滤 —— 那里可能残留无图标的隐藏条目；
-        //   · <jbroot>/Applications（越狱根）：**不过滤** —— applist3 刚探测出来的越狱 App 不能被
-        //     「不在主屏」二次清空（越狱 App 一进 App 资源库就看不到），这正是 applist3 要保的；
+        //   · <jbroot>/Applications（越狱根）：[applist6] 起**也过滤** —— 用户实测 Crane 这类
+        //     **没有主屏图标**的越狱 App 被列了出来（applist4 曾豁免越狱根，理由是怕 applist3
+        //     探测到的越狱 App 被「不在主屏」二次清空；现在改由**整根兜底**兜住该风险，
+        //     见 _installedApps 里 found.count==0 时的回退，不会再整组消失）；
         //   · /Applications（系统程序）：过滤 —— 该根里躺着 Web / Diagnostics / Bridge 这类
         //     **没有桌面图标**的系统 App，不过滤就会整齐地冒出来（用户 applist3 实测：没必要的都出来了）。
-        // 这道过滤原先对**所有**根生效（R23 的「deb 装的应用搜不到」就是它干的），
-        // 所以正解既不是全开也不是全关，而是**按根区分**。
+        // 这道过滤原先是「所有根一刀切」（R23 的「deb 装的应用搜不到」就是它干的），
+        // 后来改成按根豁免，现在统一为**全根过滤 + 越狱根整根兜底**：语义最直白（只列主屏可见的），
+        // 又不会让任何一组因过滤而整组消失。
         // _homeScreenSet 为 nil（读不到布局）时一律不过滤：宁可多列，不可漏列。
         if (homeScreenOnly && _homeScreenSet && ![_homeScreenSet containsObject:bid]) {
             _statDroppedByHome++;   // 诊断计数：底部统计行会显示被它砍掉多少条
@@ -282,7 +286,7 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
         //      用户点名要屏蔽的 App（deb 装的、只在 App 资源库的、Info.plist 不规范的）根本加不进来，
         //      这比「少一张缩略图」严重得多。
         // 现在：能否配到图标由 _loadIconImageForApp: 单独负责，配不到只是这一行没图。
-        // 「是否算已装可见 App」由上面的主屏过滤判据负责（且只对用户容器根生效，见该处说明），
+        // 「是否算已装可见 App」由上面的主屏过滤判据负责（[applist6] 起对所有根生效，见该处说明），
         // 不再叠加图标键这道伪判据。
 
         NSString *name = info[@"CFBundleDisplayName"];
@@ -304,8 +308,9 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
 }
 
 // 系统 App 候选根目录（越狱桶与系统程序桶都从这里出）：
-//   ① /Applications          真实系统卷（rootfs）；roothide 下原样，只有苹果 App（**仍过主屏过滤**）；
+//   ① /Applications          真实系统卷（rootfs）；roothide 下原样，只有苹果 App；
 //   ② <jbroot>/Applications  运行时探测到的越狱根，第三方 / 越狱 App（Sileo 等）的实际落点；
+//   三个根 [applist6] 起**统一过主屏过滤**（没主屏图标的 App 一律不列）。
 //   ③ /var/jb/Applications   rootless 兜底（roothide 上不存在，扫到即空，无副作用）。
 // ⚠️ 不要加 <jbroot>/rootfs/Applications：那是 bind mount 回真实根的同一条路径，
 //    会被判成「越狱根」从而把苹果 App 塞进越狱桶。
@@ -351,6 +356,7 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
 //   · 越狱应用：<jbroot>/Applications（**运行时探测**的随机越狱根，见文件头 jbroot 探测说明）
 //     或 /var/jb/Applications（rootless 兜底），以及 /Applications 里 bid 不以 com.apple. 开头的第三方 App
 //     （Apple 自家 App 的 bid 全是 com.apple.*，第三方出现在 /Applications 必然是越狱 / dump 安装）；
+//     [applist6] 三个根**都过主屏过滤** —— 没主屏图标的（如 Crane）不再列出；
 //   · 系统程序：bid 以 com.apple. 开头 —— **不论 bundle 落在 /Applications 还是用户容器目录**。
 - (NSDictionary *)_installedApps {
     if (!_allApps) {
@@ -394,15 +400,24 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
         _statContainer = containerApps.count;
 
         // 2) 系统根：按「根 + bid 前缀」分类（越狱根一律越狱应用；/Applications 按 com.apple. 前缀取系统程序）。
-        //    /Applications 仍要过主屏过滤；越狱根一律不过滤 —— 见 _addAppAtPath: 里的说明。
+        //    [applist6] 三个根**统一过主屏过滤** —— 判据与用户容器根一致：没主屏图标就不列。
         _statRootApps = 0;
         _statJbrootApps = 0;
         _statLegacyJbApps = 0;
+        _statJbFallback = 0;
         for (NSString *base in [self _systemAppPaths]) {
             BOOL jbRoot = ![base isEqualToString:@"/Applications"];
-            // [applist4] 只豁免越狱根（jbRoot）：/Applications 必须继续过滤，
-            // 否则 Web / Diagnostics / Bridge 这类无桌面图标的系统 App 会整齐冒出来。
-            NSArray *found = [self _scanAppsAtPath:base homeScreenOnly:!jbRoot];
+            // [applist6] 越狱根**也过滤**（applist4 曾豁免它）：用户实测 Crane 这类没有主屏图标的
+            // 越狱 App 被列了出来。判据与 /Applications、用户容器根统一 —— 只列主屏可见的。
+            NSArray *found = [self _scanAppsAtPath:base homeScreenOnly:YES];
+            // [applist6] 整根兜底（防 R27 回归）：越狱根若**被主屏过滤整根清空**，退回不过滤。
+            //   风险场景：roothide 的越狱 App 若没进 IconState.plist（或布局文件读法不对），
+            //   一刀切过滤会让「越狱应用」分组整个消失 —— 那正是 applist3 修掉的 bug。
+            //   真出现时宁可多列，也不让整组消失；触发情况会显示在置底统计行的「越狱根兜底」上。
+            if (jbRoot && found.count == 0) {
+                NSArray *raw = [self _scanAppsAtPath:base homeScreenOnly:NO];
+                if (raw.count) { found = raw; _statJbFallback = raw.count; }
+            }
             if (!jbRoot) {
                 _statRootApps = found.count;
             } else if (jbRootPath.length && [base hasPrefix:jbRootPath]) {
@@ -434,6 +449,8 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
                            (unsigned long)_statContainer, (unsigned long)_statRootApps,
                            (unsigned long)_statJbrootApps];
         if (_statLegacyJbApps) [st appendFormat:@" ｜ /var/jb %lu", (unsigned long)_statLegacyJbApps];
+        // [applist6] 越狱根整根兜底是否触发（触发即说明主屏过滤把越狱根清空了，需警惕）
+        if (_statJbFallback) [st appendFormat:@" ｜ 越狱根兜底 %lu", (unsigned long)_statJbFallback];
         // [applist5] 再报一次四个桶的最终条数：分桶类问题一眼可辨（免得像「苹果 App 混进巨魔」那样再猜一轮）
         [st appendFormat:@"　·　分桶 用户 %lu ｜ 越狱 %lu ｜ 巨魔 %lu ｜ 系统 %lu",
                            (unsigned long)userApps.count, (unsigned long)jailApps.count,
@@ -879,7 +896,7 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
                 for (NSDictionary *app in unselUser) [self _addAppSpecifier:app toSpecifiers:specs];
             }
             if (unselJail.count) {
-                [self _addGroupHeader:@"越狱应用" footer:@"装在 jbroot（<jbroot>/Applications，随机路径），或 /Applications 里的第三方 App"
+                [self _addGroupHeader:@"越狱应用" footer:@"装在 jbroot（<jbroot>/Applications，随机路径）或 /Applications 的第三方 App，只列主屏可见的"
                          toSpecifiers:specs];
                 for (NSDictionary *app in unselJail) [self _addAppSpecifier:app toSpecifiers:specs];
             }
