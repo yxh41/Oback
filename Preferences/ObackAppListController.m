@@ -343,12 +343,15 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
 //   · 巨魔应用：同一目录（TrollStore 就装这儿），但主可执行文件签名里带 platform-application /
 //     com.apple.private.security.no-container。TrollStore 用 ldid 风格签名把 App 伪装成系统应用
 //     （这正是它能以 System 类型被 installd 注册、从而「卸载不掉」的原因），容器文件系统里没有任何
-//     per-app 标记文件 ⇒ **签名特征是唯一能只看文件判出来的可靠依据**。Apple 系统 App 也带该权限，
-//     但它们不在用户容器目录 ⇒ 不会误判。
+//     per-app 标记文件 ⇒ **签名特征是唯一能只看文件判出来的可靠依据**。
+//     ⚠️ [applist5 订正] 原文写的「Apple 系统 App 也带该权限，但它们不在用户容器目录 ⇒ 不会误判」
+//     **是错的**：苹果自带 App 被删掉后再从 App Store 装回来，bundle 就落进了用户容器目录，
+//     签名仍是苹果那份 ⇒ 只按签名判会把 Calculator / Clock 误判成巨魔（用户 applist4 实测反馈）。
+//     现在有两道否定：① bid 以 com.apple. 开头一律不判巨魔；② 这类 App 归「系统程序」桶。
 //   · 越狱应用：<jbroot>/Applications（**运行时探测**的随机越狱根，见文件头 jbroot 探测说明）
 //     或 /var/jb/Applications（rootless 兜底），以及 /Applications 里 bid 不以 com.apple. 开头的第三方 App
 //     （Apple 自家 App 的 bid 全是 com.apple.*，第三方出现在 /Applications 必然是越狱 / dump 安装）；
-//   · 系统程序：/Applications 且 bid 以 com.apple. 开头。
+//   · 系统程序：bid 以 com.apple. 开头 —— **不论 bundle 落在 /Applications 还是用户容器目录**。
 - (NSDictionary *)_installedApps {
     if (!_allApps) {
         if (!_homeScreenSet) _homeScreenSet = [self _homeScreenBundleIDs];
@@ -361,19 +364,37 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
         _statDroppedByHome = 0;
         NSString *jbRootPath = obJbrootPrefix();
 
-        // 1) 用户容器目录：App Store / 侧载 / 巨魔。逐个判是否 TrollStore 安装。
+        // 跨桶去重（一个 bid 只出现一次）：容器目录里也可能有苹果 App，
+        // 而它在 /Applications 里还有一份（见下面 applist5 的说明）。
+        NSMutableSet *seen = [NSMutableSet set];
+
+        // 1) 用户容器目录：App Store / 侧载 / 巨魔 / **被删掉又从 App Store 装回来的苹果自带 App**。
         //    用户容器根保留主屏过滤（homeScreenOnly:YES）。
         NSArray *containerApps = [self _scanAppsAtPath:@"/var/containers/Bundle/Application"
                                         homeScreenOnly:YES];
         for (NSDictionary *app in containerApps) {
-            if ([self _isTrollStoreApp:app]) [trollApps addObject:app];
-            else [userApps addObject:app];
+            NSString *bid = app[@"bundleID"];
+            if ([bid isKindOfClass:[NSString class]] && bid.length) {
+                if ([seen containsObject:bid]) continue;
+                [seen addObject:bid];
+            }
+            // [applist5] 苹果自家 App 不论 bundle 落在哪个根，都算「系统程序」——
+            // 它们可能出现在用户容器目录（删掉后重装），但语义上仍是系统自带 App，
+            // 且**绝不能**因为签名里带 platform-application 就被归进巨魔桶。
+            BOOL appleBID = ([bid isKindOfClass:[NSString class]] && bid.length
+                             && [[bid lowercaseString] hasPrefix:@"com.apple."]);
+            if (appleBID) {
+                [systemApps addObject:app];
+            } else if ([self _isTrollStoreApp:app]) {
+                [trollApps addObject:app];
+            } else {
+                [userApps addObject:app];
+            }
         }
         _statContainer = containerApps.count;
 
         // 2) 系统根：按「根 + bid 前缀」分类（越狱根一律越狱应用；/Applications 按 com.apple. 前缀取系统程序）。
         //    /Applications 仍要过主屏过滤；越狱根一律不过滤 —— 见 _addAppAtPath: 里的说明。
-        NSMutableSet *seen = [NSMutableSet set];
         _statRootApps = 0;
         _statJbrootApps = 0;
         _statLegacyJbApps = 0;
@@ -413,6 +434,10 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
                            (unsigned long)_statContainer, (unsigned long)_statRootApps,
                            (unsigned long)_statJbrootApps];
         if (_statLegacyJbApps) [st appendFormat:@" ｜ /var/jb %lu", (unsigned long)_statLegacyJbApps];
+        // [applist5] 再报一次四个桶的最终条数：分桶类问题一眼可辨（免得像「苹果 App 混进巨魔」那样再猜一轮）
+        [st appendFormat:@"　·　分桶 用户 %lu ｜ 越狱 %lu ｜ 巨魔 %lu ｜ 系统 %lu",
+                           (unsigned long)userApps.count, (unsigned long)jailApps.count,
+                           (unsigned long)trollApps.count, (unsigned long)systemApps.count];
         [st appendFormat:@"　·　主屏集合 %@ ｜ 被主屏过滤丢弃 %lu",
                            (_homeScreenSet ? [NSString stringWithFormat:@"%lu 条", (unsigned long)_homeScreenSet.count]
                                            : @"未读到(不过滤)"),
@@ -432,6 +457,18 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
     if ([bid isKindOfClass:[NSString class]] && bid.length) {
         NSNumber *cached = _trollCache[bid];
         if (cached) return [cached boolValue];
+    }
+    // [applist5 2026-09-20] 苹果自家 App（bid com.apple.*）**一律不判巨魔**。
+    // 为什么：platform-application / no-container 本来就是苹果系统 App 自带的权限，而苹果 App
+    // 完全可能出现在**用户容器目录**里（删掉自带 App 后从 App Store 装回来，bundle 就进了
+    // /var/containers/Bundle/Application，签名却仍是苹果那份）⇒ 只按签名判会把 Calculator / Clock
+    // 这类判成巨魔（用户实测）。这里做硬否定，与既有的「宁可漏判，不可误判」取舍一致：
+    // 真有人拿 com.apple.* 的 bid 去 TrollStore 装东西，无非少列一条，绝不会把系统 App 误判成巨魔。
+    if ([bid isKindOfClass:[NSString class]] && bid.length
+        && [[bid lowercaseString] hasPrefix:@"com.apple."]) {
+        if (!_trollCache) _trollCache = [NSMutableDictionary dictionary];
+        _trollCache[bid] = @NO;
+        return NO;
     }
     BOOL troll = NO;
     @try {
