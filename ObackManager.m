@@ -40,7 +40,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"fix-bg-navpick"
+#define OBACK_BUILD_TAG @"fix-ipg-leftedge"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -1730,8 +1730,16 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
         // interactivePopGestureRecognizer.enabled 重新置 YES，linkNav 的禁用被绕过 →
         // 原生边缘返回与我们的 pan 同时驱动同一 _UINavigationInteractiveTransition → 双返回。
         // 起滑瞬间(shouldBegin 确认有效 pop)再压死一次，确保本次只有我们的 pan 驱动转场。
-        nav.interactivePopGestureRecognizer.enabled = NO;
-        if (popNav != nav) popNav.interactivePopGestureRecognizer.enabled = NO;   // 双层 nav：外层原生返回也必须压死，防双返回
+        // [fix-ipg-leftedge 2026-09-23] 加 isLeftEdgeExcluded 守卫（与 :1297 同一约定）：
+        // 左缘排除的设计就是「左缘交还系统原生 interactivePop」，而本处原先**无条件**压死它；
+        // 能走到这行的只有右缘手势（左缘已在上面提前 return NO）⇒ 每滑一次右缘就把左缘赖以为生的
+        // 原生手势永久关闭（全工程零处置回 YES，构造上无恢复路径）⇒ 左缘返回失效、右缘正常。
+        // 右缘不依赖 ipg（ipg 是 edges=Left 的屏幕边缘手势）⇒ 对右缘零影响；
+        // 未开左缘排除的 App 条件恒真 ⇒ 行为逐字节不变。
+        if (![ObackPreferences isLeftEdgeExcluded]) {
+            nav.interactivePopGestureRecognizer.enabled = NO;
+            if (popNav != nav) popNav.interactivePopGestureRecognizer.enabled = NO;   // 双层 nav：外层原生返回也必须压死，防双返回
+        }
         if (edge == ObackEdgeRight) {
             self.currentParallaxToView = NO;
             self.rightSimplePop = YES;   // 右缘：非交互 pop（松手提交才 popViewControllerAnimated:，零空白/不破坏导航栏/不进自定义转场）
