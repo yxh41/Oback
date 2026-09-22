@@ -1,4 +1,4 @@
-# Oback — OPPO 风格边缘手势返回（roothide / iOS 16.4.1）
+# Oback — 跟手边缘手势返回（roothide / iOS 16.4.1）
 # 直接用 roothide 官方 theos 分支（roothide/theos）构建：
 #   make package FINALPACKAGE=1
 # roothide/theos 内置 roothide package scheme，make package 直接产出

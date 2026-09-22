@@ -39,7 +39,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"applist7"
+#define OBACK_BUILD_TAG @"rm-oppo"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -320,7 +320,7 @@ static CGFloat const kIndicatorMaxTravel = 110.0;   // 胶囊最多跟随手指�
 static CGFloat const kSlimeMaxTravel = 0.0;
 
 // ── 液态液滴指示器几何（ObackCapsuleEffectSlime）──
-// 【2026-09-16 定案：照用户提供的 ColorOS 实拍视频还原】
+// 【2026-09-16 定案：照用户提供的 实拍视频还原】
 // 视频证据（720×1280 / 7.83s，指示器出现在 t≈6.2–6.7s 的侧滑返回过程）：
 //   ① 填充是**深色近黑半透明**（帧采样亮度低至 9/255，明显暗于浅蓝内容底），箭头是**白色**；
 //   ② 贴边侧是一条绝对平直的线（压在屏幕边线上），外侧向屏内鼓出；
@@ -372,7 +372,7 @@ static CGFloat const kSlimeFlowMax   = 0.28;    // 峰值位置最大偏移比�
 static CGFloat const kSlimeFlowShift = 8.0;     // 液体整体沿 y 的微移（pt）：向上流动时整体也上浮一点
 static CGFloat const kSlimeFlowRefV  = 1200.0;  // 速度归一化参考（pt/s）：达到该速度即视为「全力流动」
 
-#pragma mark - 边缘方向指示胶囊（OPPO 风格：跟随手指、带方向箭头）
+#pragma mark - 边缘方向指示胶囊（跟随手指、带方向箭头）
 
 typedef NS_ENUM(NSInteger, ObackCapsuleEffect) {
     ObackCapsuleEffectClassic   = 0,   // 经典：白药丸 + 柔和阴影 + 深色箭头
@@ -1197,7 +1197,7 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
 // ObackPanGestureRecognizer；而我们此前只链「横向」scrollView → 纵向表视图没被设为失败于 ourPan
 // → 从边缘起滑时表视图 pan 抢赢识别、ourPan 被取消 → 胶囊出现却无返回（朋友圈"有胶囊没返回"）。
 // 让「所有」scrollView 的 pan 失败于 ourPan：从边缘起滑时 ourPan 优先接管返回（无论横/纵 scroll），
-// 从中间滑动时 ourPan 本就不 begin → 放行给滚动，互不干扰。完全匹配 OPPO 行为（极端边缘=返回）。
+// 从中间滑动时 ourPan 本就不 begin → 放行给滚动，互不干扰。完全匹配系统行为（极端边缘=返回）。
 - (void)_enumerateScrollPansInView:(UIView *)view depth:(NSUInteger)depth
 			                              block:(void(^)(UIPanGestureRecognizer *g))block {
 	NSUInteger budget = kOBEnumMaxNodes;
@@ -3931,7 +3931,7 @@ static BOOL _obDiagArenaAllowed(void) {
             CGPoint now = [touch locationInView:self.view];
             CGFloat dx = now.x - self.startPoint.x;
             CGFloat dy = now.y - self.startPoint.y;
-            // 放松「仅横向」判定（稳定性修复）：极端边缘起滑应优先判为返回，贴合 OPPO 行为。
+            // 放松「仅横向」判定（稳定性修复）：极端边缘起滑应优先判为返回，贴合系统原生返回行为。
             // 旧逻辑：前 8pt 内只要纵向>横向即判失败 → 拇指斜滑被误杀 → 「有时要划好几次才触发」。
             // 新逻辑：仅当位移明显偏纵向(dy > 2*dx)且已超过较大阈值(14pt)才失败、放行底层滚动；
             // 轻微对角/横向均视为返回意图，边缘返回成功率大幅提升。

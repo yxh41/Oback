@@ -1,6 +1,6 @@
-# Oback — OPPO 风格边缘手势返回（roothide / iOS 16.4.1）
+# Oback — 跟手边缘手势返回（roothide / iOS 16.4.1）
 
-在 iOS 16.4.1 **roothide** 越狱环境下实现类 OPPO 的「边缘内滑返回」：
+在 iOS 16.4.1 **roothide** 越狱环境下实现「边缘内滑返回」：
 左右边缘内滑触发返回，当前页平移、上一页带**阴影 + 轻微缩放 + 遮罩**从对侧探出（视差动画）。
 全局注入所有 App，支持导航栈 `pop` 与模态 `dismiss`，并带 PreferenceLoader 设置面板。
 
@@ -15,7 +15,7 @@
 ├── Oback.plist                # 注入过滤（com.apple.UIKit → 全局）
 ├── Tweak.xm                      # 注入点：nav delegate / present / 启动管理器
 ├── ObackManager.h/.m          # 全局手势管理器：边缘判定 / 路由 / 黑名单
-├── ObackTransition.h/.m       # OPPO 视差动画引擎（动画 + 交互控制器）
+├── ObackTransition.h/.m       # 视差动画引擎（动画 + 交互控制器）
 ├── ObackPreferences.h/.m      # 从设置域实时读取参数
 ├── layout/Library/PreferenceLoader/Preferences/ObackSettings.plist   # PreferenceLoader 入口(isController 风格)
 ├── Preferences/                  # 设置子工程（编译型 bundle，由 SUBPROJECTS 随 tweak 一起打进 roothide .deb）
