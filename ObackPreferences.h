@@ -9,9 +9,7 @@
 + (BOOL)settingsAppEnabled;  // 「设置 App 内生效」隐藏熔断键(key=settingsAppEnabled，面板无入口)，默认开；直读全局文件，可在 %ctor 阶段安全调用。应急：Filza 把该键置 0
 + (BOOL)isLeftEdgeExcluded;  // 左缘排除列表：命中 App 左缘交还系统原生返回（保留右缘+弹窗），≠ 全局黑名单
 + (BOOL)isLeftEdgeExcludedVC:(NSString *)className;  // [优化③] 左缘按页(VC)排除：类名子串(大小写不敏感)命中 leftEdgeExcludedVCs 时，该页左缘交还自身手势；仅作用于左缘，右缘/弹窗不受影响
-+ (BOOL)isGlobalBackEnabled; // 全局返回列表：命中 App 启用全屏/任意位置返回（左缘交全屏 pan 接管、右缘 dismiss 保留），默认关、≠ 黑名单
-+ (BOOL)isGlobalBackRightSide; // 全局返回触发侧：开=右侧薄热区+左滑返回(右手单握)，关=左侧热区+右滑返回(左手单握，默认)
-+ (BOOL)isNavPopFallback; // 无动画修复列表：命中 App 左缘/全局返回强制走 rightSimplePop 非交互标准滑出（系统交互转场不渲染的自定义 nav，如酷安），默认关、≠ 黑名单/左缘排除
++ (BOOL)isNavPopFallback; // 无动画修复列表：命中 App 左缘强制走 rightSimplePop 非交互标准滑出（系统交互转场不渲染的自定义 nav，如酷安），默认关、≠ 黑名单/左缘排除
 + (BOOL)debugLogEnabled;  // 调试日志总开关（设置面板「调试日志」），默认关（批次A 改为关 + 缓存 + 30min 自动过期）
 + (BOOL)debugLogEnabledLive;  // [v11] 实时读调试日志开关（去缓存，开关即生效）
 + (BOOL)doubleReturnDiagEnabled;  // 双返回诊断（设置面板「双返回诊断」），默认关

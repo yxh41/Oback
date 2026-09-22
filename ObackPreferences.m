@@ -95,7 +95,7 @@ static NSTimeInterval __obMergedPrefsTS = 0;
 
 // [已移除 2026-09-15，用户拍板] 内置排除列表（原 T4 / 2026-08-23）：QQ(com.tencent.mqq) / TIM(com.tencent.tim)。
 // 原逻辑：这两个 App 用 NTPushPopLib 等自研转场库整体接管交互返回，与 Oback 长期抢手势（瞬返 /
-// 文本选择手柄拖不动 / 全屏返回失效），为其定制的两套专用子系统已在 T4 从源码移除，此处再在黑名单
+// 文本选择手柄拖不动 / 返回失效），为其定制的两套专用子系统已在 T4 从源码移除，此处再在黑名单
 // 模式下对其短路 return NO（等价于内置黑名单）。
 // 移除原因：面板里能勾上却永远不生效，属「看不见的规则」，与「用户自己配置」的设计冲突。
 // 现与其他 App 完全一致，需要规避时请用户自行选用（均对用户可见、可撤销）：
@@ -208,23 +208,10 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     return NO;
 }
 
-// 全局返回列表：命中此列表的 App 启用「全屏/任意位置返回」——Oback 左缘 edge pan 不接管
-// （交全屏 pan 统一接管左→右 nav pop），系统 interactivePop 仍禁用防双触发；右缘 modal dismiss
-// 仍由 Oback 提供。≠ 黑名单（整 App 不注入）、≠ 左缘排除（左缘交还系统原生 interactivePop）。
-// 默认关（列表空）；仅勾选 App 开启，其他 App 行为零变化。
-+ (BOOL)isGlobalBackEnabled {
-    NSDictionary *d = [self _mergedPrefs];
-    NSArray *list = [d objectForKey:@"globalBackApps"];
-    if (![list isKindOfClass:[NSArray class]] || list.count == 0) return NO;
-    NSString *bid = NSBundle.mainBundle.bundleIdentifier;
-    if (!bid) return NO;
-    return [self _bid:bid matchesList:list];
-}
-
-// 无动画修复列表：命中此列表的 App，其左缘/全局返回强制走 rightSimplePop 非交互标准滑出返回
+// 无动画修复列表：命中此列表的 App，其左缘强制走 rightSimplePop 非交互标准滑出返回
 // （系统交互转场不渲染/无动画的自定义 nav，如酷安 com.coolapk.app），避免方案A 空转瞬切无动画。
 // 与微信硬编码特例（_navPopShouldDriveSystemNav:）同源行为，但改为按 App 用户勾选（设置页「选无动画修复程序」写入 navPopFallbackApps）。
-// 默认空（列表空）→ 不影响任何 App；仅勾选 App 的左缘+全局返回改走 rightSimplePop（有动画、不跟手），右缘/弹窗不受影响。
+// 默认空（列表空）→ 不影响任何 App；仅勾选 App 的左缘改走 rightSimplePop（有动画、不跟手），右缘/弹窗不受影响。
 + (BOOL)isNavPopFallback {
     NSDictionary *d = [self _mergedPrefs];
     NSArray *list = [d objectForKey:@"navPopFallbackApps"];
@@ -232,15 +219,6 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     NSString *bid = NSBundle.mainBundle.bundleIdentifier;
     if (!bid) return NO;
     return [self _bid:bid matchesList:list];
-}
-
-// 全局返回触发侧：开=右侧薄热区 + 左滑返回（右手单握，拇指不用伸到左边）；关=左侧热区 + 右滑返回
-// （左手单握，默认）。仅影响「全局返回列表」内 App 的全屏 pan 起滑位置与手势方向；其他 App 零变化。
-// 右侧路径走 currentEdge=ObackEdgeRight 非交互 pop（rightSimplePop：松手提交才 popViewControllerAnimated:，动画交还系统原生）。
-+ (BOOL)isGlobalBackRightSide {
-    NSDictionary *d = [self _mergedPrefs];
-    id v = [d objectForKey:@"globalBackRightSide"];
-    return v ? [v boolValue] : NO;   // 未设置 → 默认左(关)
 }
 
 // 调试日志总开关：设置面板「调试日志」(key=debugLog)。
@@ -283,7 +261,7 @@ static NSTimeInterval __obMergedPrefsTS = 0;
 // 命中 App ⇒ exclusivePopEnabled 返回 NO ⇒ 独占功能的 7 个调用点（左缘链接 / 接管期压制 / 常驻对账含还原 /
 // push 对账早退 / 自愈收编 / pop-firer 诊断自愈门控 / touchesBegan 重压）全部走「开关已关」分支：
 // 既不再压制该 App 的任何手势，也会把此前已常驻禁用的对手手势还原 ⇒ 「这个 App 不要独占」是**可撤销**的。
-// ⚠️ 只作用于独占功能：Oback 的基础边缘返回、胶囊、黑/白名单、左缘排除、全局返回等一律不受影响。
+// ⚠️ 只作用于独占功能：Oback 的基础边缘返回、胶囊、黑/白名单、左缘排除等一律不受影响。
 // ⚠️ 与「整 App 黑名单」的区别：黑名单是不注入（连基础返回/胶囊都没有）；本名单只退掉独占。
 + (BOOL)isExclusivePopExcluded {
     NSDictionary *d = [self _mergedPrefs];

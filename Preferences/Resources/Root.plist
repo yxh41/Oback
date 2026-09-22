@@ -226,33 +226,9 @@
 			<key>cell</key>
 			<string>PSLinkCell</string>
 			<key>detail</key>
-			<string>ObackGlobalBackListController</string>
-			<key>footnote</key>
-			<string>把想用「全屏/任意位置返回」的 App 加进来：命中后该 App 的 Oback 左右缘（含弹窗 dismiss）一并交还系统/App 原生、Oback 不再接管（单一手势源 = 全屏 pan），改由 Oback 全屏 pan 从屏幕左侧约 1/3 起滑、横向滑动即返回——解决部分 App 中间手势返回不便。全局返回已让单手返回足够方便，故右缘也不再需要。默认关，仅勾选 App 开启；其他 App 行为零变化。全屏 pan 仅响应「左侧起滑 + 横向滑动占优」，不会误吞 App 内纵向滚动/图片浏览。</string>
-			<key>label</key>
-			<string>选全局返回程序</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>default</key>
-			<false/>
-			<key>defaults</key>
-			<string>com.zlhkf.oback</string>
-			<key>footnote</key>
-			<string>开=全局返回 App 的触发带挪到屏幕右侧（薄热区，类似边缘手势插件），拇指从右缘向左滑返回——右手单握不用把拇指伸到左边。关=左侧热区+右滑返回（左手单握，默认）。仅影响「选全局返回程序」里勾选的 App。</string>
-			<key>key</key>
-			<string>globalBackRightSide</string>
-			<key>label</key>
-			<string>全局返回·右手热区</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSLinkCell</string>
-			<key>detail</key>
 			<string>ObackNavPopFallbackController</string>
 			<key>footnote</key>
-			<string>某些 App（如酷安）的系统原生交互转场不渲染，开全局返回/左缘返回会变成瞬切无动画。把这类 App 加进来：命中后该 App 的左缘与全局返回改为非交互标准滑出返回（有滑出动画，但不跟手，与微信一致）。仅对「返回无动画」的 App 开启；正常 App 勿勾（会丢失跟手）。右缘返回与弹窗 dismiss 不受影响。默认空，仅勾选 App 生效，其他 App 零变化。</string>
+			<string>某些 App（如酷安）的系统原生交互转场不渲染，开左缘返回会变成瞬切无动画。把这类 App 加进来：命中后该 App 的左缘改为非交互标准滑出返回（有滑出动画，但不跟手，与微信一致）。仅对「返回无动画」的 App 开启；正常 App 勿勾（会丢失跟手）。右缘返回与弹窗 dismiss 不受影响。默认空，仅勾选 App 生效，其他 App 零变化。</string>
 			<key>label</key>
 			<string>选无动画修复程序</string>
 		</dict>
@@ -280,7 +256,7 @@
 			<key>detail</key>
 			<string>ObackExclusiveExcludeListController</string>
 			<key>footnote</key>
-			<string>把「不需要独占」的 App 加进来：命中后该 App 内的独占视同关闭（不再压制它的返回手势，并还原已常驻禁用的对手手势，可随时移出撤销）；不影响 Oback 的基础边缘返回、胶囊、黑/白名单、左缘排除、全屏返回。≠ 黑名单（黑名单是整 App 不注入，连基础返回也没有）。适合「某个 App 自带返回已经好用、四处开独占反而多余」的场景。默认空，仅勾选 App 生效，其他 App 行为零变化。</string>
+			<string>把「不需要独占」的 App 加进来：命中后该 App 内的独占视同关闭（不再压制它的返回手势，并还原已常驻禁用的对手手势，可随时移出撤销）；不影响 Oback 的基础边缘返回、胶囊、黑/白名单、左缘排除。≠ 黑名单（黑名单是整 App 不注入，连基础返回也没有）。适合「某个 App 自带返回已经好用、四处开独占反而多余」的场景。默认空，仅勾选 App 生效，其他 App 行为零变化。</string>
 			<key>label</key>
 			<string>选独占排除程序</string>
 		</dict>

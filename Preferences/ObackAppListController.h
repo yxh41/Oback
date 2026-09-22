@@ -21,11 +21,7 @@
 @interface ObackLeftExcludeListController : ObackAppListController
 @end
 
-// 全局返回列表：命中的 App 启用全屏/任意位置返回（左缘交全屏 pan 接管、右缘 dismiss 保留），用法同黑白名单。
-@interface ObackGlobalBackListController : ObackAppListController
-@end
-
-// 无动画修复列表：命中的 App 左缘/全局返回强制走 rightSimplePop 非交互标准滑出（系统交互转场不渲染的自定义 nav，如酷安），用法同黑白名单。
+// 无动画修复列表：命中的 App 左缘强制走 rightSimplePop 非交互标准滑出（系统交互转场不渲染的自定义 nav，如酷安），用法同黑白名单。
 @interface ObackNavPopFallbackController : ObackAppListController
 @end
 

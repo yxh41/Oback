@@ -327,7 +327,7 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
 }
 
 // 「设置」App 兜底条目（com.apple.Preferences）。
-// 背景：Oback 自 2c6b7f1 起在系统「设置」App 内也生效，用户需要在白名单/黑名单/左缘排除/全局返回等
+// 背景：Oback 自 2c6b7f1 起在系统「设置」App 内也生效，用户需要在白名单/黑名单/左缘排除等
 // 列表里能勾到它。但目录扫描仍可能被主屏过滤挡掉，导致搜索「设置」搜不到：
 //   _homeScreenSet：设置图标被移出主屏（进 App 资源库）时就不在 IconState.plist 里。
 //（原先还有第二道 hasIcon 过滤，已在 build applist1 删除，不再是原因。）
@@ -555,7 +555,6 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
 - (NSString *)_storeKey {
     if ([self.mode isEqualToString:@"white"])      return @"whitelistApps";
     if ([self.mode isEqualToString:@"leftedge"])   return @"leftEdgeExcludeApps";
-    if ([self.mode isEqualToString:@"globalback"]) return @"globalBackApps";
     if ([self.mode isEqualToString:@"navpopfallback"]) return @"navPopFallbackApps";
     if ([self.mode isEqualToString:@"exclusiveexclude"]) return @"exclusivePopExcludeApps";   // [R13]
     return @"blacklistApps";
@@ -1105,15 +1104,6 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
 - (id)init {
     if (self = [super init]) {
         self.mode = @"leftedge";
-    }
-    return self;
-}
-@end
-
-@implementation ObackGlobalBackListController
-- (id)init {
-    if (self = [super init]) {
-        self.mode = @"globalback";
     }
     return self;
 }

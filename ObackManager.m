@@ -39,7 +39,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"rm-oppo"
+#define OBACK_BUILD_TAG @"rm-globalback"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -304,7 +304,6 @@ static void *kObackNavKey = &kObackNavKey;   // 把 pan 所属的 UINavigationCo
 static void *kObackPopNavKey = &kObackPopNavKey;
 // [2026-08-09] kYieldActiveKey 机制已彻底移除（多次引发回归），声明一并删除——无任何引用。
 static void *kDiagLastLogKey = &kDiagLastLogKey;  // 双返回诊断：同一 window 日志节流（每 2s 最多打一次手势清单）
-static void *kGlobalPanKey = &kGlobalPanKey;        // 全屏 pan 引用（绑到 window，gestureRecognizerShouldBegin 识别用）
 static void *kObackSuppressedPansKey = &kObackSuppressedPansKey;  // [A'] 本次接管期间被临时禁用的对手返回手势（NSHashTable 弱引用）
 // [R7 方案A] 「独占常驻压制」集合：exclusivePop 开启期间被**持久**禁用的对手 pop 手势（仅右滑返回类）。
 // 与 kObackSuppressedPansKey 的分工：后者随本次接管 end/abort 恢复；本集合在开关开启期间**不恢复**，
@@ -718,11 +717,6 @@ static void obDiagNowCallback(CFNotificationCenterRef center, void *observer, CF
 
 // 类对象在进程生命周期内不可变，用 static+dispatch_once 一次性取出后复用。仍走 NSClassFromString 取（遵守私有类铁律），
 // 只是 memoize，绝不硬编码 [Cls class]（那样会编译/链接失败）。
-static Class _OBCls_flick(void) {                 // _UIPanOrFlickGestureRecognizer
-    static Class c; static dispatch_once_t once;
-    dispatch_once(&once, ^{ c = NSClassFromString(@"_UIPanOrFlickGestureRecognizer"); });
-    return c;
-}
 static Class _OBCls_dragHandle(void) {            // _UIDragHandleGestureRecognizer
     static Class c; static dispatch_once_t once;
     dispatch_once(&once, ^{ c = NSClassFromString(@"_UIDragHandleGestureRecognizer"); });
@@ -755,9 +749,6 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
     BOOL   _navPopProbeFailed;   // 运行时探测: 方案A 系统交互转场未启动(自定义nav不配合)→ YES, 已切非交互 pop
     BOOL   _navPopProbed;        // 运行时探测门控: 独立于 _transitionTriggered，确保左缘 nav 首次横拖必探测一次
     UIGestureRecognizer *_simulOpponent; // 同时识别冲突: 左缘接管型nav场景下记下的对手pan(retain 自己持有, 防 pop 文章后对手随 VC/WKWebView 释放成悬空指针 → beginTransition 解引用 EXC_BAD_ACCESS)。仅 beginTransition 取消一次, endTransition/abortTransition 收尾 release+nil。
-    // 全局返回：全屏 pan 相关状态
-    CGPoint _globalStart;                // 全屏 pan 起点（Began 记录，Changed 判定方向）
-    BOOL    _globalDriven;               // 全屏 pan 是否已确认横向意图并交给 beginTransition 驱动
     // [2026-08-22 P9] interacting 置位时刻：用于「下次触摸自愈」——若上一轮交互卡死(转场未收尾)，
     // 新手势的 shouldBegin 不再无条件 return NO，而是超时后强制收尾并放行，杜绝返回永久失效。
     NSTimeInterval _interactingSince;
@@ -769,8 +760,6 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
     // 导致主线程自旋等待、时钟烧光 10s 被 scene-update watchdog 强杀（设置 App com.apple.Preferences
     // 开启注入后实测：崩溃报告 0x8BADF00D，应用 CPU 仅 0.218s / 0% 但时钟 10s）。
     BOOL _inBackground;
-    // 注：不再用单 ivar _globalPan 存引用（多 window 会被覆盖成孤儿 pan → 漏进边缘分支访问 pan.edges 崩）；
-    // 改用关联对象标记 kGlobalPanKey 识别全屏 pan（见 gestureRecognizerShouldBegin: 与 attachToWindow:）
 }
 
 + (instancetype)shared {
@@ -1071,50 +1060,27 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
     // 普通 window 级 pan 在可滚动列表（朋友圈 feed / 聊天列表）上会被 scrollView 的 pan 抢赢识别，
     // 导致 shouldBegin=YES（胶囊出现）却永远进不了 Began（无返回）——日志实证。屏幕边缘 pan 自带
     // 「边缘优先于滚动」的系统级优先级，正是原生 interactivePop 在列表页也能用的原理，从根上根治。
-    // 全局返回 App：左缘 + 右缘 edge pan 全部交还系统/App 原生（单一手势源 = 全屏 pan，杜绝双返回）。
-    // 右缘 panR（含 modal dismiss）也一并不挂——这类 App 全局返回已让单手返回足够方便，Oback 右缘不再需要。
     ObackPanGestureRecognizer *panL = nil;
-    if (![ObackPreferences isGlobalBackEnabled]) {
-        panL = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
-                                                         action:@selector(handlePan:)] autorelease];
-        panL.delegate = self;
-        panL.maximumNumberOfTouches = 1;
-        panL.cancelsTouchesInView = NO;
-        panL.delaysTouchesBegan   = NO;
-        panL.edges = UIRectEdgeLeft;
-        [win addGestureRecognizer:panL];
-    }
+    panL = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
+                                                     action:@selector(handlePan:)] autorelease];
+    panL.delegate = self;
+    panL.maximumNumberOfTouches = 1;
+    panL.cancelsTouchesInView = NO;
+    panL.delaysTouchesBegan   = NO;
+    panL.edges = UIRectEdgeLeft;
+    [win addGestureRecognizer:panL];
 
     ObackPanGestureRecognizer *panR = nil;
-    if (![ObackPreferences isGlobalBackEnabled]) {
-        panR = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
-                                                         action:@selector(handlePan:)] autorelease];
-        panR.delegate = self;
-        panR.maximumNumberOfTouches = 1;
-        panR.cancelsTouchesInView = NO;
-        panR.delaysTouchesBegan   = NO;
-        panR.edges = UIRectEdgeRight;
-        [win addGestureRecognizer:panR];
-    }
-    // 全局返回：全屏 pan（普通 UIPanGestureRecognizer，非边缘——UIScreenEdgePanGestureRecognizer 在
-    // edges=0 时永不 begin，不能用）。仅 isGlobalBackEnabled 的 App 才挂；gestureRecognizerShouldBegin
-    // 里仅允许「左热区起滑」，handleGlobalPan 进一步按「横向滑动占优」才接管 nav pop，否则交还 App。
-    // 与左右缘 edge pan 完全独立（单一手势源，杜绝双返回）。全局返回 App 的左右缘均交还系统，无 Oback edge pan。
-    if ([ObackPreferences isGlobalBackEnabled]) {
-        UIPanGestureRecognizer *panG = [[[UIPanGestureRecognizer alloc] initWithTarget:self
-                                                                                action:@selector(handleGlobalPan:)] autorelease];
-        panG.delegate = self;
-        panG.maximumNumberOfTouches = 1;
-        panG.cancelsTouchesInView = NO;   // 只观察、绝不吞 App 触摸（与 panL/panR 一致）
-        panG.delaysTouchesBegan   = NO;
-        [win addGestureRecognizer:panG];
-        // 用关联对象标记识别全屏 pan（不依赖单 ivar，多 window 也能正确分流，避免孤儿 pan 漏进边缘分支访问 pan.edges 崩）
-        objc_setAssociatedObject(panG, kGlobalPanKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        OBLog(@"attached 全局返回全屏 pan to window %@ (globalBackEnabled)", win);
-    }
+    panR = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
+                                                     action:@selector(handlePan:)] autorelease];
+    panR.delegate = self;
+    panR.maximumNumberOfTouches = 1;
+    panR.cancelsTouchesInView = NO;
+    panR.delaysTouchesBegan   = NO;
+    panR.edges = UIRectEdgeRight;
+    [win addGestureRecognizer:panR];
     // 这两个 window pan 仅用于「modal dismiss」检测（kind=modal）。nav pop 的边缘 pan 改挂到
     // nav.view（见 _attachNavPanToNav:），以在可滚动列表页也能压过 scrollView 的 pan。
-    // 全局返回 App：panL/panR 均不挂，pans 为空数组（仅全屏 pan 在 window 上，独立分流）。
     if (panL) objc_setAssociatedObject(panL, kPanKindKey, @"modal", OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (panR) objc_setAssociatedObject(panR, kPanKindKey, @"modal", OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     NSMutableArray *pans = [NSMutableArray array];
@@ -1255,8 +1221,6 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
     // 右缘由 nav.view 右缘 pan 稳定接管——正是「之前能用的那套」。左缘窗口级 pan 同理 defer 给 nav 左缘 pan。
     UIRectEdge edges[2] = { UIRectEdgeLeft, UIRectEdgeRight };
     for (NSUInteger i = 0; i < 2; i++) {
-        // 全局返回 App：左右缘 edge pan 都交还系统/App 原生，nav.view 不挂任何边缘 pan（含右缘）。
-        if ([ObackPreferences isGlobalBackEnabled]) continue;
         ObackPanGestureRecognizer *pan = [[[ObackPanGestureRecognizer alloc] initWithTarget:self
                                                                                      action:@selector(handlePan:)] autorelease];
         pan.delegate = self;
@@ -1574,7 +1538,7 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
     // 根因见 oback_debug(30) 实证：手柄手势从不进入 shouldRequireFailureOf/shouldBeRequiredToFailBy
     // （UIKit 不把手柄作为 other 递给我们）→ 之前在仲裁层的"让路"修复(3740854/e050477/e6c4f55)全是死代码。
     // 此处在 shouldBegin 可控层直接拦截：我们直接决定 pan 是否开始，不依赖 UIKit 仲裁回调。
-    // 仅按"触摸是否落在手柄"判定→选择存在但触摸在别处仍允许返回→不回归全局返回。
+    // 仅按"触摸是否落在手柄"判定→选择存在但触摸在别处仍允许返回→不回归返回。
     {
         UIWindow *gw = [self _windowForPan:pan];
         if (gw) {
@@ -1590,23 +1554,17 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
             }
             if (selActive) {
                 // [2026-08-09 v8 收窄回归修复] v7 的「选择激活+回退侧列/到手柄距离≤110」宽松让路，在
-                // 【选择激活且手柄常驻】时把大量全局返回触摸(全屏 pan 可在屏幕任意位置 begin)误判为"靠近手柄"
-                // → Oback 让路 → QQ 原生全屏手势(NTPushPopLib)接走 → 无震动顺返、全局返回变卡(用户反馈实证)。
-                // 现收窄：仅「精确命中手柄(hs==2, hitR≈70)」才让路(见下方 hs==2 分支)；选择激活但触摸不在手柄上
-                // → 不让路 → Oback 全局返回正常触发(用户常从非手柄处起滑)，恢复 P0 全局返回。
+                // 【选择激活且手柄常驻】时把大量非手柄触摸误判为"靠近手柄" → Oback 让路 → QQ 原生手势
+                // (NTPushPopLib)接走 → 无震动顺返、返回变卡(用户反馈实证)。
+                // 现收窄：仅「精确命中手柄(hs==2, hitR≈70)」才让路(见上方 hs==2 分支)；选择激活但触摸不在手柄上
+                // → 不让路 → Oback 返回正常触发(用户常从非手柄处起滑)。
                 // 文本选择(按在手柄上)仍由 hs==2 精确命中接管，不受影响。
                 static int sBackOk = 0;
                 if (sBackOk < 15) { sBackOk++;
-                    OBDIAG(@"[diag-back-ok] 选择激活但触摸x=%.0f 不在手柄上(最近距离=%.0f) → Oback 全局返回 proceed", sp.x, minDist);
+                    OBDIAG(@"[diag-back-ok] 选择激活但触摸x=%.0f 不在手柄上(最近距离=%.0f) → Oback 返回 proceed", sp.x, minDist);
                 }
             }
         }
-    }
-    // 全局返回：全屏 pan 是普通 UIPanGestureRecognizer，无 edges，不能走下方 edge 判定（访问 pan.edges 会崩）。
-    // 用关联对象标记 kGlobalPanKey 识别（替代单 ivar，多 window 不会被覆盖成孤儿 pan → 漏进边缘分支崩），
-    // 命中即分流到 _globalPanShouldBegin:（其内仅做左热区 + nav pop 判定，不访问 edges）。
-    if (objc_getAssociatedObject(pan, kGlobalPanKey)) {
-        return [self _globalPanShouldBegin:pan];
     }
     // [2026-08-01 残影加固] 每轮手势从干净态起：先复位 cancelsTouchesInView=NO（默认安全值），
     // 杜绝上一轮 endTransition/abortTransition 万一漏跑、残留 YES 污染下一轮（曾致进入聊天界面闪小程序卡片残影）。
@@ -1685,14 +1643,6 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
         OBLog(@"shouldBegin=NO (左缘排除列表命中，交还系统: bid=%@)", NSBundle.mainBundle.bundleIdentifier);
         return NO;
     }
-    // 全局返回 App：左右缘 edge pan（window panL/panR、nav.view 左右缘，kind 不论）一律交还系统/App 原生
-    // （单一手势源 = 全屏 pan，杜绝双返回）。右缘 modal dismiss 也交还原生——这类 App 全局返回已让单手返回足够方便，
-    // Oback 右缘不再需要。
-    if ([ObackPreferences isGlobalBackEnabled] && (edge == ObackEdgeLeft || edge == ObackEdgeRight)) {
-        OBLog(@"shouldBegin=NO (全局返回 App 左右缘交还原生: edge=%@ bid=%@)",
-              edge == ObackEdgeLeft ? @"左" : @"右", NSBundle.mainBundle.bundleIdentifier);
-        return NO;
-    }
     if (!nav) {
         top = [self topMost:win.rootViewController];
         nav = top.navigationController;
@@ -1702,7 +1652,7 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
 
     // [优化③] 左缘按页排除：顶层 VC 及其父链（parentViewController / presentingViewController）类名
     // 命中 leftEdgeExcludedVCs（子串，大小写不敏感）时，该页左缘交还页面自身手势（如侧栏/轮播左滑），
-    // Oback 不接管；右缘/弹窗不受影响。仅作用于左缘，全局返回模式另算。
+    // Oback 不接管；右缘/弹窗不受影响。仅作用于左缘。
     // 匹配父链：容器 VC（如 nav / tab / 自定义容器）命中即其所有子页一并交还，填表更省力。
     // 调试日志开启时同时打印 top 类名+完整父链，便于在 oback_debug.log 反查要填的真实类名。
     if (edge == ObackEdgeLeft) {
@@ -1890,168 +1840,8 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
     }
 }
 
-#pragma mark - 全局返回（全屏 pan）
-
-// 全屏 pan 的 shouldBegin：仅「左热区起滑 + 有 nav 可 pop」才允许识别。是否真正接管 nav pop
-// 由 handleGlobalPan 的横向速度判定决定（避免误吞 App 内横向滚动）。不访问 pan.edges（普通 pan 无此属性）。
-
-- (BOOL)_globalPanShouldBegin:(UIPanGestureRecognizer *)pan {
-    // [2026-08-09] kYieldActiveKey 机制已移除（多次引发回归），不再需要每轮复位
-    if (self.interacting) {
-        // [P9] 卡死自愈：全局返回同样受益——上一轮转场卡死后，下一次滑动即自愈放行，不再永久失效
-        if (![self _obStuckSelfHealIfNeeded]) { OBLog(@"globalShouldBegin=NO (已在交互中)"); return NO; }
-    }
-    if (![ObackPreferences isAllowed]) return NO;
-    if (![ObackPreferences isGlobalBackEnabled]) return NO;
-    UIWindow *win = [self _windowForPan:pan];
-    CGPoint loc = [pan locationInView:win];
-    CGFloat w = win.bounds.size.width;
-    if (w <= 0) return NO;
-    // 热区按触发侧：左手侧(默认)=左侧约 1/3 起滑；右手侧=右侧约 1/4 起滑（薄热区，类似边缘手势插件）。
-    // 对侧起滑一律交还系统/App 原生（全局返回 App 的 Oback 右缘已禁用）。
-    BOOL rightSide = [ObackPreferences isGlobalBackRightSide];
-    // 窄热区（全局返回默认左 1/3 / 右 1/4 薄热区），避免误吞 App 内横向手势。
-    if (rightSide) {
-        if (loc.x < w * 3.0 / 4.0) { OBLog(@"globalShouldBegin=NO (非右热区 x=%.1f w=%.1f)", loc.x, w); return NO; }
-    } else {
-        if (loc.x > w / 3.0) { OBLog(@"globalShouldBegin=NO (非左热区 x=%.1f w=%.1f)", loc.x, w); return NO; }
-    }
-    UINavigationController *nav = objc_getAssociatedObject(pan, kObackNavKey);
-    UIViewController *top = nil;
-    if (nav) top = nav.topViewController;
-    if (!top) {
-        top = [self topMost:win.rootViewController];
-        nav = top.navigationController;
-        if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
-    }
-    if (!top) return NO;
-    if ([self _isExcludedViewController:top]) return NO;
-    // [2026-09-17 双层 nav 修复] 同上：内层不可 pop 时改用外层可 pop 的 nav，并写入 pan 供后续 pop 执行点读取。
-    UINavigationController *gPopNav = [self _poppableNavFrom:nav];
-    if (gPopNav) { objc_setAssociatedObject(pan, kObackPopNavKey, gPopNav, OBJC_ASSOCIATION_ASSIGN); nav = gPopNav; }
-    if (nav && nav.viewControllers.count > 1) {
-        OBLog(@"globalShouldBegin=YES (loc.x=%.1f 有nav pop=%lu)", loc.x,
-              (unsigned long)nav.viewControllers.count);
-        return YES;
-    }
-    if (top.presentingViewController != nil) {
-        // [优化②] 全局返回也接管弹窗 dismiss：勾了全局返回的 App，弹窗页全屏横滑也能返回
-        // （复用 handleGlobalPan→beginTransition→triggerTransitionInWindow 的 modal dismiss 链路）。
-        OBLog(@"globalShouldBegin=YES (loc.x=%.1f modal dismiss)", loc.x);
-        return YES;
-    }
-    return NO;  // 无 nav pop 且无 modal：不接管，交还
-}
-
-// 全屏 pan 处理：Began 仅记录起点、不驱动；Changed 首次有效位移判定方向——
-// 向右且横向占优 → 确认接管 nav pop（交给已验证的 beginTransition/updateTransition/endTransition）；
-// 向左/纵向 → 取消交还 App（防误吞滚动）。单一手势源，与左右缘 edge pan 完全隔离，杜绝双返回。
-- (void)handleGlobalPan:(UIPanGestureRecognizer *)pan {
-    // [2026-08-09 回归修复] 移除 kYieldActiveKey 短路机制——该机制在 shouldRecognizeSimultaneouslyWith 中
-    // 按类名置位(手柄类常驻文本视图→误杀全局返回)，后改为按 state 置位(时序问题：panG Began 早于手柄 Began)，
-    // 均引发回归。文本选择/手柄拖拽让路改由 shouldBeRequiredToFailBy 动态仲裁(返回热区内 Oback 优先、
-    // 热区外让路)，handleGlobalPan 不再做额外短路，照常驱动返回转场。
-    switch (pan.state) {
-        case UIGestureRecognizerStateBegan: {
-            _globalStart = [pan locationInView:[self _windowForPan:pan]];
-            _globalDriven = NO;
-            self.interacting = YES;   // 占住，防其他 pan 同时在 shouldBegin 被放行
-            // [P8] 自愈看门狗：若本次手势 1.5s 后仍未收到终态并被清空(interacting 仍 YES)，
-            // 说明手势被切后台/锁屏/弹窗等中断而未派发 Ended/Cancelled → interacting 卡死，
-            // 会致 QQ 视图层卡在转场中、切后台快照 watchdog(0x8BADF00D) 闪退。兜底强制收尾。
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                if (self.interacting) { [self _obInterruptActiveInteraction]; }
-            });
-            OBLog(@"handleGlobalPan Began (panView=%@)", NSStringFromClass([[pan view] class]));
-            break;                     // 不立即驱动 nav pop、不显示胶囊（方向未定）
-        }
-        case UIGestureRecognizerStateChanged: {
-            if (_globalDriven) { [self updateTransition:pan]; break; }
-            UIWindow *win = [self _windowForPan:pan];
-            CGPoint cur = [pan locationInView:win];
-            CGFloat dx = cur.x - _globalStart.x;
-            CGFloat dy = cur.y - _globalStart.y;
-            CGPoint v = [pan velocityInView:win];
-            BOOL rightSide = [ObackPreferences isGlobalBackRightSide];
-            // 左手侧(默认)：从左侧热区起滑、向右滑(dx>0)=返回；右手侧：从右侧薄热区起滑、向左滑(dx<0)=返回。
-            // currentEdge 随之设左/右缘，转场 dir 自动镜像（见 updateTransition/endTransition 的 dir 取值）。
-            CGFloat backThresh = rightSide ? -30.0 : 30.0;   // [2026-08-08] 触发距离加长：防单手快滑聊天记录时误触返回
-            BOOL movingBack  = rightSide ? (dx < backThresh) : (dx > backThresh);
-            if (movingBack) {
-                // velocity 横向占优判定（1.69x）：横向意图确认才接管，纵滑交还 App 滚动。
-                CGFloat vx = v.x;
-                if ((rightSide ? vx < 0 : vx > 0) && (vx * vx) > (v.y * v.y) * 1.69) {
-                    _globalDriven = YES;
-                } else if (fabs(dy) > fabs(dx) * 1.5 && fabs(dy) > 12.0) {
-                    [self _cancelGlobalPan:pan];
-                }
-                if (_globalDriven) {
-                    OBLog(@"handleGlobalPan -> _globalDriven=YES（接管转场）");
-                    // 全局返回：横向意图确认、接管转场这一刻给轻量触感反馈（与边缘手势 shouldBegin 一致）
-                    ObackParams *p = [ObackPreferences params];
-                    if (p.hapticEnabled) {
-                        UIImpactFeedbackGenerator *g = [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] autorelease];
-                        [g impactOccurred];
-                    }
-                    UINavigationController *nav = [self _popNavForPan:pan];
-                    if (!nav) {
-                        UIViewController *top = [self topMost:win.rootViewController];
-                        nav = top.navigationController;
-                        if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
-                    }
-                    if (nav) nav.interactivePopGestureRecognizer.enabled = NO;  // 接管前禁用系统 interactivePop 防双触发
-                    BOOL stdNav = [self _navPopShouldDriveSystemNav:nav];  // 标准nav=YES(方案A) / 微信等=NO(rightSimplePop)
-                    if (rightSide) {
-                        // 右缘：方案B 统一非交互 pop（动画交还系统），不进自定义转场
-                        self.currentParallaxToView = NO;
-                        self.rightSimplePop = YES;
-                    } else {
-                        self.currentParallaxToView = stdNav;
-                        self.rightSimplePop = !stdNav;
-                    }
-                    self.currentEdge = rightSide ? ObackEdgeRight : ObackEdgeLeft;
-                    [self beginTransition:pan];   // 驱动 nav pop + 显示胶囊（复用已验证转场链路）
-                }
-            } else {
-                // 未向返回方向移动，或明显纵向为主：即时交还 App。
-                [self _cancelGlobalPan:pan];
-            }
-            break;
-        }
-        case UIGestureRecognizerStateEnded:
-        case UIGestureRecognizerStateCancelled:
-        case UIGestureRecognizerStateFailed: {
-            if (_globalDriven) {
-                [self endTransition:pan];
-            } else {
-                self.interacting = NO;
-                [self dismissIndicatorSafety];
-            }
-            _globalDriven = NO;
-            // [2026-08-06 崩溃修复] 手势结束清空 panG 的 nav 绑定(RETAIN 短期持有→此刻释放)：杜绝悬空指针/跨轮泄漏。
-            // 仅对 window 全屏 pan(带 kGlobalPanKey)生效；边缘 pan 不带该标记、其 ASSIGN 关联本就安全，不受影响。
-            if (objc_getAssociatedObject(pan, kGlobalPanKey)) {
-                objc_setAssociatedObject(pan, kObackNavKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                objc_setAssociatedObject(pan, kObackPopNavKey, nil, OBJC_ASSOCIATION_ASSIGN);
-            }
-            break;
-        }
-        default: break;
-    }
-}
-
-- (void)_cancelGlobalPan:(UIPanGestureRecognizer *)pan {
-    // 非横向意图（向左/纵向）：取消本次识别交还 App，避免与 App 滚动/手势双触发；下次触摸可重新识别。
-    self.interacting = NO;
-    _globalDriven = NO;
-    [self dismissIndicatorSafety];
-    pan.enabled = NO;
-    pan.enabled = YES;
-}
-
 // [P8] 修复 QQ 切后台 scene-update watchdog 闪退（崩溃报告 EXC_CRASH/SIGKILL 0x8BADF00D）：
-// 全屏 pan 接管 QQ 的 NTPushPopLib 转场后，手势被切后台/锁屏/弹窗中断而未收到终态回调时，
+// Oback 接管 QQ 的 NTPushPopLib 转场后，手势被切后台/锁屏/弹窗中断而未收到终态回调时，
 // interacting 会卡在 YES、挂起转场动画不收尾 → QQ 视图层永远「在转场中」→
 // 后台场景快照(UIApplication _performSnapshotsWithAction)等不到 settle → 10s 看门狗强杀。
 // 进后台/失活或前台自愈看门狗触发时调用：主动收尾一切进行中交互，使视图层立即静止 → 快照可 settle。
@@ -2063,7 +1853,6 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
         OBLog(@"[P8] 强制收尾进行中交互 interacting=YES（防快照 watchdog 闪退）");
     }
     self.interacting = NO;
-    _globalDriven = NO;
     // [方案B] 自定义转场(ObackAnimator / ObackInteractiveTransition)已整体移除，不再有持有转场 context 的
     // 自定义动画器需要强制收尾。进后台/失活时仅对方案A 系统原生交互转场兜底 finishInteractiveTransition
     // （参考 _scheduleNavPopWatchdog 防御性复位），避免系统交互转场卡在 interactive 态导致界面冻结。
@@ -2116,10 +1905,10 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
     // 及其手势识别器发 touchesCancelled，手指滑过的小程序卡片等不会被误触激活（松手不再 touchUpInside/选中）。
     // 方案 A（rightSimplePop=NO）保持 NO——系统原生交互转场自行处理 touch 取消，无需我们干预。
     // 直接按 rightSimplePop 定值（而非仅置 YES），确保每轮 begin 都确定性重设，不依赖上一轮 end/abort 的复位。
-    pan.cancelsTouchesInView = NO;   // 兜底重置（纵向滑动已靠 handleGlobalPan Began 重置；此处再保险）
+    pan.cancelsTouchesInView = NO;   // 兜底重置：确保每轮 begin 从干净态起
     if (self.rightSimplePop) {
         // 确认横向接管后吞掉后续底层 touch：防拖动中暴露的上一页元素被误触激活；
-        // 仅在接管（_globalDriven）后的本轮生效，下一轮 Began 会再重置为 NO。
+        // 仅在接管后的本轮生效，下一轮 Began 会再重置为 NO。
         pan.cancelsTouchesInView = YES;
     }
     // 同时识别场景下取消对手(微信朋友圈内部 pan),确保 Oback 左缘 rightSimplePop 独占返回、杜绝双返回
@@ -2220,47 +2009,6 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
  shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)other {
     _obArbRec(&_obArbReqFail, other);   // [R3] 探针：被咨询了就打计数（在全部 early return 之前）
     if (g == other || other == nil) return NO;
-    // [2026-08-09→修复 文本选择手柄/光标] 关键修复：Oback 全屏 pan 必须等「文本选择手柄/光标」失败
-    // 再 begin。之前只在 shouldBeRequiredToFailBy 让路，但日志实证(oback_debug 28)：手柄手势
-    // 从未进入我们的仲裁(全程无 DragHandle 进入 shouldBeRequiredToFailBy)，导致 pan 照常 begin
-    // 并以 cancelsTouchesInView 抢走 touch → 手柄拖不动("多数时候不行，偶尔能")。
-    // 改从 Oback 一侧主动声明依赖(Apple "Preferring one gesture over another" 官方姿势)，强制 UIKit
-    // 建立"pan 失败于手柄"边，手柄才能独占拖拽。手柄空闲(无选字)时处于 Failed 态→pan 立即 proceed→返回正常。
-    BOOL gIsGlobal = (g.delegate == self && [[g view] isKindOfClass:[UIWindow class]] &&
-                      ![g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]);
-    if (gIsGlobal) {
-        Class dragHandleCls = _OBCls_dragHandle();
-        BOOL isHandle = (dragHandleCls && [other isKindOfClass:dragHandleCls]);
-        if (!isHandle) {
-            NSString *ocls = NSStringFromClass([other class]);
-            if ([ocls containsString:@"DragHandle"] || [ocls containsString:@"Handle"]) isHandle = YES;
-        }
-        Class flickCls = _OBCls_flick();
-        BOOL isCaret = (flickCls && [other isKindOfClass:flickCls] &&
-                        other.view && ([other.view isKindOfClass:[UITextView class]] ||
-                                       [other.view isKindOfClass:[UITextField class]]));
-        // [DIAG4] 更宽的选类过滤日志：只要对手类名含 Handle/Drag/Flick/Select/Caret 或挂在文本视图，
-        // 就打一行（即便 isHandle/isCaret 没命中也打），用于确认 shouldRequireFailureOf 是否被 UIKit
-        // 用手柄调用过。若这行从不出现 → 手柄根本没进我们的仲裁(不同 window/独占)→ 需 hook 思路。
-        {
-            NSString *socls = NSStringFromClass([other class]);
-            BOOL selish = ([socls containsString:@"Handle"] || [socls containsString:@"Drag"] ||
-                           [socls containsString:@"Flick"] || [socls containsString:@"Select"] ||
-                           [socls containsString:@"Caret"] ||
-                           (other.view && ([other.view isKindOfClass:[UITextView class]] ||
-                                           [other.view isKindOfClass:[UITextField class]])));
-            if (selish) {
-                OBDIAG(@"[diag-reqfail-sel] shouldRequireFailureOf globalPan other=%@ view=%@ isHandle=%d isCaret=%d",
-                      socls, other.view ? NSStringFromClass([other.view class]) : @"nil", isHandle, isCaret);
-            }
-        }
-        if (isHandle || isCaret) {
-            OBDIAG(@"[diag-reqfail] shouldRequireFailureOf: 全屏 panG 要求 %@@%@ 先判定(让路文本选择手柄/光标)",
-                  NSStringFromClass([other class]), other.view ? NSStringFromClass([other.view class]) : @"nil");
-            return YES;
-        }
-        // 其余手势不在此声明依赖，落回下方边缘 pan 原有决策
-    }
     if (![g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) return NO;  // 仅我们的边缘 pan 参与决策
     if (other.delegate == self) {
         // 同为我们的 pan：仅让 nav pan 单向对 window pan 让步（无死锁），杜绝同边双开火 → 双返回。
@@ -2650,11 +2398,6 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
     _currentPercent = 0;
     _transitionTriggered = NO;
     self.rightSimplePop = NO;     // 复位：避免残留导致下次手势误判右缘非交互
-    // [2026-08-06 崩溃修复] 同 endTransition：panG 的 nav 绑定在手势结束时清空(RETAIN→释放)，杜绝悬空/泄漏。
-    if (objc_getAssociatedObject(pan, kGlobalPanKey)) {
-        objc_setAssociatedObject(pan, kObackNavKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(pan, kObackPopNavKey, nil, OBJC_ASSOCIATION_ASSIGN);
-    }
     // 边缘 pan(kind=nav) 的本次解析结果也要清：下一轮手势重新判定（页面已变，外层栈可能已 pop）。
     if ([objc_getAssociatedObject(pan, kPanKindKey) isEqualToString:@"nav"]) {
         objc_setAssociatedObject(pan, kObackPopNavKey, nil, OBJC_ASSOCIATION_ASSIGN);
@@ -3552,7 +3295,7 @@ static BOOL _obDiagArenaAllowed(void) {
 }
 
 // 本次手势真正要 pop 的 nav：优先读 shouldBegin 阶段解析出的 kObackPopNavKey，
-// 没有（单层 nav 的普通 App / 全局返回路径）则回退到 pan 绑定的 kObackNavKey —— 与旧行为完全一致。
+// 没有（单层 nav 的普通 App）则回退到 pan 绑定的 kObackNavKey —— 与旧行为完全一致。
 - (UINavigationController *)_popNavForPan:(UIPanGestureRecognizer *)pan {
     if (!pan) return nil;
     UINavigationController *popNav = objc_getAssociatedObject(pan, kObackPopNavKey);
@@ -3579,7 +3322,7 @@ static BOOL _obDiagArenaAllowed(void) {
 // 直接决定 pan 是否开始的层，不依赖 UIKit 回调，故必须在此拦截。
 // sp 为屏幕坐标([pan locationInView:win] 经 convertPoint:toView:nil 得到)，与各 window 手柄的屏幕帧比对。
 // 仅命中选择手柄类视图(系统私有类 _UIDragHandleGestureRecognizer 或其载体 _UIDragHandleView)，
-// 不靠模糊"Handle"匹配大视图→不会误杀全局返回。命中半径 44pt 容差手指。
+// 不靠模糊"Handle"匹配大视图→不会误杀返回。命中半径 44pt 容差手指。
 - (NSInteger)_touchOnActiveTextSelectionHandle:(CGPoint)sp selectionActive:(BOOL *)outActive minDist:(CGFloat *)outMinDist {
     if (outActive) *outActive = NO;
     Class dragHandleCls = _OBCls_dragHandle();
@@ -3738,7 +3481,7 @@ static BOOL _obDiagArenaAllowed(void) {
                         // ⇒ 左缘返回 100% 被拦死（日志：24 次起滑全部 shouldBegin=NO）。
                         // 现与 dist 分支对齐：kind==1 必须是小视图(<140pt，真正的手柄球)才让路；
                         // kind==2(DragHandle/SelectionHandle/Caret/Loupe/Magnifier/DragAnimation…)保持无约束。
-                        // 零帧容器(动画中)判为不小 → 保守不放行拦截，宁可不拦也不误杀全局返回。
+                        // 零帧容器(动画中)判为不小 → 保守不放行拦截，宁可不拦也不误杀返回。
                         BOOL smallOK = YES;
                         if (tk == 1) {
                             CGSize bs = CGSizeZero;
@@ -3801,7 +3544,7 @@ static BOOL _obDiagArenaAllowed(void) {
                         // [v12f] 确证手柄(kind==2)：取消半区 side 约束。居中柄(≈W/2)与"手柄在触摸对侧"时
                         // 原 side 判定会误杀真实命中(只靠 veryNear 兜底)，是 v12e 多数抓取漏判的根因。
                         // kind==2 类(DragHandle/SelectionHandle/Caret/Loupe/DragAnimation…)均为选择/光标相关，
-                        // 命中即让路不会误伤全局返回。
+                        // 命中即让路不会误伤返回。
                         if (visible && (near || veryNear)) {
                             hit = YES; hitCls = cls; hitReason = @"dist";
                             hitAlpha = v.alpha; hitWinNil = (v.window == nil);
