@@ -13,7 +13,8 @@
 - (void)_obShareLog:(UIBarButtonItem *)sender;
 - (void)_obCopyLog;
 - (NSArray<UIWindow *> *)_allVisibleWindows;   // [P3] 集中枚举可见 window，替代 5 处重复实现
-- (void)_obInterruptActiveInteraction;   // [P8] 进后台/自愈看门狗强制收尾进行中交互（防 QQ 快照 watchdog 闪退）
+- (void)_obInterruptActiveInteraction;   // [P8] 强制收尾进行中交互（防 QQ 快照 watchdog 闪退）；**不再**置 _inBackground
+- (void)_obDidEnterBackground;           // [fix-bg-navpick] 只有真·进后台才置 _inBackground（前台自愈路径禁止走此路）
 - (void)_obEnterForeground;              // [2026-09-16 watchdog 修复] 回前台解除后台禁令并补一次链接
 - (void)_linkNavPopGesturesInWindow:(UIWindow *)win;  // 全窗口链接（超时早退/后台早退）
 - (void)_suppressOpponentPansForPan:(UIPanGestureRecognizer *)pan;  // [A'] 接管即独占：本次手势期间压制 App 自带返回手势（面板开关 exclusivePop，默认关）
@@ -39,7 +40,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"rm-globalback"
+#define OBACK_BUILD_TAG @"fix-bg-navpick"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -1014,8 +1015,10 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
     // （见 _linkNavPopGesturesInWindow 入口早退）。快照前系统会强制 layout → 触发 swizzle 的
     // viewDidAppear/viewDidLayoutSubviews → 若不拦，设置 App 这类超大视图树会在此刻做三趟遍历 +
     // 海量 requireGestureRecognizerToFail:，与快照争抢 UIKit 锁 → 主线程自旋 → 时钟烧光被 watchdog 杀。
+    // [fix-bg-navpick] 改挂 _obDidEnterBackground（置 _inBackground + 收尾）：置位只在此真·后台路径发生，
+    // 前台自愈 _obStuckSelfHealIfNeeded 复用收尾逻辑时不会再误把 App 当成在后台。
     [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(_obInterruptActiveInteraction)
+                                             selector:@selector(_obDidEnterBackground)
                                                  name:UIApplicationDidEnterBackgroundNotification
                                                object:nil];
     // 回前台：解除后台禁令，恢复正常的链接时机（下次 nav 出现/窗口变 key 时重新链接）
@@ -1438,9 +1441,11 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
     UINavigationController *nav = nil;
     NSMutableArray *allNavs = [NSMutableArray array];
     [self _enumerateNavControllersFrom:win.rootViewController block:^(UINavigationController *n){ if (n) [allNavs addObject:n]; }];
-    for (NSInteger i = (NSInteger)allNavs.count - 1; i >= 0; i--) {
-        nav = allNavs[i];   // 取最深层（最靠近用户的）nav 作为「nav 树」判定基准
-    }
+    // [fix-bg-navpick 2026-09-23] 取**最深层**（最靠近用户的）nav 作为「nav 树」判定基准。
+    // ⚠️ `_enumerateNavControllersFrom` 是自根**先序 DFS**（index 0 = 最外层）⇒ 最深层 = lastObject。
+    // 原写法 `for (i = count-1; i >= 0; i--) nav = allNavs[i];` 的末次赋值是 allNavs[0]＝**最外层**，
+    // 与注释本意相反：窗口内 ≥2 个 nav 时，边界②（跳过接管型 nav）与 _isPopLikeOpponentPan ② 的基准取错。
+    nav = [allNavs lastObject];
     if (nav && ![self _navPopShouldDriveSystemNav:nav]) {
         static BOOL __obLeftLinkTakeoverWarned = NO;
         if (!__obLeftLinkTakeoverWarned) {
@@ -1845,10 +1850,23 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
 // interacting 会卡在 YES、挂起转场动画不收尾 → QQ 视图层永远「在转场中」→
 // 后台场景快照(UIApplication _performSnapshotsWithAction)等不到 settle → 10s 看门狗强杀。
 // 进后台/失活或前台自愈看门狗触发时调用：主动收尾一切进行中交互，使视图层立即静止 → 快照可 settle。
-- (void)_obInterruptActiveInteraction {
-    // [2026-09-16 watchdog 修复] 置后台标志：本方法由 UIApplicationDidEnterBackgroundNotification 驱动，
-    // 置位后 _linkNavPopGesturesInWindow 全树遍历入口一律早退（防与后台快照争 UIKit 锁）。
+// [fix-bg-navpick 2026-09-23] 真正的「进后台」入口 —— UIApplicationDidEnterBackgroundNotification 只挂本方法。
+// 顺序：先置后台标志（后台期间禁止一切全树遍历/链接，防与快照的强制 layout 争 UIKit 锁），再强制收尾进行中交互。
+// ⚠️ 为什么要把「置标志」从 _obInterruptActiveInteraction 里拆出来：后者有**两个**调用方 ——
+//    ① 本方法（真·进后台，应置位）；② 前台自愈 _obStuckSelfHealIfNeeded（新手势 shouldBegin 入口，绝不能置位）。
+//    此前置位写在 _obInterruptActiveInteraction 内 ⇒ 卡死自愈若发生在前台，_inBackground 会一直为 YES
+//    （只有真「后台→前台」经 _obEnterForeground 才清）⇒ _linkNavPopGesturesInWindow /
+//    _obLinkLeftEdgeOpponentPansInWindow / _obReconcileExclusivePersistentSuppress 三处入口全部早退，
+//    独占（常驻压制 / 左缘链接 / 全窗口链接）静默停摆。基础边缘返回不受影响（nav swizzle 的
+//    _attachNavPanToNav: 不读该标志），所以现象是「某次之后独占好像不生效了」而非完全失效。
+- (void)_obDidEnterBackground {
     _inBackground = YES;
+    [self _obInterruptActiveInteraction];
+}
+
+- (void)_obInterruptActiveInteraction {
+    // [2026-09-16 watchdog 修复 / fix-bg-navpick 修正] 此处**刻意不置 _inBackground**：本方法还被前台
+    // 自愈路径调用（见上）。置位职责已移交 _obDidEnterBackground，保证「后台禁令」只表达真·在后台。
     if (self.interacting) {
         OBLog(@"[P8] 强制收尾进行中交互 interacting=YES（防快照 watchdog 闪退）");
     }
