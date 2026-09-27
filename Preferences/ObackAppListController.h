@@ -30,3 +30,8 @@
 @interface ObackExclusiveExcludeListController : ObackAppListController
 @end
 
+// [兜底返回 2026-09-27] 兜底排除列表：命中的 App 内「兜底返回」视同关闭（左上角按钮不会被点），
+// 该 App 的左缘在这类页面上恢复为原来的交还/空转；Oback 基础返回 / 胶囊 / 其他名单不受影响。
+@interface ObackFallbackBackExcludeListController : ObackAppListController
+@end
+

@@ -557,6 +557,7 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
     if ([self.mode isEqualToString:@"leftedge"])   return @"leftEdgeExcludeApps";
     if ([self.mode isEqualToString:@"navpopfallback"]) return @"navPopFallbackApps";
     if ([self.mode isEqualToString:@"exclusiveexclude"]) return @"exclusivePopExcludeApps";   // [R13]
+    if ([self.mode isEqualToString:@"fallbackbackexclude"]) return @"fallbackBackExcludeApps";   // [兜底返回 2026-09-27]
     return @"blacklistApps";
 }
 
@@ -1122,6 +1123,15 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
 - (id)init {
     if (self = [super init]) {
         self.mode = @"exclusiveexclude";
+    }
+    return self;
+}
+@end
+
+@implementation ObackFallbackBackExcludeListController
+- (id)init {
+    if (self = [super init]) {
+        self.mode = @"fallbackbackexclude";
     }
     return self;
 }

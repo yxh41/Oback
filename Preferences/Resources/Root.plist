@@ -264,6 +264,52 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
+			<string>某些页面的「上一级」不由系统导航栈提供（全屏播放器 / 图片查看器 / 自绘返回按钮的自定义页面）。这类页面的系统导航栏栈深只有 1、不渲染返回箭头，左缘手势找不到返回目标，只能空转。开启后：在这类页面上从屏幕左缘滑动，改为查找并触发该页左上角的「返回 / 关闭」按钮。判定刻意保守——只有识别为「返回 / 关闭」语义的按钮才会被点，识别不出就什么都不做（宁可滑了没反应，也不误点其他按钮）。默认关。</string>
+			<key>label</key>
+			<string>兜底返回（无返回按钮的页面）</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.zlhkf.oback</string>
+			<key>footnote</key>
+			<string>关（默认）：行为与以前完全一致。开：在没有系统返回目标的页面上，左缘滑动会触发该页左上角的返回 / 关闭按钮。不会触碰系统原生返回手势（interactivePop），也不影响其他页面。</string>
+			<key>key</key>
+			<string>fallbackBack</string>
+			<key>label</key>
+			<string>启用兜底返回</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.zlhkf.oback</string>
+			<key>footnote</key>
+			<string>开（默认）：把左上角的「关闭 / 取消 / ✕」也当作返回触发（覆盖全屏播放器、图片查看器、弹窗式编辑页）。关：只认「返回 / back / ‹ / ←」，更安全，但左上角是 ✕ 的页面依然返回不了。注意：编辑类页面的「取消」会丢弃未保存内容，如遇误触请关掉本项或把该 App 加入下方排除。</string>
+			<key>key</key>
+			<string>fallbackBackClose</string>
+			<key>label</key>
+			<string>同时识别「关闭 / 取消」</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSLinkCell</string>
+			<key>detail</key>
+			<string>ObackFallbackBackExcludeListController</string>
+			<key>footnote</key>
+			<string>把「不需要兜底返回」的 App 加进来：命中后该 App 内的兜底返回视同关闭（左缘在这类页面上恢复为原来的交还 / 空转）；不影响 Oback 的基础边缘返回、胶囊、黑 / 白名单、左缘排除。适合「某个 App 的左上角按钮不是返回、被误点」的场景。默认空，仅勾选 App 生效，其他 App 行为零变化。</string>
+			<key>label</key>
+			<string>选兜底排除程序</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
 			<string>开启后把每次手势判定写入 /var/mobile/oback_debug.log（可用 Filza 抓取发我分析）。日用机建议关闭，避免日志频繁写盘。另：「立即打印诊断」按钮可向各 App 广播一次诊断（无需重启、无需 Mac）：各 App 把结果写入 /var/mobile/oback_diag.log 并在手机上直接弹文本框展示，用于核对当前 App 真实 bid / 名单命中 / 视差状态；也可随时用 Filza 看该文件。</string>
 			<key>label</key>
 			<string>调试</string>

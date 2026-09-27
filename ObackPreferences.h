@@ -16,6 +16,11 @@
 + (BOOL)exclusivePopEnabled;  // [A'] 「接管即独占」（key=exclusivePop），默认关：Oback 确认接管本次返回手势期间，临时禁用 App 自带的返回手势（滚动/文本选择/左滑一律放行），松手后自动恢复
 + (BOOL)isExclusivePopExcluded;  // [R13] 「独占排除」名单（key=exclusivePopExcludeApps），默认空：命中 App 内 exclusivePop 视同关闭（只关独占，不动 Oback 基础返回/胶囊/其他名单）。
                                  // 排除列表语义（非白名单）⇒ 默认空 = 全局生效，行为与加本能力之前逐字一致。
++ (BOOL)fallbackBackEnabled;      // [兜底返回 2026-09-27] key=fallbackBack，默认关：在「nav 栈深 1（不可 pop）且无弹窗」的页面上，
+                                  // 左缘改为查找并触发该页左上角的「返回 / 关闭」控件（这类页面系统不渲染返回箭头，
+                                  // 原有三级动作派发——nav pop / modal dismiss / ——全部找不到目标 ⇒ 手势只能空转）。
++ (BOOL)fallbackBackCloseEnabled; // key=fallbackBackClose，默认开：上面的语义词表是否包含 关闭 / 取消 / ✕。关 ⇒ 只认 返回 / back / ‹ / ←。
++ (BOOL)isFallbackBackExcluded;   // key=fallbackBackExcludeApps，默认空：命中 App 内兜底返回视同关闭（只关兜底，不动 Oback 基础返回 / 胶囊 / 其他名单）。
 + (BOOL)diagBannerEnabled;  // 诊断横幅独立隐藏开关（key=diagBanner），默认关；开→每次注入打印 [Oback-diag] 横幅，关→完全静默
 + (NSInteger)capsuleEffect;        // 胶囊特效（设置面板「胶囊风格」key=capsuleEffect），0=经典，1=发光，2=霓虹，3=流光，4=毛玻璃，5=呼吸
 // 内部：合并后的偏好字典（全局文件优先 + NSUserDefaults 域兜底），供读取与诊断复用。

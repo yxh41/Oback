@@ -283,6 +283,42 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     return YES;
 }
 
+// ── [兜底返回 2026-09-27] ────────────────────────────────────────────────────────────────
+// 动机：nav 栈深 1（不可 pop）且无弹窗的页面（全屏播放器 / 图片查看器 / 自绘返回的自定义容器）
+// 上，Oback 现有三级动作派发全部找不到目标 ⇒ 左缘手势只能空转。本能力在这类页面上改为
+// 「查找并触发该页左上角的返回 / 关闭按钮」。
+// 安全设计（见 ObackManager 的 _obFallbackBackControlIn:）：只认「返回 / 关闭」语义的控件，
+// 未命中一律不点 —— 宁可漏，不可错（页面上任何一次错误点击的代价都远高于「滑了没反应」）。
+// 默认关（key=fallbackBack）：不开则本能力完全不存在，行为与加本能力之前逐字一致。
++ (BOOL)isFallbackBackExcluded {
+    NSDictionary *d = [self _mergedPrefs];
+    NSArray *list = [d objectForKey:@"fallbackBackExcludeApps"];
+    if (![list isKindOfClass:[NSArray class]] || list.count == 0) return NO;
+    NSString *bid = NSBundle.mainBundle.bundleIdentifier;
+    if (!bid) return NO;
+    return [self _bid:bid matchesList:list];
+}
+
++ (BOOL)fallbackBackEnabled {
+    NSDictionary *d = [self _mergedPrefs];
+    id v = [d objectForKey:@"fallbackBack"];
+    if (!(v ? [v boolValue] : NO)) return NO;   // 未设置 → 默认关
+    // 按 App 排除（key=fallbackBackExcludeApps，默认空）：命中者视同「开关未开」。
+    // 本函数是兜底返回的**唯一总闸**（shouldBegin 一处调用）⇒ 一处判断即全局生效。
+    // 语义 = 排除列表而非白名单：默认空时此处恒不成立，行为与加本能力之前逐字一致。
+    if ([self isFallbackBackExcluded]) return NO;
+    return YES;
+}
+
+// 语义词表是否包含「关闭 / 取消 / ✕」：默认开。开 = 覆盖全屏播放器 / 图片查看器 / 弹窗式编辑页
+// （左上角是 ✕）；关 = 只认 返回 / back / ‹ / ←，更安全，但左上角是 ✕ 的页面依然返回不了。
+// 注意：编辑类页面的「取消」会丢弃未保存内容 —— 误触时请关掉本项或把该 App 加入兜底排除。
++ (BOOL)fallbackBackCloseEnabled {
+    NSDictionary *d = [self _mergedPrefs];
+    id v = [d objectForKey:@"fallbackBackClose"];
+    return v ? [v boolValue] : YES;   // 未设置 → 默认开
+}
+
 // 诊断横幅独立隐藏开关：key=diagBanner，默认关（设置面板「诊断横幅」开关控制，无需手动写 plist）。
 // 开 → 每次注入在 start 打印 [Oback-diag] 横幅（真实 bid / 名单状态 / isAllowed），用于排查黑名单命中、装包来源；
 // 关（默认）→ 完全不打印，日用机零日志噪声。此前该横幅为常开且绕过「调试日志」开关，
