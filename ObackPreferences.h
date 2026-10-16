@@ -21,11 +21,11 @@
                                   // 原有三级动作派发——nav pop / modal dismiss / ——全部找不到目标 ⇒ 手势只能空转）。
 + (BOOL)fallbackBackCloseEnabled; // key=fallbackBackClose，默认开：上面的语义词表是否包含 关闭 / 取消 / ✕。关 ⇒ 只认 返回 / back / ‹ / ←。
 + (BOOL)fallbackBackWebEnabled;      // [P0-1 2026-10-16] key=fallbackBackWeb，默认关：上面找不到控件时，
-+                                  // 改找最前面的 WKWebView，canGoBack==YES 就 goBack（系统布尔判定，非启发式）。
-+                                  // 覆盖内嵌 H5 的详情页/活动页/文档页 —— 那类页面 UIKit 树里没有返回按钮。
+                                   // 改找最前面的 WKWebView，canGoBack==YES 就 goBack（系统布尔判定，非启发式）。
+                                   // 覆盖内嵌 H5 的详情页/活动页/文档页 —— 那类页面 UIKit 树里没有返回按钮。
 + (BOOL)fallbackBackViewTreeEnabled; // [2b-1 2026-10-16] key=fallbackBackViewTree，默认关：把控件搜索范围从
-+                                  // nav.navigationBar 扩到 top VC 的 view 树左上区（x≤96 且 y≤176），
-+                                  // 覆盖 bar.hidden 的自绘返回按钮。比 nav bar 版更严，右上角明确不做。
+                                   // nav.navigationBar 扩到 top VC 的 view 树左上区（x≤96 且 y≤176），
+                                   // 覆盖 bar.hidden 的自绘返回按钮。比 nav bar 版更严，右上角明确不做。
 + (BOOL)isFallbackBackExcluded;   // key=fallbackBackExcludeApps，默认空：命中 App 内兜底返回视同关闭（只关兜底，不动 Oback 基础返回 / 胶囊 / 其他名单）。
 + (BOOL)diagBannerEnabled;  // 诊断横幅独立隐藏开关（key=diagBanner），默认关；开→每次注入打印 [Oback-diag] 横幅，关→完全静默
 + (NSInteger)capsuleEffect;        // 胶囊特效（设置面板「胶囊风格」key=capsuleEffect），0=经典，1=发光，2=霓虹，3=流光，4=毛玻璃，5=呼吸
