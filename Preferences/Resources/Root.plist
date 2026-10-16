@@ -298,6 +298,34 @@
 		</dict>
 		<dict>
 			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.zlhkf.oback</string>
+			<key>footnote</key>
+			<string>关（默认）：与以前完全一致。开：当左上角找不到返回 / 关闭按钮时，改为找页面内最前面的网页（WKWebView），只要它还能后退就执行后退。覆盖内嵌 H5 的商品详情、活动页、文档页 —— 那类页面的返回按钮画在网页里，系统导航栏和 UIKit 视图树里都找不到，原来的三级派发全部扫不到。判定用的是系统的「能否后退」，不是猜按钮，所以不会点错。注意：整个 App 就是一个网页的 App（纯 H5 壳）上，这会「退回网页上一页」而不是退出页面，不想要就关掉。</string>
+			<key>key</key>
+			<string>fallbackBackWeb</string>
+			<key>label</key>
+			<string>同时支持网页内返回</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.zlhkf.oback</string>
+			<key>footnote</key>
+			<string>关（默认）：只扫描系统导航栏（navigationBar）左侧，导航栏被隐藏的页面扫不到。开：把搜索范围扩大到整个页面的左上角一小块区域（屏幕左侧 96pt 以内、顶部 176pt 以内），覆盖那些自己画返回按钮、把系统导航栏藏起来的页面（全屏播放器、图片查看器、自定义容器）。仍然只认「返回 / 关闭」语义的按钮，且比导航栏模式更严：只扫左上角、排除导航栏本身、要求是 28~140pt 的真实可点目标。右上角的按钮明确不做（那里通常是分享 / 更多 / 编辑，误点代价太高）。</string>
+			<key>key</key>
+			<string>fallbackBackViewTree</string>
+			<key>label</key>
+			<string>扩大搜索：整页左上角</string>
+		</dict>
+		<dict>
+			<key>cell</key>
 			<string>PSLinkCell</string>
 			<key>detail</key>
 			<string>ObackFallbackBackExcludeListController</string>

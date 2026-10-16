@@ -40,14 +40,31 @@
 - (NSString *)_obFallbackBackText:(UIControl *)ctl;
 - (BOOL)_obFallbackBackMatchWord:(UIControl *)ctl allowClose:(BOOL)allowClose;
 - (BOOL)_obFallbackBackWeakIconOK:(UIControl *)ctl;
-- (void)_obFallbackBackFireOnNav:(UINavigationController *)nav;   // 松手提交：重新解析控件并触发
+- (void)_obFallbackBackFireOnNav:(UINavigationController *)nav top:(UIViewController *)top;   // 松手提交：重新解析并触发
+- (BOOL)_obFallbackBackArmForTop:(UIViewController *)top nav:(UINavigationController *)nav win:(UIWindow *)win loc:(CGPoint)loc pan:(UIPanGestureRecognizer *)pan p:(ObackParams *)p;   // [2026-10-16] 三源目标发现 + 接管本次左缘手势（nav pan / modal pan 两入口共用）
+- (UIControl *)_obFallbackBackControlInVC:(UIViewController *)vc;            // [2b-1] 扫 top VC 的 view 树左上区（覆盖 bar.hidden 的自绘返回）
+- (void)_obFallbackBackCollectVC:(UIView *)v inRoot:(UIView *)root depth:(NSUInteger)depth acc:(NSMutableArray *)acc;
+- (id)_obFallbackBackWebViewFrom:(UIViewController *)vc;                     // [P0-1] 最前面的可后退 WKWebView
+- (void)_obFallbackBackCollectWeb:(UIView *)v cls:(Class)wk depth:(NSUInteger)depth acc:(NSMutableArray *)acc;
+- (BOOL)_obFallbackBackWebCanGoBackFrom:(UIViewController *)vc;
+- (BOOL)_obFallbackBackFireWeb:(UIViewController *)vc;
 @property (nonatomic, retain) UIActivityViewController *logActivityVC;  // [v11c] retain 防活动视图控制器提前释放(MRC 陷阱)
+@end
+
+// [P0-1 2026-10-16] WKWebView 最小协议。
+// 刻意**不** #import <WebKit/WebKit.h>：本 tweak 注入所有 App，若某进程未加载 WebKit，
+// 直接引用 WKWebView 类符号会在 dylib 加载期解析失败。改用手写协议 + NSClassFromString
+// （对齐本项目「私有类走 NSClassFromString」的纪律），-Werror 下也不会触发
+// -Warc-performSelector-leaks（否则得改用 performSelector:，那反而要绕）。
+@protocol ObackWebViewNav <NSObject>
+- (BOOL)canGoBack;
+- (void)goBack;
 @end
 
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"fallback-back"
+#define OBACK_BUILD_TAG @"fallback-back2"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -1734,32 +1751,10 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
             // 返回 / 关闭控件，找到就接管本次左缘手势（松手提交时点它），找不到则维持原「交还」行为。
             // ⚠️ 本分支位于下方「压死 interactivePopGestureRecognizer」的代码【之前】⇒ 兜底路径
             //    从不触碰 ipg，不会与「左缘排除 × ipg」那套约定冲突（见 :1733 的守卫注释）。
+            // [2026-10-16] 目标发现扩为三源（nav bar 左区 / top VC view 树左上区 / WKWebView 后退），
+            // 统一走 _obFallbackBackArmForTop: —— window modal pan 的同类死路也调它（见 :1822 附近）。
             if (edge == ObackEdgeLeft && [ObackPreferences fallbackBackEnabled]) {
-                UIControl *fctl = [self _obFallbackBackControlIn:nav];
-                if (fctl) {
-                    _fallbackBackArmed = YES;
-                    self.currentEdge = edge;
-                    self.currentParallaxToView = NO;   // 不启动任何系统/自定义转场（目标是「点按钮」，无跟手语义）
-                    self.rightSimplePop = YES;         // 复用右缘「松手提交」机制：updateTransition 只跟手胶囊，松手才生效
-                    if (p.hapticEnabled) {
-                        UIImpactFeedbackGenerator *g = [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] autorelease];
-                        [g impactOccurred];
-                    }
-                    if (!_indicator) [self showIndicatorWithEdge:edge atPoint:loc inWindow:win];
-                    // 与正常路径同一套「轻量精准补链」：让触摸点正下方的 scrollView 失败于本次 pan
-                    UIScrollView *fsv = [self scrollViewAtPoint:loc inView:win];
-                    if (fsv && fsv.panGestureRecognizer) {
-                        @try { [fsv.panGestureRecognizer requireGestureRecognizerToFail:pan]; } @catch (NSException *e) {}
-                    }
-                    OBLog(@"[fallback] shouldBegin=YES (lvl=3 top=%@ ctl=%@ label=\"%@\" close=%d)",
-                          top ? NSStringFromClass([top class]) : @"nil",
-                          NSStringFromClass([fctl class]), [self _obFallbackBackText:fctl],
-                          (int)[ObackPreferences fallbackBackCloseEnabled]);
-                    return YES;
-                }
-                OBLog(@"[fallback] shouldBegin=NO (lvl=3 未找到返回/关闭控件: top=%@ navChild=%lu)",
-                      top ? NSStringFromClass([top class]) : @"nil",
-                      (unsigned long)nav.viewControllers.count);
+                if ([self _obFallbackBackArmForTop:top nav:nav win:win loc:loc pan:pan p:p]) return YES;
             }
             OBLog(@"shouldBegin(nav)=NO (nav 及外层均不可 pop: childCount=%lu)",
                   (unsigned long)nav.viewControllers.count);
@@ -1820,6 +1815,22 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
             OBLog(@"shouldBegin(modal)=NO (有 nav pop 可接管，交给 nav.view 边缘 pan)");
             return NO;
         } else {
+            // [2a 2026-10-16] 兜底返回第二入口：presented 出来的全屏页此前正是在这里直接空转
+            // （presentingViewController != nil 的走 dismiss；既非 modal 又不可 pop 的落到本分支）。
+            // ⚠️ 若本页已挂有 Oback nav pan（挂在 nav.view 上的左缘 pan），必须让位 ——
+            //    两个 pan 同时 arm 会让一次滑动触发两次兜底（点两下按钮 / 连退两级）。
+            //    与 :1715 双层 nav 的让位约定同构；nav == nil（页面根本没有 nav）时无人竞争，照常接管。
+            BOOL fbDefer = NO;
+            if (nav) {
+                NSArray *ownPans = objc_getAssociatedObject(nav, kNavPansKey);
+                if ([ownPans isKindOfClass:[NSArray class]] && ownPans.count > 0) fbDefer = YES;
+            }
+            if (edge == ObackEdgeLeft && [ObackPreferences fallbackBackEnabled] && !fbDefer) {
+                if ([self _obFallbackBackArmForTop:top nav:nav win:win loc:loc pan:pan p:p]) return YES;
+            } else if (fbDefer) {
+                OBLog(@"[fallback] shouldBegin=NO (lvl=3 本页已有 nav pan 兜底，modal pan 让位: nav=%@)",
+                      NSStringFromClass([nav class]));
+            }
             OBLog(@"shouldBegin(modal)=NO (无 modal 也无 nav pop)");
             return NO;
         }
@@ -2301,17 +2312,18 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
         if ([kind isEqualToString:@"nav"]) {
             nav = [self _popNavForPan:pan];
         }
+        // [2026-10-16] fbTop 提到 if 外：兜底触发需要「页面 VC」而非仅 nav（2b-1 / P0-1 都扫 top 的视图树）
+        UIViewController *fbTop = [self topMost:win.rootViewController];
         if (!nav) {
-            UIViewController *top = [self topMost:win.rootViewController];
-            nav = top.navigationController;
-            if (!nav && [top isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)top;
+            nav = fbTop.navigationController;
+            if (!nav && [fbTop isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)fbTop;
         }
         // [兜底返回 2026-09-27] lvl=3：本页 nav 不可 pop（栈深 1）⇒ 提交时改为「点该页左上角的
         // 返回 / 关闭按钮」。控件在**此刻重新解析**（不缓存指针）⇒ 页面若已变化/控件已消失则自然落空，
         // 无悬垂读风险。与下方真·pop 分支互斥（navChild==1 本就不满足 pop 条件，此处再加 fbArmed 判据）。
         if (commit && fbArmed && !_fallbackBackFired) {
             _fallbackBackFired = YES;
-            [self _obFallbackBackFireOnNav:nav];
+            [self _obFallbackBackFireOnNav:nav top:fbTop];
         }
         if (commit && !fbArmed && nav && nav.viewControllers.count > 1) {
             NSUInteger cntBefore = nav.viewControllers.count;
@@ -3512,24 +3524,171 @@ static BOOL _obDiagArenaAllowed(void) {
 // 为什么不用 [item.target performSelector:item.action]：UIBarButtonItem 的 target 可能已释放，
 // 读悬垂指针是 Mach 异常（@try 拦不住 —— 本项目已踩过），且 action 可能带参数。
 // sendActionsForControlEvents: 由控件自己持有并校验 target，生命周期由 UIKit 管理 ⇒ 零悬垂读风险。
-- (void)_obFallbackBackFireOnNav:(UINavigationController *)nav {
-    if (!nav) { OBLog(@"[fallback] fire SKIP (nav 已失效)"); return; }
-    UIControl *ctl = [self _obFallbackBackControlIn:nav];   // 重新解析：不缓存指针
-    if (!ctl) {
-        OBLog(@"[fallback] fire SKIP (松手时已找不到返回/关闭控件: top=%@)",
-              nav.topViewController ? NSStringFromClass([nav.topViewController class]) : @"nil");
+- (void)_obFallbackBackFireOnNav:(UINavigationController *)nav top:(UIViewController *)top {
+    if (!top) { OBLog(@"[fallback] fire SKIP (top 已失效)"); return; }
+    // 与 shouldBegin 完全同一套发现顺序重新解析（一个指针都不缓存）⇒
+    // 页面已变化 / 控件已消失 / WebView 已后退到底 ⇒ 自然落空，无悬垂读风险。
+    UIControl *ctl = [self _obFallbackBackControlIn:nav];
+    if (!ctl && [ObackPreferences fallbackBackViewTreeEnabled] && top.isViewLoaded && top.view.window) {
+        ctl = [self _obFallbackBackControlInVC:top];
+    }
+    if (ctl) {
+        if (!ctl.enabled || !ctl.userInteractionEnabled || ctl.hidden || ctl.alpha < 0.01) {
+            OBLog(@"[fallback] fire SKIP (控件已不可用: %@)", NSStringFromClass([ctl class]));
+            return;
+        }
+        BOOL ok = YES;
+        @try { [ctl sendActionsForControlEvents:UIControlEventTouchUpInside]; }
+        @catch (NSException *e) { ok = NO; OBLog(@"[fallback] fire 异常: %@", e); }
+        OBLog(@"[fallback] fire ctl=%@ label=\"%@\" top=%@ ok=%d",
+              NSStringFromClass([ctl class]), [self _obFallbackBackText:ctl],
+              NSStringFromClass([top class]), (int)ok);
         return;
     }
-    if (!ctl.enabled || !ctl.userInteractionEnabled || ctl.hidden || ctl.alpha < 0.01) {
-        OBLog(@"[fallback] fire SKIP (控件已不可用: %@)", NSStringFromClass([ctl class]));
+    if ([ObackPreferences fallbackBackWebEnabled] && top.isViewLoaded && top.view.window) {
+        [self _obFallbackBackFireWeb:top];
         return;
+    }
+    OBLog(@"[fallback] fire SKIP (松手时已找不到返回/关闭控件: top=%@)", NSStringFromClass([top class]));
+}
+
+#pragma mark - [兜底返回 2026-10-16] 三源目标发现：统一接管入口 / 整页左上区 / WebView 后退
+
+// 统一的「接管本次左缘手势」入口。目标发现顺序（先 App 自己的出口，再系统布尔判定，最后整页扫描）：
+//   ① nav 的 navigationBar 左区      —— v1 原有（词表 + 左区唯一小图标）
+//   ② top VC 的 view 树左上区 [2b-1] —— 覆盖 bar.hidden 的自绘返回（默认关，用户自开）
+//   ③ 最前面的 WKWebView 且 canGoBack [P0-1] —— 系统布尔判定，非启发式（默认关）
+// 三者全落空 ⇒ 返回 NO，shouldBegin 维持原来的交还 / 空转，行为与加本能力之前逐字一致。
+// ⚠️ isViewLoaded / view.window 双重守卫：绝不能在 shouldBegin 里触发 VC 的 loadView（副作用）。
+- (BOOL)_obFallbackBackArmForTop:(UIViewController *)top nav:(UINavigationController *)nav
+                            win:(UIWindow *)win loc:(CGPoint)loc pan:(UIPanGestureRecognizer *)pan
+                             p:(ObackParams *)p {
+    if (!top) return NO;
+    BOOL viewOK = top.isViewLoaded && top.view.window != nil;
+    UIControl *fctl = [self _obFallbackBackControlIn:nav];
+    NSString *src = fctl ? @"navbar" : nil;
+    if (!fctl && viewOK && [ObackPreferences fallbackBackViewTreeEnabled]) {
+        fctl = [self _obFallbackBackControlInVC:top];
+        if (fctl) src = @"viewtree";
+    }
+    if (!fctl && viewOK && [ObackPreferences fallbackBackWebEnabled]) {
+        if ([self _obFallbackBackWebCanGoBackFrom:top]) src = @"web";
+    }
+    if (!src) {
+        OBLog(@"[fallback] shouldBegin=NO (lvl=3 未找到返回/关闭控件或可后退网页: top=%@ navChild=%lu vtree=%d web=%d)",
+              NSStringFromClass([top class]), (unsigned long)(nav ? nav.viewControllers.count : 0),
+              (int)[ObackPreferences fallbackBackViewTreeEnabled],
+              (int)[ObackPreferences fallbackBackWebEnabled]);
+        return NO;
+    }
+    _fallbackBackArmed = YES;
+    self.currentEdge = ObackEdgeLeft;
+    self.currentParallaxToView = NO;   // 不启动任何系统/自定义转场（目标是「点控件」或「网页后退」，无跟手语义）
+    self.rightSimplePop = YES;         // 复用右缘「松手提交」机制：updateTransition 只跟手胶囊，松手才生效
+    if (p.hapticEnabled) {
+        UIImpactFeedbackGenerator *g = [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] autorelease];
+        [g impactOccurred];
+    }
+    if (!_indicator) [self showIndicatorWithEdge:ObackEdgeLeft atPoint:loc inWindow:win];
+    // 与正常路径同一套「轻量精准补链」：让触摸点正下方的 scrollView 失败于本次 pan
+    UIScrollView *fsv = [self scrollViewAtPoint:loc inView:win];
+    if (fsv && fsv.panGestureRecognizer) {
+        @try { [fsv.panGestureRecognizer requireGestureRecognizerToFail:pan]; } @catch (NSException *e) {}
+    }
+    OBLog(@"[fallback] shouldBegin=YES (lvl=3 src=%@ top=%@ navChild=%lu ctl=%@ label=\"%@\" close=%d)",
+          src, NSStringFromClass([top class]), (unsigned long)(nav ? nav.viewControllers.count : 0),
+          fctl ? NSStringFromClass([fctl class]) : @"(web)",
+          fctl ? [self _obFallbackBackText:fctl] : @"",
+          (int)[ObackPreferences fallbackBackCloseEnabled]);
+    return YES;
+}
+
+// [2b-1 2026-10-16] 扫 top VC 的 view 树「左上区」，覆盖 bar.hidden 的自绘返回按钮。
+// 与 _obFallbackBackControlIn: 的分工：后者只认系统 navigationBar（bar.hidden 即早退，扫不到自绘按钮）；
+// 本方法不依赖 nav bar，直接扫页面视图树。刻意比 nav bar 版更严（宁可漏不可错）：
+//   · 区域：x ≤ 96（左缘热区）且 y ≤ 176（顶部；排除左侧抽屉 / 侧栏 / 底部工具栏）
+//   · 尺寸：28 ≤ 宽高 ≤ 140（真实可点目标；排除装饰性小视图与整幅容器）
+//   · 跳过 UINavigationBar 子树：nav bar 已由 _obFallbackBackControlIn: 扫过，
+//     重复计入会破坏「候选数 == 1」这个弱判据
+//   · 词表与弱判据沿用同一套实现（_obFallbackBackMatchWord: / _obFallbackBackWeakIconOK:）
+- (UIControl *)_obFallbackBackControlInVC:(UIViewController *)vc {
+    if (!vc || !vc.isViewLoaded) return nil;
+    UIView *root = vc.view;
+    if (!root || !root.window) return nil;
+    BOOL allowClose = [ObackPreferences fallbackBackCloseEnabled];
+    NSMutableArray *cands = [NSMutableArray array];
+    [self _obFallbackBackCollectVC:root inRoot:root depth:0 acc:cands];
+    if (!cands.count) return nil;
+    [cands sortUsingComparator:^NSComparisonResult(UIView *a, UIView *b) {
+        CGRect fa = [a convertRect:a.bounds toView:root];
+        CGRect fb = [b convertRect:b.bounds toView:root];
+        if (fa.origin.x < fb.origin.x) return NSOrderedAscending;
+        if (fa.origin.x > fb.origin.x) return NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+    for (UIControl *c in cands) if ([self _obFallbackBackMatchWord:c allowClose:allowClose]) return c;
+    if (cands.count == 1 && [self _obFallbackBackWeakIconOK:cands[0]]) return cands[0];
+    return nil;
+}
+
+- (void)_obFallbackBackCollectVC:(UIView *)v inRoot:(UIView *)root depth:(NSUInteger)depth acc:(NSMutableArray *)acc {
+    if (!v || !acc || depth > 6 || acc.count > 4) return;
+    if (v.hidden || v.alpha < 0.01) return;
+    if (v == root) {
+        for (UIView *sub in v.subviews) [self _obFallbackBackCollectVC:sub inRoot:root depth:depth + 1 acc:acc];
+        return;
+    }
+    if ([v isKindOfClass:[UINavigationBar class]]) return;   // nav bar 交给 _obFallbackBackControlIn:
+    CGRect f = [v convertRect:v.bounds toView:root];
+    BOOL inLeft = (f.origin.x <= 96.0) && (f.origin.y <= 176.0) &&
+                  (f.size.width >= 28.0) && (f.size.height >= 28.0) &&
+                  (f.size.width <= 140.0) && (f.size.height <= 140.0);
+    if ([v isKindOfClass:[UIControl class]] && inLeft) { [acc addObject:v]; return; }
+    for (UIView *sub in v.subviews) [self _obFallbackBackCollectVC:sub inRoot:root depth:depth + 1 acc:acc];
+}
+
+// [P0-1 2026-10-16] WebView 内返回：canGoBack 是系统给的布尔值，不是「猜这个按钮像不像返回」
+// —— 安全等级比词表点击高一个量级。覆盖面是所有内嵌 H5 的详情页 / 活动页 / 文档页：
+// 那些页面的返回按钮在 DOM 里，UIKit 树里根本没有，系统也不渲染返回箭头，
+// 原有三级派发 + 词表兜底全部扫不到 ⇒ 这是「部分 App 的部分页面返回不了」的最大单一来源。
+// 典型行为：H5 里点了 3 层，左缘连滑 3 次逐层退回到 H5 首页，第 4 次 canGoBack=NO 自然落空。
+- (id)_obFallbackBackWebViewFrom:(UIViewController *)vc {
+    if (!vc || !vc.isViewLoaded) return nil;
+    Class wk = NSClassFromString(@"WKWebView");
+    if (!wk) return nil;
+    NSMutableArray *acc = [NSMutableArray array];
+    [self _obFallbackBackCollectWeb:vc.view cls:wk depth:0 acc:acc];
+    return acc.count ? acc.lastObject : nil;   // z-order 最后 = 最靠上层的那一个
+}
+
+- (void)_obFallbackBackCollectWeb:(UIView *)v cls:(Class)wk depth:(NSUInteger)depth acc:(NSMutableArray *)acc {
+    if (!v || !acc || depth > 8 || acc.count > 6) return;
+    if (v.hidden || v.alpha < 0.01) return;
+    if (v.window == nil) return;               // 不在窗口树上的不碰
+    if ([v isKindOfClass:wk]) { [acc addObject:v]; return; }
+    for (UIView *sub in v.subviews) [self _obFallbackBackCollectWeb:sub cls:wk depth:depth + 1 acc:acc];
+}
+
+- (BOOL)_obFallbackBackWebCanGoBackFrom:(UIViewController *)vc {
+    id wv = [self _obFallbackBackWebViewFrom:vc];
+    if (!wv || ![wv respondsToSelector:@selector(canGoBack)]) return NO;
+    BOOL ok = NO;
+    @try { ok = [(id<ObackWebViewNav>)wv canGoBack]; } @catch (NSException *e) { ok = NO; }
+    return ok;
+}
+
+- (BOOL)_obFallbackBackFireWeb:(UIViewController *)vc {
+    id wv = [self _obFallbackBackWebViewFrom:vc];
+    if (!wv || ![wv respondsToSelector:@selector(goBack)]) {
+        OBLog(@"[fallback-web] fire SKIP (松手时已找不到可后退的 WKWebView: top=%@)",
+              vc ? NSStringFromClass([vc class]) : @"nil");
+        return NO;
     }
     BOOL ok = YES;
-    @try { [ctl sendActionsForControlEvents:UIControlEventTouchUpInside]; }
-    @catch (NSException *e) { ok = NO; OBLog(@"[fallback] fire 异常: %@", e); }
-    OBLog(@"[fallback] fire ctl=%@ label=\"%@\" top=%@ ok=%d",
-          NSStringFromClass([ctl class]), [self _obFallbackBackText:ctl],
-          nav.topViewController ? NSStringFromClass([nav.topViewController class]) : @"nil", (int)ok);
+    @try { [(id<ObackWebViewNav>)wv goBack]; } @catch (NSException *e) { ok = NO; }
+    OBLog(@"[fallback-web] fire wv=%@ top=%@ ok=%d", NSStringFromClass([wv class]),
+          NSStringFromClass([vc class]), (int)ok);
+    return ok;
 }
 
 // 命中测试找最近的 UIScrollView（用于冲突规避）

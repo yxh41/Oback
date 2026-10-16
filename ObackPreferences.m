@@ -319,6 +319,27 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     return v ? [v boolValue] : YES;   // 未设置 → 默认开
 }
 
+// [P0-1 2026-10-16] WebView 内返回。默认关。
+// 为什么单独一个开关而不是并进 fallbackBack：纯 H5 壳 App（整个 App 一个 WKWebView）上，
+// 「返回网页上一页」和「退出这个页面」是两个语义，用户不一定想要前者。有 canGoBack 守卫
+// 所以不会死循环，但要不要这个行为交给用户。上游总闸 fallbackBackEnabled 已含排除名单。
++ (BOOL)fallbackBackWebEnabled {
+    NSDictionary *d = [self _mergedPrefs];
+    id v = [d objectForKey:@"fallbackBackWeb"];
+    return v ? [v boolValue] : NO;   // 未设置 → 默认关
+}
+
+// [2b-1 2026-10-16] 控件搜索范围扩展到 top VC 的 view 树左上区。默认关。
+// 为什么默认关而不是默认开：搜索面从「导航栏」扩大到「整页」，即使仍受左区 + 词表 +
+// 唯一候选 + 小图标四重约束，暴露面也实实在在变大了（左上角可能是「扫一扫」「我的」）。
+// 这与 fallbackBack 总开关的哲学一致：宁可漏，不可错；要覆盖自绘返回的用户自己开。
+// 上游总闸 fallbackBackEnabled 已含排除名单。
++ (BOOL)fallbackBackViewTreeEnabled {
+    NSDictionary *d = [self _mergedPrefs];
+    id v = [d objectForKey:@"fallbackBackViewTree"];
+    return v ? [v boolValue] : NO;   // 未设置 → 默认关
+}
+
 // 诊断横幅独立隐藏开关：key=diagBanner，默认关（设置面板「诊断横幅」开关控制，无需手动写 plist）。
 // 开 → 每次注入在 start 打印 [Oback-diag] 横幅（真实 bid / 名单状态 / isAllowed），用于排查黑名单命中、装包来源；
 // 关（默认）→ 完全不打印，日用机零日志噪声。此前该横幅为常开且绕过「调试日志」开关，
