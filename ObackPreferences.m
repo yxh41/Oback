@@ -1,4 +1,5 @@
 #import "ObackPreferences.h"
+#import <dlfcn.h>
 
 // 与设置面板 Root.plist 的 suite / key 保持一致
 static NSString *const kDomain = @"com.zlhkf.oback";
@@ -24,16 +25,78 @@ static NSDictionary *OBCfPrefsCopy(CFStringRef user, CFStringRef host) {
     return [d autorelease];
 }
 
+
+// ──────────────────────────────────────────────────────────────────────────────
+// [prefs-src3 2026-11-08] roothide 路径重定向（见 Apple Wiki / RootHide 设计）
+//   RootHide 把 /var/mobile/Library/Preferences 重定向到随机 jbroot 路径，并设置 CFFIXED_USER_HOME。
+//   ⇒ 同一个「路径」在不同进程里可能落在两个不同文件上：
+//      · 重定向生效的进程（系统/越狱/巨魔 App）→ jbroot 镜像 M；
+//      · 重定向不生效的进程（App Store 版 App）→ 真实文件 R（空/陈旧）。
+//   这就是「设置里看着对、设置 App 里生效、微信里胶囊变样 + 黑名单失效」的机制。
+//   修法：三条候选路径全读（jbroot 镜像 / jbroot 内 rootfs 挂载的真实根 / 直通 /var/mobile），
+//   按文件 mtime 升序合并（越新越优先）；写侧三处全写。jbroot 前缀运行时探测、不硬编码随机路径。
+// ──────────────────────────────────────────────────────────────────────────────
+static char *obPrefsJbAnchor = NULL;   // 仅为给 dladdr 提供一个落在本镜像内的地址
+
+static NSString *obPrefsJbrootPrefix(void) {
+    static NSString *cached = nil;
+    static BOOL probed = NO;
+    if (probed) return cached;
+    probed = YES;
+    @try {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        Dl_info info;
+        if (dladdr((const void *)&obPrefsJbAnchor, &info) && info.dli_fname) {
+            NSString *p = [NSString stringWithUTF8String:info.dli_fname];
+            NSMutableString *acc = [NSMutableString string];
+            for (NSString *c in [p componentsSeparatedByString:@"/"]) {
+                if (!c.length) continue;
+                [acc appendFormat:@"/%@", c];
+                if ([c hasPrefix:@".jbroot"]) {
+                    if ([fm fileExistsAtPath:acc]) cached = [acc copy];
+                    break;
+                }
+            }
+        }
+        if (!cached) {   // 兜底：在 jbroot 实现位置找 .jbroot-*，用 dpkg 认门
+            NSString *base = @"/var/containers/Bundle/Application";
+            for (NSString *e in [fm contentsOfDirectoryAtPath:base error:nil]) {
+                if (![e hasPrefix:@".jbroot"]) continue;
+                NSString *cand = [base stringByAppendingPathComponent:e];
+                if ([fm fileExistsAtPath:[cand stringByAppendingPathComponent:@"usr/bin/dpkg"]]) {
+                    cached = [cand copy];
+                    break;
+                }
+            }
+        }
+    } @catch (NSException *e) { (void)e; }
+    return cached;
+}
+
+static NSString *const kPrefsRel = @"var/mobile/Library/Preferences/com.zlhkf.oback.plist";
+
+// 候选偏好文件（顺序 = 优先级从低到高的兜底次序；实际合并按 mtime 定夺）
+static NSArray *obPrefsCandidatePaths(void) {
+    NSMutableArray *a = [NSMutableArray array];
+    NSString *jb = obPrefsJbrootPrefix();
+    if (jb.length) {
+        [a addObject:[jb stringByAppendingPathComponent:kPrefsRel]];                       // ① jbroot 镜像（重定向落点）
+        [a addObject:[jb stringByAppendingPathComponent:@"rootfs/var/mobile/Library/Preferences/com.zlhkf.oback.plist"]]; // ② jbroot 内 bind mount 的真实根
+    }
+    [a addObject:@"/var/mobile/Library/Preferences/com.zlhkf.oback.plist"];                // ③ 直通
+    return a;
+}
+
 @implementation ObackPreferences
 
-#pragma mark - 合并偏好（全局文件优先 + NSUserDefaults 域兜底，带短时缓存）
+#pragma mark - 合并偏好（候选文件按 mtime 取新 + cfprefsd + NSUserDefaults 域兜底，带短时缓存）
 
 static NSDictionary *__obMergedPrefs = nil;
 static NSTimeInterval __obMergedPrefsTS = 0;
 #define OB_MERGED_PREFS_TTL 2.0
 
 + (NSString *)_prefsDiagInfo {
-    return __obPrefsDiag ? __obPrefsDiag : @"src=none gk=0 cfk=0 sk=0";
+    return __obPrefsDiag ? __obPrefsDiag : @"src=none gk=0 cfk=0 sk=0 fc=0";
 }
 
 + (NSDictionary *)_mergedPrefs {
@@ -43,41 +106,55 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     }
     NSMutableDictionary *m = [NSMutableDictionary dictionary];
 
-    // ③ suite 域：最低优先级。非沙盒进程里它本身就是全局文件（这正是长期掩盖故障的原因）。
+    // ③-a suite 域（最低优先级；沙盒进程里它是自己容器的空副本）
     NSUserDefaults *d = [[[NSUserDefaults alloc] initWithSuiteName:kDomain] autorelease];
     NSDictionary *suite = [d dictionaryRepresentation];
     NSUInteger sk = suite ? suite.count : 0;
     if (sk) [m addEntriesFromDictionary:suite];
 
-    // ② cfprefsd：沙盒进程唯一可靠通道。(当前用户,当前主机) 即 /var/mobile/Library/Preferences，
-    //    取不到再退 (任意用户,当前主机) / (当前用户,任意主机)。
+    // ③-b cfprefsd（沙盒进程的 home 被 CFFIXED_USER_HOME 重定向时它也只返回容器副本，故仅作兜底）
     NSDictionary *cf = OBCfPrefsCopy(kCFPreferencesCurrentUser, kCFPreferencesCurrentHost);
     if (!cf.count) cf = OBCfPrefsCopy(kCFPreferencesAnyUser, kCFPreferencesCurrentHost);
     if (!cf.count) cf = OBCfPrefsCopy(kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
     NSUInteger cfk = cf ? cf.count : 0;
     if (cfk) [m addEntriesFromDictionary:cf];
 
-    // ① 全局 plist 文件：最高优先级，跨 App 真相源（能直读时以它为准，与历史行为一致）。
-    NSDictionary *g = [NSDictionary dictionaryWithContentsOfFile:kGlobalPlistPath];
-    NSUInteger gk = g ? g.count : 0;
-    if (gk) [m addEntriesFromDictionary:g];
+    // ① / ② 候选文件：全读，按 mtime 升序合并（越新越优先）。
+    //     roothide 下同一份偏好可能同时存在于 jbroot 镜像与真实根，且两边由不同写入通道更新
+    //     （PSSwitchCell 走 cfprefsd 写真实根；我们的 _setObject: 走 writeToFile 写镜像）⇒ 只能按时间取新。
+    NSArray *cands = obPrefsCandidatePaths();
+    NSMutableArray *found = [NSMutableArray array];
+    NSUInteger fc = 0;
+    for (NSString *p in cands) {
+        NSDictionary *fd = [NSDictionary dictionaryWithContentsOfFile:p];
+        if (![fd isKindOfClass:[NSDictionary class]] || fd.count == 0) continue;
+        fc++;
+        NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil];
+        NSDate *mt = [attrs fileModificationDate];
+        [found addObject:@[ mt ? mt : [NSDate distantPast], fd ]];
+    }
+    [found sortUsingComparator:^NSComparisonResult(id a, id b) {
+        return [(NSDate *)[a objectAtIndex:0] compare:(NSDate *)[b objectAtIndex:0]];
+    }];
+    for (NSArray *e in found) [m addEntriesFromDictionary:[e objectAtIndex:1]];
+    NSUInteger gk = found.count ? m.count : 0;   // 仅用于诊断：有文件命中时的合并后键数
 
-    // 诊断串：src 标明这次到底哪几源有货；四源全空 = 偏好彻底读不到（胶囊/名单/日志开关全回落默认）。
-    NSString *src = gk ? (cfk ? @"file+cf" : @"file") : (cfk ? @"cf" : (sk ? @"suite" : @"none"));
+    // 诊断串：src 标明哪几类来源有货（f 后数字 = 命中的候选文件个数）
+    NSString *src = gk ? @"file" : (cfk ? @"cf" : (sk ? @"suite" : @"none"));
     [__obPrefsDiag release];
-    __obPrefsDiag = [[NSString alloc] initWithFormat:@"src=%@ gk=%lu cfk=%lu sk=%lu",
-                     src, (unsigned long)gk, (unsigned long)cfk, (unsigned long)sk];
+    __obPrefsDiag = [[NSString alloc] initWithFormat:@"src=%@ gk=%lu cfk=%lu sk=%lu fc=%lu",
+                     src, (unsigned long)gk, (unsigned long)cfk, (unsigned long)sk, (unsigned long)fc];
 
     NSDictionary *result = [m copy];   // MRC: copy 返回 retained(+1)，交给静态持有
     [__obMergedPrefs release];
     __obMergedPrefs = result;
     __obMergedPrefsTS = now;
     if (result.count == 0) {
-        static BOOL __obPrefsWarned = NO;   // 每进程只报一次，避免刷屏
+        static BOOL __obPrefsWarned = NO;   // 每进程只报一次
         if (!__obPrefsWarned) {
             __obPrefsWarned = YES;
-            NSLog(@"[Oback-prefs] 偏好四源全空(bid=%@)：胶囊/名单/日志开关全部回落默认，请检查容器可读性",
-                  [[NSBundle mainBundle] bundleIdentifier]);
+            NSLog(@"[Oback-prefs] 偏好四源全空(bid=%@ jbroot=%@)：胶囊/名单/日志开关全部回落默认",
+                  [[NSBundle mainBundle] bundleIdentifier], obPrefsJbrootPrefix());
         }
     }
     return __obMergedPrefs;
@@ -97,10 +174,14 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     CFPreferencesAppSynchronize(CFSTR("com.zlhkf.oback"));
     // 全局文件（roothide 跨 App 共享来源）：读-改-写。写失败（部分 App 无写权限）静默忽略，
     // 不影响读取端——读取端本就优先读此文件，而「设置」App 有写权限会把它写对。
-    NSMutableDictionary *g = [NSMutableDictionary dictionaryWithContentsOfFile:kGlobalPlistPath];
-    if (!g) g = [NSMutableDictionary dictionary];
-    if (value) g[key] = value; else [g removeObjectForKey:key];
-    [g writeToFile:kGlobalPlistPath atomically:YES];
+    // [prefs-src3] 三处候选全写：roothide 下 /var/mobile/Library/Preferences 被重定向到随机 jbroot 路径，
+    // 单写一个路径在「另一半进程」里看不到；三处都写才能保证两类进程读到同一份。写失败静默忽略。
+    for (NSString *p in obPrefsCandidatePaths()) {
+        NSMutableDictionary *g = [NSMutableDictionary dictionaryWithContentsOfFile:p];
+        if (!g) g = [NSMutableDictionary dictionary];
+        if (value) g[key] = value; else [g removeObjectForKey:key];
+        [g writeToFile:p atomically:YES];
+    }
 }
 
 + (ObackParams *)params {
