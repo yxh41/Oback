@@ -33,4 +33,5 @@
 // roothide 下 NSUserDefaults(suiteName:) 的手动写入会落到「设置」App 的 per-app 容器副本，
 // 注入到其它 App 的 tweak 读不到，故合并时全局 plist 文件优先。
 + (NSDictionary *)_mergedPrefs;
++ (NSString *)_prefsDiagInfo;   // [prefs-src2] 本次合并命中的来源与各源键数（src/gk/cfk/sk），诊断横幅用
 @end

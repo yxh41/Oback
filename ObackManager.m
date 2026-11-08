@@ -64,7 +64,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"fallback-back2"
+#define OBACK_BUILD_TAG @"prefs-src2"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -81,13 +81,21 @@ static void obShowLogCallback(CFNotificationCenterRef center, void *observer, CF
 #pragma mark - 诊断日志（落地文件 + syslog，便于真机定位手势为何不触发）
 
 static NSString *OBLogPath(void) {
-    // 优先写到所有 App 共享的 /var/mobile（roothide 下 App 可写，可被 Filza 一次抓取）
+    static NSString *cached = nil;
+    if (cached) return cached;
     NSString *shared = @"/var/mobile/oback_debug.log";
-    if ([[NSFileManager defaultManager] isWritableFileAtPath:@"/var/mobile"]) return shared;
-    // 兜底：退回各自沙盒 Documents
     NSString *dir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
-                                                         NSUserDomainMask, YES) firstObject];
-    return dir ? [dir stringByAppendingPathComponent:@"oback_debug.log"] : shared;
+                                                        NSUserDomainMask, YES) firstObject];
+    NSString *local = dir ? [dir stringByAppendingPathComponent:@"oback_debug.log"] : shared;
+    // [prefs-src2] 不能信 isWritableFileAtPath：沙盒接管 /var/mobile 时它仍可能报 YES（假阳性），
+    // 于是日志「写成功」但落在容器镜像里，Filza 永远找不到（2026-11-08 微信/QQ 实测：日志彻底消失）。
+    // 改为实测一次追加/建文件，失败才退 Documents —— Documents 走 App 容器视图，Filza 一定看得到。
+    BOOL ok = NO;
+    NSFileHandle *fh = [NSFileHandle fileHandleForUpdatingAtPath:shared];
+    if (fh) { [fh seekToEndOfFile]; ok = YES; [fh closeFile]; }
+    else { ok = [[NSFileManager defaultManager] createFileAtPath:shared contents:nil attributes:nil]; }
+    cached = ok ? [shared retain] : [local retain];
+    return cached;
 }
 
 static BOOL _obLogWasOn = NO;   // 跟踪上次开关状态，用于「关→开」翻转时打分隔标记（明确日志起点边界）
@@ -842,12 +850,13 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
     id bl = d[@"blacklistApps"];
     NSUInteger blCount = [bl isKindOfClass:[NSArray class]] ? [bl count] : 0;
     id wlm = d[@"whitelistMode"];
-    NSString *line = [NSString stringWithFormat:@"[%@] %@ bid=%@ isAllowed=%d whitelistMode=%@ blacklistCount=%lu leftEdgeExcluded=%d navPopFallback=%d capsuleEffect=%ld state=%@",
+    NSString *line = [NSString stringWithFormat:@"[%@] %@ bid=%@ isAllowed=%d whitelistMode=%@ blacklistCount=%lu leftEdgeExcluded=%d navPopFallback=%d capsuleEffect=%ld prefs=%@ log=%@ state=%@",
                       manual ? @"手动dump" : @"注入",
                       [NSDate date], bid, [ObackPreferences isAllowed], wlm,
                       (unsigned long)blCount, (int)[ObackPreferences isLeftEdgeExcluded],
                       (int)[ObackPreferences isNavPopFallback],
                       (long)[ObackPreferences capsuleEffect],
+                      [ObackPreferences _prefsDiagInfo], OBLogPath(),
                                             self.interacting ? @"交互中" : (_started ? @"已注入" : @"未注入")];
     NSLog(@"[Oback-diag] %@", line);   // 给有 Mac 的人：log stream | grep Oback-diag
     // 同时写手机本地文件：无 Mac 用户可用 Filza 直接看 /var/mobile/oback_diag.log，
@@ -862,6 +871,17 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
     } else {
         [out writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }
+    // [prefs-src2] 再写一份到本进程 Documents：App Store App 的 /var/mobile 可能被沙盒镜像，
+    // Filza 走「App 容器」视图才看得到；诊断行很短且只在注入/手动 dump 时打，双写无成本。
+    NSString *obDiagDir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+    if (obDiagDir.length) {
+        [out writeToFile:[obDiagDir stringByAppendingPathComponent:@"oback_diag.log"]
+              atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+    // 同时进内存 ring buffer：设置面板「显示调试日志」弹窗直接展示，完全不依赖文件系统。
+    if (!__obLogBuf) __obLogBuf = [[NSMutableArray alloc] initWithCapacity:kOBLogBufMax];
+    [__obLogBuf addObject:out];
+    if (__obLogBuf.count > kOBLogBufMax) [__obLogBuf removeObjectAtIndex:0];
 }
 
 #pragma mark - [v11] App 内显示调试日志（绕开沙盒文件隔离）

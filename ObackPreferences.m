@@ -9,6 +9,21 @@ static NSString *const kDomain = @"com.zlhkf.oback";
 // 故所有读取直接读本全局文件（raw 文件读，绕过 per-app 容器化），NSUserDefaults 域仅作兜底。
 static NSString *const kGlobalPlistPath = @"/var/mobile/Library/Preferences/com.zlhkf.oback.plist";
 
+// [prefs-src2 2026-11-08] 读取来源优先级（低 → 高）：suite 域 < cfprefsd < 全局 plist 文件。
+// 背景：App Store 版 App（标准沙盒）里 /var/mobile 的直通读写会被沙盒接管，全局文件直读返回 nil；
+// 而「系统 App / 越狱 App / 巨魔 App」的 suite 域恰好就解析到同一个全局文件 ⇒ 长期把这条失败掩盖成「正常」。
+// 一旦直读失败，只有 App Store App 暴露：胶囊回落经典(0) + 黑名单空 ⇒ isAllowed fail-open 放行。
+// cfprefsd 的文件打开发生在系统守护进程（沙盒外），客户端侧的容器视图管不到它 ⇒ 沙盒进程也能拿到真实值。
+static NSString *__obPrefsDiag = nil;   // "src=file+cf gk=12 cfk=11 sk=0"，供诊断横幅显示
+
+static NSDictionary *OBCfPrefsCopy(CFStringRef user, CFStringRef host) {
+    CFDictionaryRef cf = CFPreferencesCopyMultiple(NULL, CFSTR("com.zlhkf.oback"), user, host);
+    if (!cf) return nil;
+    NSDictionary *d = [(NSDictionary *)cf copy];
+    CFRelease(cf);
+    return [d autorelease];
+}
+
 @implementation ObackPreferences
 
 #pragma mark - 合并偏好（全局文件优先 + NSUserDefaults 域兜底，带短时缓存）
@@ -17,25 +32,54 @@ static NSDictionary *__obMergedPrefs = nil;
 static NSTimeInterval __obMergedPrefsTS = 0;
 #define OB_MERGED_PREFS_TTL 2.0
 
++ (NSString *)_prefsDiagInfo {
+    return __obPrefsDiag ? __obPrefsDiag : @"src=none gk=0 cfk=0 sk=0";
+}
+
 + (NSDictionary *)_mergedPrefs {
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     if (__obMergedPrefs && (now - __obMergedPrefsTS) < OB_MERGED_PREFS_TTL) {
         return __obMergedPrefs;
     }
-    // 1) 全局文件（跨 App 共享来源，PreferenceLoader/设置页写入处）
-    NSDictionary *g = [NSDictionary dictionaryWithContentsOfFile:kGlobalPlistPath];
-    if (!g) g = [NSDictionary dictionary];
-    // 2) NSUserDefaults 域（兜底：非 roothide 或 suite 未被隔离的环境）
+    NSMutableDictionary *m = [NSMutableDictionary dictionary];
+
+    // ③ suite 域：最低优先级。非沙盒进程里它本身就是全局文件（这正是长期掩盖故障的原因）。
     NSUserDefaults *d = [[[NSUserDefaults alloc] initWithSuiteName:kDomain] autorelease];
     NSDictionary *suite = [d dictionaryRepresentation];
-    if (!suite) suite = [NSDictionary dictionary];
-    // 合并：全局文件优先（它才是跨 App 真相源）
-    NSMutableDictionary *m = [NSMutableDictionary dictionaryWithDictionary:suite];
-    [m addEntriesFromDictionary:g];   // 同名 key 以全局文件为准
+    NSUInteger sk = suite ? suite.count : 0;
+    if (sk) [m addEntriesFromDictionary:suite];
+
+    // ② cfprefsd：沙盒进程唯一可靠通道。(当前用户,当前主机) 即 /var/mobile/Library/Preferences，
+    //    取不到再退 (任意用户,当前主机) / (当前用户,任意主机)。
+    NSDictionary *cf = OBCfPrefsCopy(kCFPreferencesCurrentUser, kCFPreferencesCurrentHost);
+    if (!cf.count) cf = OBCfPrefsCopy(kCFPreferencesAnyUser, kCFPreferencesCurrentHost);
+    if (!cf.count) cf = OBCfPrefsCopy(kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+    NSUInteger cfk = cf ? cf.count : 0;
+    if (cfk) [m addEntriesFromDictionary:cf];
+
+    // ① 全局 plist 文件：最高优先级，跨 App 真相源（能直读时以它为准，与历史行为一致）。
+    NSDictionary *g = [NSDictionary dictionaryWithContentsOfFile:kGlobalPlistPath];
+    NSUInteger gk = g ? g.count : 0;
+    if (gk) [m addEntriesFromDictionary:g];
+
+    // 诊断串：src 标明这次到底哪几源有货；四源全空 = 偏好彻底读不到（胶囊/名单/日志开关全回落默认）。
+    NSString *src = gk ? (cfk ? @"file+cf" : @"file") : (cfk ? @"cf" : (sk ? @"suite" : @"none"));
+    [__obPrefsDiag release];
+    __obPrefsDiag = [[NSString alloc] initWithFormat:@"src=%@ gk=%lu cfk=%lu sk=%lu",
+                     src, (unsigned long)gk, (unsigned long)cfk, (unsigned long)sk];
+
     NSDictionary *result = [m copy];   // MRC: copy 返回 retained(+1)，交给静态持有
     [__obMergedPrefs release];
     __obMergedPrefs = result;
     __obMergedPrefsTS = now;
+    if (result.count == 0) {
+        static BOOL __obPrefsWarned = NO;   // 每进程只报一次，避免刷屏
+        if (!__obPrefsWarned) {
+            __obPrefsWarned = YES;
+            NSLog(@"[Oback-prefs] 偏好四源全空(bid=%@)：胶囊/名单/日志开关全部回落默认，请检查容器可读性",
+                  [[NSBundle mainBundle] bundleIdentifier]);
+        }
+    }
     return __obMergedPrefs;
 }
 
@@ -45,6 +89,12 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     NSUserDefaults *d = [[[NSUserDefaults alloc] initWithSuiteName:kDomain] autorelease];
     if (value) [d setObject:value forKey:key]; else [d removeObjectForKey:key];
     [d synchronize];
+    // [prefs-src2] 同步写一份到 cfprefsd：App Store 版 App 读不到全局文件（沙盒接管 /var/mobile），
+    // 但能通过 cfprefsd 读到本域 ⇒ 这是沙盒进程唯一的可用通道。写失败（沙盒拒绝写非自身域）静默忽略，
+    // 下方 raw 文件写仍是权威源，两者并存不冲突。
+    if (value) CFPreferencesSetAppValue((CFStringRef)key, (CFTypeRef)value, CFSTR("com.zlhkf.oback"));
+    else       CFPreferencesSetAppValue((CFStringRef)key, NULL, CFSTR("com.zlhkf.oback"));
+    CFPreferencesAppSynchronize(CFSTR("com.zlhkf.oback"));
     // 全局文件（roothide 跨 App 共享来源）：读-改-写。写失败（部分 App 无写权限）静默忽略，
     // 不影响读取端——读取端本就优先读此文件，而「设置」App 有写权限会把它写对。
     NSMutableDictionary *g = [NSMutableDictionary dictionaryWithContentsOfFile:kGlobalPlistPath];
