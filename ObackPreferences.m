@@ -363,10 +363,21 @@ static NSTimeInterval __obMergedPrefsTS = 0;
 
 // [v11] 实时读 debugLog（绕过 _mergedPrefs 的 2s TTL 缓存），确保设置面板开关翻转后下次手势即生效，
 // 消除「开着没日志 / 时灵时不灵」。仅此低频开关实时读，不增加高频调用负担。
+// [prefs-src4] 旧版直读单一路径 kGlobalPlistPath（③ 直通）会漏：商店版 App 里 ③=真实根 R，
+// 而设置面板经 ObackPrefsBridge 写的是 jbroot 镜像 M ⇒ R 里永远没有 debugLog
+// ⇒ 微信/QQ 等商店版 App 的文件日志永远开不出来。改为三候选取 mtime 最新一份；
+// 无任何候选文件可读时回落 _mergedPrefs（suite/cfprefsd 兜底）。
 + (BOOL)debugLogEnabledLive {
-    NSDictionary *g = [NSDictionary dictionaryWithContentsOfFile:kGlobalPlistPath];
-    if (!g) return NO;
-    id v = [g objectForKey:@"debugLog"];
+    NSDictionary *best = nil;
+    NSDate *bt = nil;
+    for (NSString *p in obPrefsCandidatePaths()) {
+        NSDictionary *fd = [NSDictionary dictionaryWithContentsOfFile:p];
+        if (![fd isKindOfClass:[NSDictionary class]] || fd.count == 0) continue;
+        NSDate *mt = [[[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil] fileModificationDate];
+        if (!bt || [mt compare:bt] == NSOrderedDescending) { bt = mt; best = fd; }
+    }
+    NSDictionary *d = best ? best : [self _mergedPrefs];
+    id v = [d objectForKey:@"debugLog"];
     return v ? [v boolValue] : NO;
 }
 
