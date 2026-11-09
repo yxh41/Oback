@@ -18,7 +18,9 @@ typedef NS_ENUM(NSInteger, ObackEdge) {
 
 // 模态 dismiss 转场转发器：仅在手势触发时注入，保留 App 原有转场，避免干扰其自带 modal 动画。
 // [方案B] 不再创建自定义 ObackAnimator：dismiss 动画交还系统/App 原生（返回 _original 或 nil）。
-@interface ObackTransitioningDelegate : NSObject <UIViewControllerTransitioningDelegate>
+@interface ObackTransitioningDelegate : NSObject <UIViewControllerTransitioningDelegate> {
+    BOOL _obReentering;   // 重入守卫：转发期间置位，打断 App delegate ↔ 代理 互递归
+}
 @property (nonatomic, assign) id<UIViewControllerTransitioningDelegate> original;
 @end
 

@@ -38,7 +38,9 @@ static BOOL oback_shouldBackOff(void) {
 #pragma mark - UINavigationController delegate 转发器
 
 // 包一层 delegate：保留 App 原有 delegate，同时注入我们的 pop 动画/交互
-@interface ObackNavDelegate : NSObject <UINavigationControllerDelegate>
+@interface ObackNavDelegate : NSObject <UINavigationControllerDelegate> {
+    BOOL _obReentering;   // 重入守卫：转发期间置位，打断 App delegate ↔ 代理 互递归
+}
 @property (nonatomic, assign) id<UINavigationControllerDelegate> original;
 @property (nonatomic, assign) UINavigationController *nav;
 @end
@@ -72,9 +74,12 @@ static BOOL oback_shouldBackOff(void) {
         return nil;
     }
     id ret = nil;
-    if (_original && [_original respondsToSelector:_cmd])
+    if (_original && [_original respondsToSelector:_cmd]) {
+        _obReentering = YES;
         ret = [_original navigationController:nav animationControllerForOperation:operation
                             fromViewController:from toViewController:to];
+        _obReentering = NO;
+    }
     OBLog(@"nav-anim -> %@ (original/nil path)", ret ? NSStringFromClass([ret class]) : @"nil");
     return ret;
 }
@@ -85,20 +90,49 @@ static BOOL oback_shouldBackOff(void) {
     OBLog(@"nav-intc query (animator=%@ interacting=%d)", NSStringFromClass([animator class]), interacting);
     // [方案B] 左缘 nav pop 走系统原生交互转场(方案A)，交互控制器由系统 _UINavigationInteractiveTransition 提供；
     // 不再返回自定义 ObackInteractiveTransition。仅透传 App 原有 delegate。
-    if (_original && [_original respondsToSelector:_cmd])
-        return [_original navigationController:nav interactionControllerForAnimationController:animator];
+    if (_original && [_original respondsToSelector:_cmd]) {
+        _obReentering = YES;
+        id r = [_original navigationController:nav interactionControllerForAnimationController:animator];
+        _obReentering = NO;
+        return r;
+    }
     return nil;
 }
 
+// [防重入] 未显式实现的 delegate 消息统一经 forwardInvocation 转发到 _original，转发期间置 _obReentering；
+// 若 _original 在执行中又回查/回调本代理（如抖音 delegate 从弱引用反问 nav.delegate），
+// 重入的转发直接安全吞掉，彻底切断互递归（此前在 com.ss.iphone.ugc.Aweme 触发栈溢出 EXC_BAD_ACCESS）。
 - (id)forwardingTargetForSelector:(SEL)sel {
-    return [_original respondsToSelector:sel] ? _original : nil;
+    return nil;  // 全部交由 forwardInvocation 处理（带重入守卫）
+}
+
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel {
+    NSMethodSignature *sig = nil;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wobjc-method-access"
+    sig = [super methodSignatureForSelector:sel];
+#pragma clang diagnostic pop
+    if (sig) return sig;
+    return _original ? [(id)_original methodSignatureForSelector:sel] : nil;
+}
+
+- (void)forwardInvocation:(NSInvocation *)invocation {
+    SEL sel = invocation.selector;
+    if (_obReentering) return;  // 重入：安全丢弃，打断代理环
+    if (_original && [_original respondsToSelector:sel]) {
+        _obReentering = YES;
+        [invocation invokeWithTarget:_original];
+        _obReentering = NO;
+    }
+    // 无人处理：静默丢弃，不触发 doesNotRecognizeSelector
 }
 
 - (BOOL)respondsToSelector:(SEL)sel {
     if (sel == @selector(navigationController:animationControllerForOperation:fromViewController:toViewController:) ||
         sel == @selector(navigationController:interactionControllerForAnimationController:))
         return YES;
-    return [_original respondsToSelector:sel];
+    if (_obReentering) return NO;  // 重入：打断代理环
+    return _original ? [_original respondsToSelector:sel] : [super respondsToSelector:sel];
 }
 
 @end
@@ -111,27 +145,58 @@ static BOOL oback_shouldBackOff(void) {
 - (id<UIViewControllerAnimatedTransitioning>)animationControllerForDismissedController:(UIViewController *)dismissed {
     // [方案B] modal dismiss 交还系统/App 原生动画（不再创建自定义 ObackAnimator）；
     // 普通关闭按钮等系统 dismiss 亦走 App 原生动画。仅透传 App 原有 delegate（保留其自定义 modal 转场）。
-    if (_original && [_original respondsToSelector:_cmd])
-        return [_original animationControllerForDismissedController:dismissed];
+    if (_original && [_original respondsToSelector:_cmd]) {
+        _obReentering = YES;
+        id r = [_original animationControllerForDismissedController:dismissed];
+        _obReentering = NO;
+        return r;
+    }
     return nil;
 }
 
 - (id<UIViewControllerInteractiveTransitioning>)interactionControllerForDismissal:(id<UIViewControllerAnimatedTransitioning>)animator {
     // [方案B] modal dismiss 退化为原生 dismiss（非交互，不可中途取消），不返回自定义交互控制器
-    if (_original && [_original respondsToSelector:_cmd])
-        return [_original interactionControllerForDismissal:animator];
+    if (_original && [_original respondsToSelector:_cmd]) {
+        _obReentering = YES;
+        id r = [_original interactionControllerForDismissal:animator];
+        _obReentering = NO;
+        return r;
+    }
     return nil;
 }
 
+// [防重入] 同 ObackNavDelegate：未显式实现的消息经 forwardInvocation 转发，转发期间置 _obReentering，
+// 打断 App delegate ↔ 代理 互递归（抖音等 App 实测触发）。
 - (id)forwardingTargetForSelector:(SEL)sel {
-    return [_original respondsToSelector:sel] ? _original : nil;
+    return nil;
+}
+
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel {
+    NSMethodSignature *sig = nil;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wobjc-method-access"
+    sig = [super methodSignatureForSelector:sel];
+#pragma clang diagnostic pop
+    if (sig) return sig;
+    return _original ? [(id)_original methodSignatureForSelector:sel] : nil;
+}
+
+- (void)forwardInvocation:(NSInvocation *)invocation {
+    SEL sel = invocation.selector;
+    if (_obReentering) return;
+    if (_original && [_original respondsToSelector:sel]) {
+        _obReentering = YES;
+        [invocation invokeWithTarget:_original];
+        _obReentering = NO;
+    }
 }
 
 - (BOOL)respondsToSelector:(SEL)sel {
     if (sel == @selector(animationControllerForDismissedController:) ||
         sel == @selector(interactionControllerForDismissal:))
         return YES;
-    return [_original respondsToSelector:sel];
+    if (_obReentering) return NO;
+    return _original ? [_original respondsToSelector:sel] : [super respondsToSelector:sel];
 }
 
 @end
