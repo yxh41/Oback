@@ -77,7 +77,7 @@ static inline NSDictionary *oback_globalPrefs(void) {
     for (NSString *p in oback_candidatePaths()) {
         NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:p];
         if (![d isKindOfClass:[NSDictionary class]] || d.count == 0) continue;
-        NSDate *mt = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil] fileModificationDate];
+        NSDate *mt = [[[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil] fileModificationDate];
         if (!bt || [mt compare:bt] == NSOrderedDescending) { bt = mt; best = d; }
     }
     return best ? best : @{};
