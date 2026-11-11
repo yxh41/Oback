@@ -6,7 +6,9 @@
 //  PSTitleValueCell 显示图标 + 名称，图标从 .app 包直接读取（**读不到只是这一行没图，不影响勾选与生效**）
 //  [applist7 2026-09-20] 每行**必定**带图（读不到就塞 29pt 透明占位），且图标一律渲染成 29pt 恒定画布
 //  ⇒ 所有行的 App 名称左起点落在同一条竖线上（修用户实测「部分 app 没有左对齐」）。
-//  （UIImage imageWithContentsOfFile:，无私有 API、零自定义 cell 类，roothide/iOS16.4.1 下稳定）。
+//  [P2 applist-icon1 2026-11-12] 图标三级回落：散落 png → imageNamed:inBundle（公开，查 Assets.car）
+//  → 私有类方法运行时探测。私有调用一律 NSInvocation 按签名写参数 + @try/@catch，
+//  签名不符即放弃，绝不 objc_msgSend 强转盲调导致设置 App 闪退。
 //  注：PSApplicationCell 在本项目的 theos 头文件集合（theos/headers）未声明，
 //  直接用会因 -Werror 编译失败、不出 .deb，故改用 PSTitleValueCell + 手动图标加载。
 //  交互改为「点按某行 = 加入/移出名单」（无每行开关，因自定义 cell 类必崩）；
@@ -20,6 +22,7 @@
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>             // [applist3] dladdr：取本 bundle 自身加载路径 ⇒ 运行时定位 roothide 的随机 jbroot
 #import "ObackPrefsBridge.h"   // 直接读写全局 plist（绕过 roothide per-app NSUserDefaults 容器化）
+#import <string.h>            // [P2] strchr：校验私有方法签名的类型编码
 
 static NSString *const kDomain = @"com.zlhkf.oback";
 
@@ -200,6 +203,79 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
     return obSliceHasTrollMarker(exePath, 0);         // 非 fat：本身就是 Mach-O 头
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// [P2 applist-icon1] 图标来源扩展的**安全调用层**。
+// 现代 App 图标编译进 Assets.car，Info.plist 只剩 CFBundleIconName（asset 名，不是文件），
+// 原来的 imageWithContentsOfFile 拼名法恒读不到 ⇒ 名单页图标几乎全透明。
+// Preferences bundle 跑在设置 App 进程里，任何 ABI 错配 / 私有签名不符都会让设置闪退。
+// ⇒ 全部走「运行时取类 + 取 NSMethodSignature + 按签名写参数 + @try/@catch」，
+//   签名不符直接放弃，绝不 objc_msgSend 强转盲调。
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 按签名的实际类型写数值参数（私有方法 format: / scale: 的类型随 iOS 版本变化）。
+static BOOL obSetNumericArg(NSInvocation *inv, NSUInteger idx, double v) {
+    NSMethodSignature *sig = [inv methodSignature];
+    if (!sig || idx >= [sig numberOfArguments]) return NO;
+    const char *t = [sig getArgumentTypeAtIndex:idx];
+    if (!t) return NO;
+    while (*t && strchr("rnNoORV", *t)) t++;
+    switch (*t) {
+        case 'c': { char x = (char)v; [inv setArgument:&x atIndex:idx]; return YES; }
+        case 'C': { unsigned char x = (unsigned char)v; [inv setArgument:&x atIndex:idx]; return YES; }
+        case 's': { short x = (short)v; [inv setArgument:&x atIndex:idx]; return YES; }
+        case 'S': { unsigned short x = (unsigned short)v; [inv setArgument:&x atIndex:idx]; return YES; }
+        case 'i': { int x = (int)v; [inv setArgument:&x atIndex:idx]; return YES; }
+        case 'I': { unsigned int x = (unsigned int)v; [inv setArgument:&x atIndex:idx]; return YES; }
+        case 'l': { long x = (long)v; [inv setArgument:&x atIndex:idx]; return YES; }
+        case 'L': { unsigned long x = (unsigned long)v; [inv setArgument:&x atIndex:idx]; return YES; }
+        case 'q': { long long x = (long long)v; [inv setArgument:&x atIndex:idx]; return YES; }
+        case 'Q': { unsigned long long x = (unsigned long long)v; [inv setArgument:&x atIndex:idx]; return YES; }
+        case 'f': { float x = (float)v; [inv setArgument:&x atIndex:idx]; return YES; }
+        case 'd': { double x = v; [inv setArgument:&x atIndex:idx]; return YES; }
+        case 'B': { BOOL x = (v != 0.0); [inv setArgument:&x atIndex:idx]; return YES; }
+        default: return NO;   // 结构体 / 未知类型：放弃调用，绝不盲写
+    }
+}
+
+// 只读探测：CoreUI 是否可加载（本版不调用，仅给诊断行提供下版选路依据）。
+static BOOL obCoreUIAvailable(void) {
+    static BOOL done = NO, ok = NO;
+    if (!done) {
+        done = YES;
+        void *h = dlopen("/System/Library/PrivateFrameworks/CoreUI.framework/CoreUI", RTLD_LAZY);
+        ok = (h != NULL && NSClassFromString(@"CUICatalog") != Nil);
+    }
+    return ok;
+}
+
+// 公开 API 运行时调用（imageNamed:inBundle:compatibleWithTraitCollection:）。
+// 用 NSInvocation 而非直接调用：本仓库 theos/headers 是精简集合，避免 -Werror 下未声明方法报错。
+static UIImage *obImageNamedInBundle(NSString *name, NSBundle *bundle) {
+    if (![name isKindOfClass:[NSString class]] || !name.length || !bundle) return nil;
+    SEL sel = NSSelectorFromString(@"imageNamed:inBundle:compatibleWithTraitCollection:");
+    id cls = NSClassFromString(@"UIImage");
+    if (!cls || ![cls respondsToSelector:sel]) return nil;
+    @try {
+        NSMethodSignature *sig = [cls methodSignatureForSelector:sel];
+        if (!sig || [sig methodReturnType][0] != '@' || [sig numberOfArguments] != 5) return nil;
+        for (NSUInteger i = 2; i <= 4; i++) {
+            if ([sig getArgumentTypeAtIndex:i][0] != '@') return nil;
+        }
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+        if (!inv) return nil;
+        [inv setTarget:cls];
+        [inv setSelector:sel];
+        id a2 = name, a3 = bundle, a4 = nil;
+        [inv setArgument:&a2 atIndex:2];
+        [inv setArgument:&a3 atIndex:3];
+        [inv setArgument:&a4 atIndex:4];
+        [inv invoke];
+        __unsafe_unretained id ret = nil;
+        [inv getReturnValue:&ret];
+        return (ret && [(id)ret isKindOfClass:[UIImage class]]) ? (UIImage *)ret : nil;
+    } @catch (NSException *e) { (void)e; return nil; }
+}
+
 @implementation ObackAppListController {
     NSDictionary *_allApps; // @{ @"user": [...], @"system": [...] }
     NSString *_searchText;
@@ -215,6 +291,10 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
     NSUInteger _statLegacyJbApps;    // /var/jb/Applications 命中数（rootless）
     NSUInteger _statDroppedByHome;   // 被主屏集合砍掉的条数
     NSUInteger _statJbFallback;      // [applist6] 越狱根被主屏过滤清空后、整根兜底列出的条数（0=未触发）
+    // [P2] 图标来源统计（每次 specifiers 重建时清零；仅供置底诊断行）
+    NSUInteger _icFile, _icAsset, _icPrivate, _icCache, _icBlank, _icCar;
+    BOOL _icPrivateSelOK;
+    NSString *_icSelUsed;
 }
 
 #pragma mark App 枚举
@@ -668,11 +748,18 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
 // 结果按 bundle id 缓存，避免每次 reload 都重新读盘导致点按选择变慢。
 - (UIImage *)_iconImageForApp:(NSDictionary *)app {
     NSString *bid = app[@"bundleID"];
+    NSString *appPath = app[@"path"];
+    // [P2] 诊断：该 App 是否带 Assets.car（判断「散落 png 法为何失效」的直接证据）
+    if ([appPath isKindOfClass:[NSString class]] && appPath.length &&
+        [[NSFileManager defaultManager] fileExistsAtPath:[appPath stringByAppendingPathComponent:@"Assets.car"]]) {
+        _icCar++;
+    }
     if ([bid isKindOfClass:[NSString class]] && bid.length) {
         UIImage *cached = _iconCache[bid];
-        if (cached) return cached;
+        if (cached) { _icCache++; return cached; }
     }
     UIImage *img = [self _loadIconImageForApp:app];
+    if (!img) _icBlank++;
     if (img && [bid isKindOfClass:[NSString class]] && bid.length) {
         if (!_iconCache) _iconCache = [NSMutableDictionary dictionary];
         _iconCache[bid] = img;
@@ -726,10 +813,95 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
     for (NSString *cand in candidates) {
         for (NSString *name in @[cand, [cand stringByAppendingString:@".png"]]) {
             UIImage *img = [UIImage imageWithContentsOfFile:[appPath stringByAppendingPathComponent:name]];
-            if (img) return [self _scaledIcon:img];
+            if (img) { _icFile++; return [self _scaledIcon:img]; }
         }
     }
+
+    // [P2] (B) 公开 API：查 App 自己 bundle 里的 Assets.car。
+    // 现代 App 的图标键 CFBundleIconName 指向 car 内的 asset，不是散落文件；
+    // imageNamed:inBundle:compatibleWithTraitCollection: 是 iOS 8+ 公开 API，零私有依赖。
+    NSBundle *appBundle = [NSBundle bundleWithPath:appPath];
+    if (appBundle) {
+        NSMutableArray<NSString *> *assetNames = [NSMutableArray array];
+        id modern = info[@"CFBundleIconName"];
+        if ([modern isKindOfClass:[NSString class]] && [modern length]) [assetNames addObject:modern];
+        id iconsDict = info[@"CFBundleIcons"];
+        if ([iconsDict isKindOfClass:[NSDictionary class]]) {
+            id pri = iconsDict[@"CFBundlePrimaryIcon"];
+            if ([pri isKindOfClass:[NSDictionary class]]) {
+                id pn = pri[@"CFBundleIconName"];
+                if ([pn isKindOfClass:[NSString class]] && [pn length]) [assetNames addObject:pn];
+            }
+        }
+        for (NSString *n in assetNames) {
+            UIImage *ai = obImageNamedInBundle(n, appBundle);
+            if (ai) { _icAsset++; return [self _scaledIcon:ai]; }
+        }
+    }
+
+    // [P2] (C) 私有类方法（运行时探测，签名不符自动放弃；见 _privateIconForBundleID:）。
+    NSString *iconBID = info[@"CFBundleIdentifier"];
+    if (![iconBID isKindOfClass:[NSString class]] || !iconBID.length) iconBID = app[@"bundleID"];
+    UIImage *pi = [self _privateIconForBundleID:iconBID];
+    if (pi) { _icPrivate++; return [self _scaledIcon:pi]; }
+
     return nil;
+}
+
+// [P2] 私有类方法 +[UIImage _applicationIconImageForBundleIdentifier:...] 的兼容调用。
+// iOS 各版本签名有 1/2/3 参三种，逐个探测；数值参数一律按签名类型写入（见 obSetNumericArg）。
+// 任何一步不符 / 抛异常 / 返回非 UIImage 都静默继续下一种，最坏结果只是这一行没图标。
+- (UIImage *)_privateIconForBundleID:(NSString *)bid {
+    if (![bid isKindOfClass:[NSString class]] || !bid.length) return nil;
+    id cls = NSClassFromString(@"UIImage");
+    if (!cls) return nil;
+    CGFloat scale = [UIScreen mainScreen].scale;
+    if (scale <= 0.0) scale = 3.0;
+    NSArray *sels = @[@"_applicationIconImageForBundleIdentifier:format:scale:",
+                      @"_applicationIconImageForBundleIdentifier:format:",
+                      @"_applicationIconImageForBundleIdentifier:"];
+    for (NSString *sn in sels) {
+        SEL sel = NSSelectorFromString(sn);
+        if (![cls respondsToSelector:sel]) continue;
+        _icPrivateSelOK = YES;
+        @try {
+            NSMethodSignature *sig = [cls methodSignatureForSelector:sel];
+            if (!sig || [sig methodReturnType][0] != '@') continue;
+            NSUInteger n = [sig numberOfArguments];
+            if (n < 3 || n > 5 || [sig getArgumentTypeAtIndex:2][0] != '@') continue;
+            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+            if (!inv) continue;
+            [inv setTarget:cls];
+            [inv setSelector:sel];
+            id a = bid;
+            [inv setArgument:&a atIndex:2];
+            BOOL ok = YES;
+            if (n >= 4 && !obSetNumericArg(inv, 3, 0.0)) ok = NO;                 // format
+            if (ok && n >= 5 && !obSetNumericArg(inv, 4, (double)scale)) ok = NO;  // scale
+            if (!ok) continue;
+            [inv invoke];
+            __unsafe_unretained id ret = nil;
+            [inv getReturnValue:&ret];
+            if (ret && [(id)ret isKindOfClass:[UIImage class]]) {
+                _icSelUsed = sn;
+                return (UIImage *)ret;
+            }
+        } @catch (NSException *e) { (void)e; }
+    }
+    return nil;
+}
+
+// [P2] 置底诊断行：把每条图标来源的命中数与私有 API 可用性摊开，
+// 便于判断「私有路径全废时下一版该走 CoreUI 还是别的路」，不用再猜。
+- (NSString *)_iconDiagLine {
+    NSString *selInfo = _icSelUsed.length ? [NSString stringWithFormat:@"(%@)", _icSelUsed] : @"";
+    return [NSString stringWithFormat:
+            @"图标诊断　png %lu ｜ asset %lu ｜ 私有 %lu ｜ 缓存 %lu ｜ 占位 %lu"
+            @"　·　Assets.car %lu ｜ 私有方法 %@%@ ｜ CUICatalog %@",
+            (unsigned long)_icFile, (unsigned long)_icAsset, (unsigned long)_icPrivate,
+            (unsigned long)_icCache, (unsigned long)_icBlank, (unsigned long)_icCar,
+            _icPrivateSelOK ? @"响应" : @"不响应", selInfo,
+            obCoreUIAvailable() ? @"可加载" : @"不可加载"];
 }
 
 // 把图标缩放到合适的行内尺寸（与系统「设置」App 列表图标同尺寸 29pt）。
@@ -861,6 +1033,9 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
+        // [P2] 每次重建都重新统计本次渲染的图标来源
+        _icFile = 0; _icAsset = 0; _icPrivate = 0; _icCache = 0; _icBlank = 0; _icCar = 0;
+        _icSelUsed = nil;
         @try {
             NSMutableArray *specs = [NSMutableArray array];
 
@@ -950,6 +1125,8 @@ static BOOL obExeHasTrollMarker(NSString *exePath) {
             if (_statLine.length) {
                 [self _addGroupHeader:@"" footer:_statLine toSpecifiers:specs];
             }
+            // [P2] 图标来源诊断：置底、不受搜索影响；复用已验证的 PSGroupCell footer，零新 cell 类型
+            [self _addGroupHeader:@"" footer:[self _iconDiagLine] toSpecifiers:specs];
 
             _specifiers = specs;
         } @catch (NSException *e) {
