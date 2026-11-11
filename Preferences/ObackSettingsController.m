@@ -84,23 +84,29 @@ static NSDictionary *_obSliderUnits(void) {
     [super viewWillAppear:animated];
     if (!_specifiers) [self specifiers];
     NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:@"com.zlhkf.oback"];   // ARC bundle：不用 autorelease（会编译失败）
+    NSDictionary *gAll = oback_globalPrefs();   // [prefs-boundary1] 三候选合并真值，供下方迁移守卫使用
     for (PSSpecifier *spec in _specifiers) {
         NSString *key = [spec propertyForKey:@"key"];
         if (!key) continue;
         // [R9] 直写按钮两键以全局文件为真值，不走 suite 镜像（见下方专用分支）
         if ([key isEqualToString:@"exclusivePop"] || [key isEqualToString:@"debugLog"]) continue;
+        // [prefs-boundary1] 只迁移、不复写：三候选全局文件里已有真值的 key 一律不动，
+        // 防止 suite 陈旧值把用户通过直写按钮 / App 名单页设好的值反向覆盖。
         id val = [d objectForKey:key];
-        if (val) oback_setGlobalPref(key, val);   // 仅镜像有显式值的 key；nil 跳过，避免清掉未设置项的默认
+        if (val && ![gAll objectForKey:key]) oback_setGlobalPref(key, val);
     }
     // [R9] 两个「直写按钮」键以**全局文件**为唯一真值：禁止用 suite 旧值回写覆盖。
     // 旧实现会对所有 key 一律 suite → 全局镜像，若 suite 里残留历史值（PSSwitchCell 时代），
     // 打开设置页就会把刚开启的功能改回关闭。这里对这两键单独走「只迁移、不复写」。
-    NSDictionary *_dg = [NSDictionary dictionaryWithContentsOfFile:kOBGlobalPlist];
+    NSDictionary *_dg = oback_globalPrefs();   // [prefs-boundary1] 三候选合并，避免单看 ③ 误判「全局无真值」
     NSUserDefaults *_suite = [[NSUserDefaults alloc] initWithSuiteName:@"com.zlhkf.oback"];
-    for (NSString *bk in @[@"exclusivePop", @"debugLog"]) {
-        if ([_dg objectForKey:bk]) continue;      // 全局已有真值 → 不回写
-        id _sv = [_suite objectForKey:bk];
-        if (_sv) oback_setGlobalPref(bk, _sv);    // 仅老值迁移一次
+    // [prefs-boundary1] 仅当三候选全局偏好「完全为空」（全新安装 / 刚重置）时才做一次性迁移；
+    // 只要已有任意键，就绝不让 suite 旧值参与，堵死「开关刚开就被回写关掉」。
+    if (_dg.count == 0) {
+        for (NSString *bk in @[@"exclusivePop", @"debugLog"]) {
+            id _sv = [_suite objectForKey:bk];
+            if (_sv) oback_setGlobalPref(bk, _sv);
+        }
     }
     // [R9] 同步两个直写按钮标题：specifier + 可见 cell 一起改。
     // viewWillAppear 时 cell 可能尚未创建，未建的那部分由 willDisplayCell: 在显示时补齐（双保险）。
@@ -325,8 +331,7 @@ static NSDictionary *_obSliderUnits(void) {
     BOOL isDbg  = [action isEqualToString:@"toggleDebugLog"];
     if (!isExcl && !isDbg) return nil;
     BOOL on = NO;
-    NSDictionary *g = [NSDictionary dictionaryWithContentsOfFile:kOBGlobalPlist];
-    id v = [g objectForKey:(isExcl ? @"exclusivePop" : @"debugLog")];
+    id v = oback_globalPrefForKey(isExcl ? @"exclusivePop" : @"debugLog");
     if (v) on = [v boolValue];
     if (isExcl) return on ? @"接管即独占：开" : @"接管即独占：关";
     return on ? @"调试日志：开" : @"调试日志：关";
@@ -374,8 +379,8 @@ static NSDictionary *_obSliderUnits(void) {
 // 复用与黑名单相同的写路径（ObackAppListController 直写，已证明 tweak 可读到），确保 toggle 一定生效。
 - (void)toggleDebugLog {
     BOOL cur = NO;
-    NSDictionary *g = [NSDictionary dictionaryWithContentsOfFile:kOBGlobalPlist];
-    if (g) { id v = [g objectForKey:@"debugLog"]; if (v) cur = [v boolValue]; }
+    id v = oback_globalPrefForKey(@"debugLog");
+    if (v) cur = [v boolValue];
     BOOL next = !cur;
     oback_setGlobalPref(@"debugLog", @(next));
     // [R9] 刷新标题：只改 specifier 属性屏幕**不会**变（PSButtonCell 不重读 label），
@@ -395,8 +400,8 @@ static NSDictionary *_obSliderUnits(void) {
 // 点按直接 oback_setGlobalPref 写全局文件，确保 toggle 一定落到 tweak 可读的位置。
 - (void)toggleExclusivePop {
     BOOL cur = NO;
-    NSDictionary *g = [NSDictionary dictionaryWithContentsOfFile:kOBGlobalPlist];
-    if (g) { id v = [g objectForKey:@"exclusivePop"]; if (v) cur = [v boolValue]; }
+    id v = oback_globalPrefForKey(@"exclusivePop");
+    if (v) cur = [v boolValue];
     BOOL next = !cur;
     oback_setGlobalPref(@"exclusivePop", @(next));
     // [R9] 同 toggleDebugLog：specifier 与可见 cell 一起刷

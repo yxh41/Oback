@@ -83,7 +83,7 @@ static NSArray *obPrefsCandidatePaths(void) {
         [a addObject:[jb stringByAppendingPathComponent:kPrefsRel]];                       // ① jbroot 镜像（重定向落点）
         [a addObject:[jb stringByAppendingPathComponent:@"rootfs/var/mobile/Library/Preferences/com.zlhkf.oback.plist"]]; // ② jbroot 内 bind mount 的真实根
     }
-    [a addObject:@"/var/mobile/Library/Preferences/com.zlhkf.oback.plist"];                // ③ 直通
+    [a addObject:kGlobalPlistPath];                                                       // ③ 直通
     return a;
 }
 
@@ -253,12 +253,21 @@ static NSTimeInterval __obMergedPrefsTS = 0;
 // ⚠️ 直读全局文件、不走 _mergedPrefs / NSUserDefaults：本方法要在 %ctor（dylib 加载早期，
 // NSUserDefaults 尚未就绪）被调用，任何高层 API 都可能在此阶段出问题；dictionaryWithContentsOfFile 是安全的。
 + (BOOL)settingsAppEnabled {
-    NSDictionary *g = [NSDictionary dictionaryWithContentsOfFile:kGlobalPlistPath];
-    if (!g) return YES;                 // 从未写过偏好 → 默认开
-    id v = [g objectForKey:@"settingsAppEnabled"];
-    if (!v) return YES;                 // 未设置 → 默认开
-    if ([v respondsToSelector:@selector(boolValue)]) return [v boolValue];
-    return YES;
+    // [prefs-boundary1] 三候选按 mtime 取最新：roothide 下 %ctor 里直读 ③ 会命中真实根 R（陈旧/空），
+    // 而熔断键由面板写在 ①（jbroot 镜像）⇒ 单路径会让应急回退通道失效。
+    // 仍只用 dictionaryWithContentsOfFile / NSFileManager（%ctor 早期安全），不走 NSUserDefaults / cfprefsd。
+    NSDate *best = nil;
+    id val = nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *p in obPrefsCandidatePaths()) {
+        NSDictionary *g = [NSDictionary dictionaryWithContentsOfFile:p];
+        id v = [g objectForKey:@"settingsAppEnabled"];
+        if (![v respondsToSelector:@selector(boolValue)]) continue;
+        NSDate *mt = [[fm attributesOfItemAtPath:p error:nil] fileModificationDate];
+        NSDate *t = mt ? mt : [NSDate distantPast];
+        if (!best || [t compare:best] == NSOrderedDescending) { best = t; val = v; }
+    }
+    return val ? [val boolValue] : YES;   // 从未写过 / 未设置 → 默认开
 }
 
 // 是否允许当前 App 生效：
@@ -283,19 +292,23 @@ static NSTimeInterval __obMergedPrefsTS = 0;
     // 这是注入系统进程的秒级回退通道：万一设置 App 内出现异常，拨掉开关即可恢复原生行为。
     if ([self isSettingsApp] && ![self settingsAppEnabled]) return NO;
 
+    // [prefs-boundary1] 名单值必须校验类型：plist 被其它工具写入脏数据（字符串/数字）时，
+    // 旧代码对非 NSArray 发 containsObject: / .count 会直接抛异常 ⇒ 注入进程崩溃。
+    // 类型不符时回落到旧版逗号分隔字符串兼容路径，行为保守而非崩溃。
     if (whitelistMode) {
-        NSArray *white = [d objectForKey:@"whitelistApps"];
-        if (white) return [white containsObject:bid];
-        // 兼容旧版字符串
-        return [self _bundleId:bid inList:[d objectForKey:@"whitelistRaw"]];
+        id w = [d objectForKey:@"whitelistApps"];
+        if ([w isKindOfClass:[NSArray class]]) return [(NSArray *)w containsObject:bid];
+        id rw = [d objectForKey:@"whitelistRaw"];
+        return [self _bundleId:bid inList:([rw isKindOfClass:[NSString class]] ? rw : nil)];
     } else {
-        NSArray *black = [d objectForKey:@"blacklistApps"];
-        if (black) {
+        id b = [d objectForKey:@"blacklistApps"];
+        if ([b isKindOfClass:[NSArray class]]) {
+            NSArray *black = (NSArray *)b;
             if (black.count == 0) return YES;
             return ![self _bid:bid matchesList:black];
         }
-        // 兼容旧版字符串
-        NSString *raw = [d objectForKey:@"blacklistRaw"];
+        id rb = [d objectForKey:@"blacklistRaw"];
+        NSString *raw = [rb isKindOfClass:[NSString class]] ? rb : nil;
         if (!raw.length) return YES;
         return ![self _bundleId:bid inList:raw];
     }

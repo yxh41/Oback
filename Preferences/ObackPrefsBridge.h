@@ -70,17 +70,30 @@ static inline NSArray *oback_candidatePaths(void) {
     return a;
 }
 
-// 读取全局偏好字典：三候选取 mtime 最新的一份（无命中时返回空字典，调用方须判空）
+// [prefs-boundary1] 读取全局偏好字典：三候选按 mtime 升序合并（越新越优先），
+// 与 tweak 侧 ObackPreferences._mergedPrefs 的文件段完全同构。
+// 旧版「只取 mtime 最新的一份」会漏掉只存在于较早文件里的键；写侧是三处全写，
+// 读侧也必须是三处合并，否则面板与 tweak 对同一 key 看到的值不一致。
 static inline NSDictionary *oback_globalPrefs(void) {
-    NSDictionary *best = nil;
-    NSDate *bt = nil;
+    NSMutableArray *found = [NSMutableArray array];
+    NSFileManager *fm = [NSFileManager defaultManager];
     for (NSString *p in oback_candidatePaths()) {
         NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:p];
         if (![d isKindOfClass:[NSDictionary class]] || d.count == 0) continue;
-        NSDate *mt = [[[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil] fileModificationDate];
-        if (!bt || [mt compare:bt] == NSOrderedDescending) { bt = mt; best = d; }
+        NSDate *mt = [[fm attributesOfItemAtPath:p error:nil] fileModificationDate];
+        [found addObject:@[ mt ? mt : [NSDate distantPast], d ]];
     }
-    return best ? best : @{};
+    [found sortUsingComparator:^NSComparisonResult(NSArray *a, NSArray *b) {
+        return [(NSDate *)[a objectAtIndex:0] compare:(NSDate *)[b objectAtIndex:0]];
+    }];
+    NSMutableDictionary *m = [NSMutableDictionary dictionary];
+    for (NSArray *e in found) [m addEntriesFromDictionary:[e objectAtIndex:1]];
+    return m;
+}
+
+// 面板所有「真值判断」统一走这里；禁止再直接 dictionaryWithContentsOfFile:kOBGlobalPlist
+static inline id oback_globalPrefForKey(NSString *key) {
+    return key ? [oback_globalPrefs() objectForKey:key] : nil;
 }
 
 // 写入单个 key（value 为 nil 表示删除）：三处候选全写 + cfprefsd 域同步。
@@ -101,17 +114,24 @@ static inline void oback_setGlobalPref(NSString *key, id value) {
 
 // 清空全部全局偏好（重置设置时使用）：三处候选全部写空 + 清 cfprefsd 域全部键。
 // 必须三处全清：否则残留文件里的旧键在合并读（只增不删）下会把已重置的设置「复活」。
+// [prefs-boundary1] tweak 侧 _mergedPrefs 依次尝试三组 cfprefsd 域：
+//   (CurrentUser,CurrentHost) / (AnyUser,CurrentHost) / (CurrentUser,AnyHost)。
+// 旧版只清第一组，后两组残留会在「恢复默认」后经兜底把旧键复活 —— 三组全清，与读取端对称。
 static inline void oback_removeGlobalPrefs(void) {
     for (NSString *p in oback_candidatePaths()) {
         [@{} writeToFile:p atomically:YES];
     }
-    CFDictionaryRef cfd = CFPreferencesCopyMultiple(NULL, CFSTR("com.zlhkf.oback"),
-                                                    kCFPreferencesCurrentUser, kCFPreferencesCurrentHost);
-    if (cfd) {
+    CFStringRef app = CFSTR("com.zlhkf.oback");
+    CFStringRef users[3] = { kCFPreferencesCurrentUser, kCFPreferencesAnyUser,  kCFPreferencesCurrentUser };
+    CFStringRef hosts[3] = { kCFPreferencesCurrentHost, kCFPreferencesCurrentHost, kCFPreferencesAnyHost };
+    for (NSUInteger i = 0; i < 3; i++) {
+        CFDictionaryRef cfd = CFPreferencesCopyMultiple(NULL, app, users[i], hosts[i]);
+        if (!cfd) continue;
         NSDictionary *cf = CFBridgingRelease(cfd);
         for (NSString *k in cf) {
-            CFPreferencesSetAppValue((__bridge CFStringRef)k, NULL, CFSTR("com.zlhkf.oback"));
+            CFPreferencesSetValue((__bridge CFStringRef)k, NULL, app, users[i], hosts[i]);
         }
-        CFPreferencesAppSynchronize(CFSTR("com.zlhkf.oback"));
+        CFPreferencesSynchronize(app, users[i], hosts[i]);
     }
+    CFPreferencesAppSynchronize(app);
 }

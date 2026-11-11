@@ -60,7 +60,6 @@ static BOOL oback_shouldBackOff(void) {
                                   animationControllerForOperation:(UINavigationControllerOperation)operation
                                                fromViewController:(UIViewController *)from
                                                  toViewController:(UIViewController *)to {
-    if (_obReentering) return nil;  // 重入：显式动画选择器也不进 _original，封住第二条代理环
     BOOL interacting = [ObackManager shared].interacting;
     OBLog(@"nav-anim query (op=%ld interacting=%d)", (long)operation, interacting);
     // [R7 诊断] 非 Oback 驱动的 pop（op=2 且 interacting=0）→ 抓出当时已不在 Possible 的手势 = 真正发起 pop 的凶手。
@@ -84,7 +83,10 @@ static BOOL oback_shouldBackOff(void) {
         return nil;
     }
     id ret = nil;
-    if (_original && [_original respondsToSelector:_cmd]) {
+    // [prefs-boundary1] 重入短路收窄到「转发给 _original」这一段：上方 R7 诊断 / R8 push 对账 /
+    // 方案A 接管判断是 Oback 自己的逻辑，重入时也必须执行；否则 QQ 逐页新建的 RightDragPan
+    // 会漏一次收编，中间非交互瞬返偶发回归（guard-hardening1 把整个方法短路是过度收窄）。
+    if (!_obReentering && _original && [_original respondsToSelector:_cmd]) {
         _obReentering = YES;
         @try {
             ret = [_original navigationController:nav animationControllerForOperation:operation
@@ -99,12 +101,11 @@ static BOOL oback_shouldBackOff(void) {
 
 - (id<UIViewControllerInteractiveTransitioning>)navigationController:(UINavigationController *)nav
                          interactionControllerForAnimationController:(id<UIViewControllerAnimatedTransitioning>)animator {
-    if (_obReentering) return nil;  // 重入：同 nav-anim，不进 _original
     BOOL interacting = [ObackManager shared].interacting;
     OBLog(@"nav-intc query (animator=%@ interacting=%d)", NSStringFromClass([animator class]), interacting);
     // [方案B] 左缘 nav pop 走系统原生交互转场(方案A)，交互控制器由系统 _UINavigationInteractiveTransition 提供；
     // 不再返回自定义 ObackInteractiveTransition。仅透传 App 原有 delegate。
-    if (_original && [_original respondsToSelector:_cmd]) {
+    if (!_obReentering && _original && [_original respondsToSelector:_cmd]) {
         id r = nil;
         _obReentering = YES;
         @try {
