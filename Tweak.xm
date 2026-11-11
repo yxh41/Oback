@@ -5,6 +5,15 @@
 #import "ObackTransition.h"
 #import "ObackPreferences.h"
 
+// 转发器丢弃消息（重入 / 无人响应）时显式清零 NSInvocation 返回值，
+// 避免调用方读到未初始化的返回缓冲区（标量、结构体返回值尤其明显）。
+static void _obZeroInvocationReturn(NSInvocation *inv) {
+    NSUInteger len = [[inv methodSignature] methodReturnLength];
+    if (len == 0) return;
+    NSMutableData *zero = [NSMutableData dataWithLength:len];
+    [inv setReturnValue:[zero mutableBytes]];
+}
+
 static void *kNavDelegateKey = &kNavDelegateKey;
 extern void *kPanKey;   // 定义于 ObackManager.m：window 上挂载的 Oback 全屏 pan 手势
 
@@ -51,6 +60,7 @@ static BOOL oback_shouldBackOff(void) {
                                   animationControllerForOperation:(UINavigationControllerOperation)operation
                                                fromViewController:(UIViewController *)from
                                                  toViewController:(UIViewController *)to {
+    if (_obReentering) return nil;  // 重入：显式动画选择器也不进 _original，封住第二条代理环
     BOOL interacting = [ObackManager shared].interacting;
     OBLog(@"nav-anim query (op=%ld interacting=%d)", (long)operation, interacting);
     // [R7 诊断] 非 Oback 驱动的 pop（op=2 且 interacting=0）→ 抓出当时已不在 Possible 的手势 = 真正发起 pop 的凶手。
@@ -76,9 +86,12 @@ static BOOL oback_shouldBackOff(void) {
     id ret = nil;
     if (_original && [_original respondsToSelector:_cmd]) {
         _obReentering = YES;
-        ret = [_original navigationController:nav animationControllerForOperation:operation
-                            fromViewController:from toViewController:to];
-        _obReentering = NO;
+        @try {
+            ret = [_original navigationController:nav animationControllerForOperation:operation
+                                fromViewController:from toViewController:to];
+        } @finally {
+            _obReentering = NO;
+        }
     }
     OBLog(@"nav-anim -> %@ (original/nil path)", ret ? NSStringFromClass([ret class]) : @"nil");
     return ret;
@@ -86,14 +99,19 @@ static BOOL oback_shouldBackOff(void) {
 
 - (id<UIViewControllerInteractiveTransitioning>)navigationController:(UINavigationController *)nav
                          interactionControllerForAnimationController:(id<UIViewControllerAnimatedTransitioning>)animator {
+    if (_obReentering) return nil;  // 重入：同 nav-anim，不进 _original
     BOOL interacting = [ObackManager shared].interacting;
     OBLog(@"nav-intc query (animator=%@ interacting=%d)", NSStringFromClass([animator class]), interacting);
     // [方案B] 左缘 nav pop 走系统原生交互转场(方案A)，交互控制器由系统 _UINavigationInteractiveTransition 提供；
     // 不再返回自定义 ObackInteractiveTransition。仅透传 App 原有 delegate。
     if (_original && [_original respondsToSelector:_cmd]) {
+        id r = nil;
         _obReentering = YES;
-        id r = [_original navigationController:nav interactionControllerForAnimationController:animator];
-        _obReentering = NO;
+        @try {
+            r = [_original navigationController:nav interactionControllerForAnimationController:animator];
+        } @finally {
+            _obReentering = NO;
+        }
         return r;
     }
     return nil;
@@ -118,13 +136,19 @@ static BOOL oback_shouldBackOff(void) {
 
 - (void)forwardInvocation:(NSInvocation *)invocation {
     SEL sel = invocation.selector;
-    if (_obReentering) return;  // 重入：安全丢弃，打断代理环
+    if (_obReentering) { _obZeroInvocationReturn(invocation); return; }  // 重入：清零返回值后安全丢弃，打断代理环
     if (_original && [_original respondsToSelector:sel]) {
         _obReentering = YES;
-        [invocation invokeWithTarget:_original];
-        _obReentering = NO;
+        @try {
+            [invocation invokeWithTarget:_original];
+        } @finally {
+            _obReentering = NO;
+        }
+    } else {
+        _obZeroInvocationReturn(invocation);
     }
-    // 无人处理：静默丢弃，不触发 doesNotRecognizeSelector
+    // 注：「静默丢弃」仅指签名可得但无人响应；若 methodSignatureForSelector 取不到签名，
+    //     runtime 仍会走 doesNotRecognizeSelector（与改造前 forwardingTarget 行为一致，非回归）。
 }
 
 - (BOOL)respondsToSelector:(SEL)sel {
@@ -143,23 +167,33 @@ static BOOL oback_shouldBackOff(void) {
 @implementation ObackTransitioningDelegate
 
 - (id<UIViewControllerAnimatedTransitioning>)animationControllerForDismissedController:(UIViewController *)dismissed {
+    if (_obReentering) return nil;  // 重入：显式动画选择器也不进 _original
     // [方案B] modal dismiss 交还系统/App 原生动画（不再创建自定义 ObackAnimator）；
     // 普通关闭按钮等系统 dismiss 亦走 App 原生动画。仅透传 App 原有 delegate（保留其自定义 modal 转场）。
     if (_original && [_original respondsToSelector:_cmd]) {
+        id r = nil;
         _obReentering = YES;
-        id r = [_original animationControllerForDismissedController:dismissed];
-        _obReentering = NO;
+        @try {
+            r = [_original animationControllerForDismissedController:dismissed];
+        } @finally {
+            _obReentering = NO;
+        }
         return r;
     }
     return nil;
 }
 
 - (id<UIViewControllerInteractiveTransitioning>)interactionControllerForDismissal:(id<UIViewControllerAnimatedTransitioning>)animator {
+    if (_obReentering) return nil;  // 重入：同上
     // [方案B] modal dismiss 退化为原生 dismiss（非交互，不可中途取消），不返回自定义交互控制器
     if (_original && [_original respondsToSelector:_cmd]) {
+        id r = nil;
         _obReentering = YES;
-        id r = [_original interactionControllerForDismissal:animator];
-        _obReentering = NO;
+        @try {
+            r = [_original interactionControllerForDismissal:animator];
+        } @finally {
+            _obReentering = NO;
+        }
         return r;
     }
     return nil;
@@ -183,11 +217,16 @@ static BOOL oback_shouldBackOff(void) {
 
 - (void)forwardInvocation:(NSInvocation *)invocation {
     SEL sel = invocation.selector;
-    if (_obReentering) return;
+    if (_obReentering) { _obZeroInvocationReturn(invocation); return; }
     if (_original && [_original respondsToSelector:sel]) {
         _obReentering = YES;
-        [invocation invokeWithTarget:_original];
-        _obReentering = NO;
+        @try {
+            [invocation invokeWithTarget:_original];
+        } @finally {
+            _obReentering = NO;
+        }
+    } else {
+        _obZeroInvocationReturn(invocation);
     }
 }
 
