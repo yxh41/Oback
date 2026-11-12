@@ -291,10 +291,13 @@ static UIImage *obImageNamedInBundle(NSString *name, NSBundle *bundle) {
     NSUInteger _statLegacyJbApps;    // /var/jb/Applications 命中数（rootless）
     NSUInteger _statDroppedByHome;   // 被主屏集合砍掉的条数
     NSUInteger _statJbFallback;      // [applist6] 越狱根被主屏过滤清空后、整根兜底列出的条数（0=未触发）
-    // [P2] 图标来源统计（每次 specifiers 重建时清零；仅供置底诊断行）
+    // [P2 归因] 图标来源统计。_ic* 是「本次渲染」计数（每次重建清零）；
+    // _iconSourceByBid 按 bid 记【首次】来源，跨 specifiers 重建保留 ⇒ 二次渲染全走缓存仍能报出真实分布。
     NSUInteger _icFile, _icAsset, _icPrivate, _icCache, _icBlank, _icCar;
     BOOL _icPrivateSelOK;
     NSString *_icSelUsed;
+    NSMutableDictionary *_iconSourceByBid; // bid -> NSNumber(1=png 2=asset 3=私有 0=未知)
+    NSInteger _icLastSource;               // _loadIconImageForApp: 单次调用的来源标记
 }
 
 #pragma mark App 枚举
@@ -763,11 +766,15 @@ static UIImage *obImageNamedInBundle(NSString *name, NSBundle *bundle) {
     if (img && [bid isKindOfClass:[NSString class]] && bid.length) {
         if (!_iconCache) _iconCache = [NSMutableDictionary dictionary];
         _iconCache[bid] = img;
+        // [P2 归因] 只在首次成功加载时记来源；后续缓存命中不改 ⇒ 诊断行跨刷新稳定
+        if (!_iconSourceByBid) _iconSourceByBid = [NSMutableDictionary dictionary];
+        if (!_iconSourceByBid[bid]) _iconSourceByBid[bid] = @(_icLastSource);
     }
     return img;
 }
 
 - (UIImage *)_loadIconImageForApp:(NSDictionary *)app {
+    _icLastSource = 0;
     NSString *appPath = app[@"path"];
     if (![appPath isKindOfClass:[NSString class]] || !appPath.length) return nil;
     NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:[appPath stringByAppendingPathComponent:@"Info.plist"]];
@@ -813,7 +820,7 @@ static UIImage *obImageNamedInBundle(NSString *name, NSBundle *bundle) {
     for (NSString *cand in candidates) {
         for (NSString *name in @[cand, [cand stringByAppendingString:@".png"]]) {
             UIImage *img = [UIImage imageWithContentsOfFile:[appPath stringByAppendingPathComponent:name]];
-            if (img) { _icFile++; return [self _scaledIcon:img]; }
+            if (img) { _icFile++; _icLastSource = 1; return [self _scaledIcon:img]; }
         }
     }
 
@@ -835,7 +842,7 @@ static UIImage *obImageNamedInBundle(NSString *name, NSBundle *bundle) {
         }
         for (NSString *n in assetNames) {
             UIImage *ai = obImageNamedInBundle(n, appBundle);
-            if (ai) { _icAsset++; return [self _scaledIcon:ai]; }
+            if (ai) { _icAsset++; _icLastSource = 2; return [self _scaledIcon:ai]; }
         }
     }
 
@@ -843,7 +850,7 @@ static UIImage *obImageNamedInBundle(NSString *name, NSBundle *bundle) {
     NSString *iconBID = info[@"CFBundleIdentifier"];
     if (![iconBID isKindOfClass:[NSString class]] || !iconBID.length) iconBID = app[@"bundleID"];
     UIImage *pi = [self _privateIconForBundleID:iconBID];
-    if (pi) { _icPrivate++; return [self _scaledIcon:pi]; }
+    if (pi) { _icPrivate++; _icLastSource = 3; return [self _scaledIcon:pi]; }
 
     return nil;
 }
@@ -891,16 +898,27 @@ static UIImage *obImageNamedInBundle(NSString *name, NSBundle *bundle) {
     return nil;
 }
 
-// [P2] 置底诊断行：把每条图标来源的命中数与私有 API 可用性摊开，
-// 便于判断「私有路径全废时下一版该走 CoreUI 还是别的路」，不用再猜。
+// [P2 归因] 置底诊断行：按 bid 的【首次】来源统计（跨刷新稳定），另列本次渲染的
+// 缓存/占位/Assets.car 计数；不再因二次渲染全走缓存而把 png/asset/私有 全报成 0。
 - (NSString *)_iconDiagLine {
+    NSUInteger sPng = 0, sAsset = 0, sPriv = 0, sOther = 0;
+    for (NSNumber *n in [_iconSourceByBid allValues]) {
+        switch ([n integerValue]) {
+            case 1: sPng++; break;
+            case 2: sAsset++; break;
+            case 3: sPriv++; break;
+            default: sOther++; break;
+        }
+    }
     NSString *selInfo = _icSelUsed.length ? [NSString stringWithFormat:@"(%@)", _icSelUsed] : @"";
     return [NSString stringWithFormat:
-            @"图标诊断　png %lu ｜ asset %lu ｜ 私有 %lu ｜ 缓存 %lu ｜ 占位 %lu"
-            @"　·　Assets.car %lu ｜ 私有方法 %@%@ ｜ CUICatalog %@",
-            (unsigned long)_icFile, (unsigned long)_icAsset, (unsigned long)_icPrivate,
+            @"图标诊断　首次来源 png %lu ｜ asset %lu ｜ 私有 %lu ｜ 未知 %lu（共 %lu 个 App）"
+            @"　·　本次渲染 缓存 %lu ｜ 占位 %lu ｜ Assets.car %lu"
+            @"　·　私有方法 %@%@ ｜ CUICatalog %@",
+            (unsigned long)sPng, (unsigned long)sAsset, (unsigned long)sPriv,
+            (unsigned long)sOther, (unsigned long)_iconSourceByBid.count,
             (unsigned long)_icCache, (unsigned long)_icBlank, (unsigned long)_icCar,
-            _icPrivateSelOK ? @"响应" : @"不响应", selInfo,
+            _icPrivateSelOK ? @"曾响应" : @"未响应", selInfo,
             obCoreUIAvailable() ? @"可加载" : @"不可加载"];
 }
 
@@ -1033,9 +1051,9 @@ static UIImage *obImageNamedInBundle(NSString *name, NSBundle *bundle) {
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
-        // [P2] 每次重建都重新统计本次渲染的图标来源
+        // [P2 归因] 只清「本次渲染」计数；_iconSourceByBid / _icSelUsed / _icPrivateSelOK 跨重建保留
+        // ⇒ 切页、搜索、勾选后仍能看到首次来源分布与命中的私有 selector（不再全 0）。
         _icFile = 0; _icAsset = 0; _icPrivate = 0; _icCache = 0; _icBlank = 0; _icCar = 0;
-        _icSelUsed = nil;
         @try {
             NSMutableArray *specs = [NSMutableArray array];
 
