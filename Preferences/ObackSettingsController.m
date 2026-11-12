@@ -41,6 +41,7 @@
 - (BOOL)_obSetCellTitle:(UITableViewCell *)cell text:(NSString *)text;
 - (void)_obApplyButtonTitleToSpecifier:(PSSpecifier *)spec;
 - (void)_obRefreshToggleButtonForAction:(NSString *)action;
+- (void)_obEnsureValueLabelForCell:(UITableViewCell *)cell spec:(PSSpecifier *)spec;
 @end
 
 // ── 每个滑块 key 对应的单位后缀 ──────────────────────────────
@@ -114,6 +115,16 @@ static NSDictionary *_obSliderUnits(void) {
         if ([self _obButtonTitleForAction:[spec propertyForKey:@"action"]])
             [self _obApplyButtonTitleToSpecifier:spec];
     }
+
+    // [标签修复 A] resume 已显示的滑块 cell 不会重走 willDisplayCell:，右侧数值标签会丢；
+    // 这里遍历当前可见 cell 补齐/刷新（首进页 cell 尚未创建，由 willDisplayCell: 兜底，互不冲突）。
+    for (UITableViewCell *cell in self.tableView.visibleCells) {
+        NSIndexPath *ip = [self.tableView indexPathForCell:cell];
+        if (!ip) continue;
+        PSSpecifier *s = [self specifierAtIndexPath:ip];
+        if (!s) continue;
+        [self _obEnsureValueLabelForCell:cell spec:s];
+    }
 }
 
 - (NSArray *)specifiers {
@@ -184,51 +195,9 @@ static NSDictionary *_obSliderUnits(void) {
     NSString *key = [spec propertyForKey:@"key"];
     if (!_obSliderUnits()[key]) return;   // 非滑块行，跳过（不调 super）
 
-    // ── 在 PSSliderCell 内部找到 UISlider ──
-    UISlider *slider = nil;
-    for (UIView *sub in cell.contentView.subviews) {
-        if ([sub isKindOfClass:[UISlider class]]) { slider = (UISlider *)sub; break; }
-        // 某些版本 PSSliderCell 可能包一层容器
-        for (UIView *deep in sub.subviews) {
-            if ([deep isKindOfClass:[UISlider class]]) { slider = (UISlider *)deep; break; }
-        }
-        if (slider) break;
-    }
-    if (!slider) return;
-
-    // ── 创建/复用右侧数值标签（小字、靠上、紧凑） ──
-    UILabel *lbl = _valueLabels[key];
-    if (!lbl || !lbl.superview) {
-        lbl = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 60, 18)];
-        lbl.textAlignment = NSTextAlignmentRight;
-        lbl.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-        if (@available(iOS 13.0, *)) {
-            lbl.textColor = [UIColor secondaryLabelColor];
-        } else {
-            lbl.textColor = [UIColor darkGrayColor];
-        }
-        lbl.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
-        [cell.contentView addSubview:lbl];
-        if (!_valueLabels) _valueLabels = [NSMutableDictionary dictionary];
-        _valueLabels[key] = lbl;
-
-        // 监听 slider 值变化（跟手更新，比 slider:titleForCurrentValue: 可靠得多）
-        [slider addTarget:self action:@selector(_obSliderChanged:) forControlEvents:UIControlEventValueChanged];
-        // 用关联对象把 key 绑到 slider 上，_obSliderChanged: 可直接取
-        objc_setAssociatedObject(slider, "ob_key", key, OBJC_ASSOCIATION_COPY_NONATOMIC);
-    }
-
-    // 从 slider.value 读真值（滑块位置永远是对的，不依赖 UserDefaults 默认值注册）
-    [self _obRefreshLabel:lbl key:key value:slider.value];
-
-    // 定位：右上角，垂直偏上（在滑块上方，不抢滑块视觉空间）；按文字自适应宽度防裁切
-    CGFloat margin = 16;
-    CGFloat w = cell.contentView.bounds.size.width;
-    if (w > 0) {
-        [lbl sizeToFit];
-        CGFloat lw = lbl.frame.size.width;
-        lbl.frame = CGRectMake(w - lw - margin, 2, lw, 18);
-    }
+    // [标签修复] 把「找 slider + 建/刷右侧数值标签 + 重定位」抽成公共方法，
+    // willDisplayCell: 与 viewWillAppear: 都调用（resume 已显示的 cell 不会再走 willDisplayCell:，标签会丢）。
+    [self _obEnsureValueLabelForCell:cell spec:spec];
 }
 
 // UISlider UIControlEventValueChanged 回调 —— 直接跟手更新标签
@@ -262,6 +231,58 @@ static NSDictionary *_obSliderUnits(void) {
     NSString *unit = _obSliderUnits()[key] ?: @"";
     NSString *num = [self _obFormatValue:value];
     lbl.text = [num stringByAppendingString:unit];
+}
+
+// [标签修复] 在指定 cell 内找到 PSSliderCell 的 UISlider，建立（或复用）右侧数值标签并刷新；
+// 同时设 continuous=YES，确保拖动中持续触发 UIControlEventValueChanged → 标签跟手（否则只在松手更新）。
+// 由 willDisplayCell:（首进/重进页）与 viewWillAppear:（resume 已显示 cell）共同调用，覆盖两种时机。
+- (void)_obEnsureValueLabelForCell:(UITableViewCell *)cell spec:(PSSpecifier *)spec {
+    NSString *key = [spec propertyForKey:@"key"];
+    if (!_obSliderUnits()[key]) return;
+
+    // 在 PSSliderCell 内部找到 UISlider
+    UISlider *slider = nil;
+    for (UIView *sub in cell.contentView.subviews) {
+        if ([sub isKindOfClass:[UISlider class]]) { slider = (UISlider *)sub; break; }
+        for (UIView *deep in sub.subviews) {
+            if ([deep isKindOfClass:[UISlider class]]) { slider = (UISlider *)deep; break; }
+        }
+        if (slider) break;
+    }
+    if (!slider) return;
+
+    slider.continuous = YES;   // [标签修复 B] 跟手刷新关键
+
+    // 创建/复用右侧数值标签
+    UILabel *lbl = _valueLabels[key];
+    if (!lbl || !lbl.superview || lbl.superview != cell.contentView) {
+        if (lbl && lbl.superview && lbl.superview != cell.contentView) [lbl removeFromSuperview];
+        lbl = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 60, 18)];
+        lbl.textAlignment = NSTextAlignmentRight;
+        lbl.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+        if (@available(iOS 13.0, *)) {
+            lbl.textColor = [UIColor secondaryLabelColor];
+        } else {
+            lbl.textColor = [UIColor darkGrayColor];
+        }
+        lbl.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+        [cell.contentView addSubview:lbl];
+        if (!_valueLabels) _valueLabels = [NSMutableDictionary dictionary];
+        _valueLabels[key] = lbl;
+        [slider addTarget:self action:@selector(_obSliderChanged:) forControlEvents:UIControlEventValueChanged];
+        objc_setAssociatedObject(slider, "ob_key", key, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    }
+
+    [self _obRefreshLabel:lbl key:key value:slider.value];
+
+    // 定位：右上角，垂直偏上；按文字自适应宽度防裁切
+    CGFloat margin = 16;
+    CGFloat w = cell.contentView.bounds.size.width;
+    if (w > 0) {
+        [lbl sizeToFit];
+        CGFloat lw = lbl.frame.size.width;
+        lbl.frame = CGRectMake(w - lw - margin, 2, lw, 18);
+    }
 }
 
 #pragma mark - 重置设置
