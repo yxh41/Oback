@@ -64,7 +64,7 @@
 // [构建标记] 人工标签写在这里，**commit 短哈希由 CI 自动追加**（.github/workflows/build.yml 的
 // "Patch package version with git hash" 步骤会把本行改写成 @"<标签>+<短哈希>"），故不必手改哈希。
 // 日志开启时打印，用于一锤定音确认装的是哪个代码版本（解决"装的是不是最新"的争议）。
-#define OBACK_BUILD_TAG @"applist-icon1"
+#define OBACK_BUILD_TAG @"hotpath-guard1"
 
 // [v11] 内存 ring buffer：OBLog 同步写入，供「App 内弹窗看日志」用，彻底绕开 roothide 沙盒文件隔离
 // （App 进程写 /var/mobile/*.log 实际落在自身容器，Filza/设置面板读的是另一容器视图，导致日志时有时无）。
@@ -105,18 +105,21 @@ static BOOL __obLogEnabledCache = NO;            // 缓存的开关值
 static NSTimeInterval __obLogEnabledCacheTS = 0;  // 缓存时间戳（timeIntervalSinceReferenceDate）
 #define OB_LOG_ENABLED_TTL 0.3                     // 缓存窗口(秒)：少读盘 vs 开关近即时生效
 
+// [hotpath-guard1] 热路径廉价门控：OBLog 是**函数内部**才判开关，参数求值(拼字符串 / 遍历 nav 栈)
+// 在调用前就已发生。日志关着时用它跳过这些构造；与 OBLog 共用 0.3s 微缓存，不引入额外读盘。
+static BOOL OBLogEnabled(void) {
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if ((now - __obLogEnabledCacheTS) < OB_LOG_ENABLED_TTL) return __obLogEnabledCache;
+    BOOL en = [ObackPreferences debugLogEnabledLive];
+    __obLogEnabledCache = en;
+    __obLogEnabledCacheTS = now;
+    return en;
+}
+
 void OBLog(NSString *fmt, ...) {
     // [P1] 热路径微缓存：debugLog 开关缓存 0.3s，避免每条日志都 dictionaryWithContentsOfFile 读整个 plist
     // （此前每次触摸十余次主线程磁盘 IO，低端机可感微卡；现每 0.3s 最多读一次，开关翻转延迟≤0.3s 仍近即时）。
-    NSTimeInterval __obLogNow = [NSDate timeIntervalSinceReferenceDate];
-    BOOL enabled;
-    if ((__obLogNow - __obLogEnabledCacheTS) < OB_LOG_ENABLED_TTL) {
-        enabled = __obLogEnabledCache;
-    } else {
-        enabled = [ObackPreferences debugLogEnabledLive];
-        __obLogEnabledCache = enabled;
-        __obLogEnabledCacheTS = __obLogNow;
-    }
+    BOOL enabled = OBLogEnabled();
     if (!enabled) {
         // 开→关翻转：追加「关闭」分隔标记，明确日志边界，消除「关了还有日志」的困惑
         // （那其实是旧文件累积；有边界标记就能一眼看出哪段是有效日志、哪段是历史）。仅打一次，不持续写。
@@ -1148,14 +1151,31 @@ static Class _OBCls_obackNavDelegate(void) {      // ObackNavDelegate
 
 #pragma mark - 让其他左边缘返回手势失败于我们的手势（杜绝双返回）
 
-// 递归收集窗口 VC 树里所有 UINavigationController
-- (void)_enumerateNavControllersFrom:(UIViewController *)vc block:(void(^)(UINavigationController *nav))block {
-    if (!vc || !block) return;
+// [hotpath-guard1] VC 树递归护栏：节点预算 + 深度上限，防异常 VC 层级 / presenting 环把主线程拖死。
+// 预算取远大于实际规模的值（设置 App 亦不过百级 nav）⇒ 正常路径行为零变化。
+#define kOBNavEnumMaxNodes 4096
+#define kOBNavEnumMaxDepth 64
+#define kOBVCMaxChainDepth 64
+
+- (void)_obEnumerateNavControllersFrom:(UIViewController *)vc depth:(NSUInteger)depth
+                                 block:(void(^)(UINavigationController *nav))block
+                                budget:(NSUInteger *)budget {
+    if (!vc || !block || !budget || *budget == 0 || depth > kOBNavEnumMaxDepth) return;
+    (*budget)--;
     if ([vc isKindOfClass:[UINavigationController class]]) block((UINavigationController *)vc);
     for (UIViewController *child in vc.childViewControllers)
-        [self _enumerateNavControllersFrom:child block:block];
+        [self _obEnumerateNavControllersFrom:child depth:depth + 1 block:block budget:budget];
     if (vc.presentedViewController)
-        [self _enumerateNavControllersFrom:vc.presentedViewController block:block];
+        [self _obEnumerateNavControllersFrom:vc.presentedViewController depth:depth + 1 block:block budget:budget];
+}
+
+// 递归收集窗口 VC 树里所有 UINavigationController
+// 遍历顺序保持「先序 DFS：自身 → childViewControllers → presentedViewController」，
+// 与 :1495 依赖的 index0=最外层语义一致；公开签名不变，全部旧调用点零改动。
+- (void)_enumerateNavControllersFrom:(UIViewController *)vc block:(void(^)(UINavigationController *nav))block {
+    if (!vc || !block) return;
+    NSUInteger budget = kOBNavEnumMaxNodes;
+    [self _obEnumerateNavControllersFrom:vc depth:0 block:block budget:&budget];
 }
 
 // T2 去重：edge / scrollPan / pan 三个视图树枚举器同构（深度护栏 + subviews 递归），
@@ -1711,12 +1731,16 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
     // 匹配父链：容器 VC（如 nav / tab / 自定义容器）命中即其所有子页一并交还，填表更省力。
     // 调试日志开启时同时打印 top 类名+完整父链，便于在 oback_debug.log 反查要填的真实类名。
     if (edge == ObackEdgeLeft) {
-        NSMutableString *vcChain = [NSMutableString string];
+        // [hotpath-guard1] 父链字符串只给诊断行用：日志关着就不构造（原来每次起滑无条件拼）。
+        // isLeftEdgeExcludedVC 判定仍在循环内执行 ⇒ 左缘按页排除语义零变化。
+        BOOL obWantLog = OBLogEnabled();
+        NSMutableString *vcChain = obWantLog ? [NSMutableString string] : nil;
         UIViewController *vc = top;
         BOOL vcHit = NO;
-        while (vc) {
+        NSUInteger vcDepth = 0;
+        while (vc && vcDepth++ < kOBVCMaxChainDepth) {
             NSString *cn = NSStringFromClass([vc class]);
-            [vcChain appendFormat:@"%@%@", (vcChain.length ? @" -> " : @""), cn];
+            if (vcChain) [vcChain appendFormat:@"%@%@", (vcChain.length ? @" -> " : @""), cn];
             if ([ObackPreferences isLeftEdgeExcludedVC:cn]) vcHit = YES;
             UIViewController *nxt = vc.parentViewController;
             if (!nxt) nxt = vc.presentingViewController;
@@ -1726,12 +1750,14 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
             OBLog(@"shouldBegin=NO (左缘按页排除命中: vc=%@)", NSStringFromClass([top class]));
             return NO;
         }
-        // [优化③诊断] 无条件打印（OBLog 内部按调试日志开关闸控）：左缘每次起滑都输出 top 类名与父链，
-        // 用户开「调试日志」后在目标页左缘滑一下，Filza 打开 /var/mobile/oback_debug.log 即可复制精确类名填入设置。
-        OBLog(@"[diag-vc] leftEdge top=%@ nav=%@ chain=%@",
-              top ? NSStringFromClass([top class]) : @"nil",
-              nav ? NSStringFromClass([nav class]) : @"nil",
-              vcChain);
+        // [优化③诊断] 仅在调试日志开启时构造并输出；开「调试日志」后在目标页左缘滑一下，
+        // Filza 打开 /var/mobile/oback_debug.log 即可复制精确类名填入设置。
+        if (obWantLog) {
+            OBLog(@"[diag-vc] leftEdge top=%@ nav=%@ chain=%@",
+                  top ? NSStringFromClass([top class]) : @"nil",
+                  nav ? NSStringFromClass([nav class]) : @"nil",
+                  vcChain);
+        }
     }
 
     // 排除名单（朋友圈等）：不干预，交原生处理，避免我们的 pan 与整屏滚动手势打架、进不了 Began
@@ -1859,18 +1885,21 @@ static const NSUInteger kOBEnumMaxNodes = 4000;
     self.currentEdge = edge;
     // [2026-09-17 双层 nav 诊断] 打印本次真正要 pop 的 nav 的完整栈（底→顶）。
     // 用途：确认「弹出的下一级到底是谁」—— 设置 App 外层栈底若不是设置首页，pop 就会表现为「没反应/跳错级」。
-    if ([kind isEqualToString:@"nav"]) {
-        UINavigationController *dn = [self _popNavForPan:pan] ?: nav;
-        NSMutableArray *st = [NSMutableArray array];
-        for (UIViewController *v in dn.viewControllers) [st addObject:NSStringFromClass([v class])];
-        OBLog(@"[diag-navstack] popNav=%@(挂点nav=%@) 栈%lu=%@", NSStringFromClass([dn class]),
-              NSStringFromClass([nav class]), (unsigned long)st.count, st);
+    // [hotpath-guard1] 整段诊断（遍历 nav 栈 + 类名数组 + 格式化）只在日志开启时构造，关闭时零开销。
+    if (OBLogEnabled()) {
+        if ([kind isEqualToString:@"nav"]) {
+            UINavigationController *dn = [self _popNavForPan:pan] ?: nav;
+            NSMutableArray *st = [NSMutableArray array];
+            for (UIViewController *v in dn.viewControllers) [st addObject:NSStringFromClass([v class])];
+            OBLog(@"[diag-navstack] popNav=%@(挂点nav=%@) 栈%lu=%@", NSStringFromClass([dn class]),
+                  NSStringFromClass([nav class]), (unsigned long)st.count, st);
+        }
+        OBLog(@"shouldBegin=YES (kind=%@ edge=%@ top=%@ nav.childCount=%lu presenting=%d currentParallaxToView=%d)",
+              kind, edge == ObackEdgeLeft ? @"左" : @"右",
+              NSStringFromClass([top class]),
+              (unsigned long)nav.viewControllers.count, top.presentingViewController != nil,
+              self.currentParallaxToView);
     }
-    OBLog(@"shouldBegin=YES (kind=%@ edge=%@ top=%@ nav.childCount=%lu presenting=%d currentParallaxToView=%d)",
-          kind, edge == ObackEdgeLeft ? @"左" : @"右",
-          NSStringFromClass([top class]),
-          (unsigned long)nav.viewControllers.count, top.presentingViewController != nil,
-          self.currentParallaxToView);
     if (p.hapticEnabled) {
         UIImpactFeedbackGenerator *g = [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] autorelease];
         [g impactOccurred];
