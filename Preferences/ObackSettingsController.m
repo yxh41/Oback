@@ -117,13 +117,21 @@ static NSDictionary *_obSliderUnits(void) {
     }
 
     // [标签修复 A] resume 已显示的滑块 cell 不会重走 willDisplayCell:，右侧数值标签会丢；
-    // 这里遍历当前可见 cell 补齐/刷新（首进页 cell 尚未创建，由 willDisplayCell: 兜底，互不冲突）。
-    for (UITableViewCell *cell in self.tableView.visibleCells) {
-        NSIndexPath *ip = [self.tableView indexPathForCell:cell];
-        if (!ip) continue;
-        PSSpecifier *s = [self specifierAtIndexPath:ip];
-        if (!s) continue;
-        [self _obEnsureValueLabelForCell:cell spec:s];
+    // 这里遍历「已加载」cell 补齐/刷新（首进页 cell 尚未加载时 cachedCellForSpecifier: 返回 nil，
+    // 由 willDisplayCell: 兜底，互不冲突）。
+    // ⚠️ 铁律（勿改回）：本环境（roothide / iOS 16.4.1）PSListController【未实现】-tableView。
+    // 实证：2026-11-12 设置 App 崩溃 SIGABRT，doesNotRecognizeSelector，栈帧
+    //   ObackSettings+0x4664 = [self tableView]（0x4660 bl tableView 桩）← -[UIViewController __viewWillAppear:]。
+    // 故禁止用 self.tableView / .visibleCells / indexPathForCell:；改用**已验证安全**的
+    // cachedCellForSpecifier:（上方按钮标题同步即用它，崩溃前已正常执行）。
+    // 注：[super respondsToSelector:] 挡不住此坑（receiver 仍是 self，从子类查起恒 YES）。
+    // 再用 respondsToSelector: 兜底：即便某环境连 cachedCellForSpecifier: 都没有，也只会「不刷新标签」，绝不闪退。
+    if ([self respondsToSelector:@selector(cachedCellForSpecifier:)]) {
+        for (PSSpecifier *spec in _specifiers) {
+            UITableViewCell *cell = [self cachedCellForSpecifier:spec];
+            if (!cell) continue;
+            [self _obEnsureValueLabelForCell:cell spec:spec];
+        }
     }
 }
 
