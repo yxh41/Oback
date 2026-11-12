@@ -58,7 +58,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>调节屏幕边缘识别返回手势的宽度范围（8–60 点）。越宽越容易误触，越窄越难触发。</string>
+			<string>收紧边缘识别范围（8–60 点）。系统边缘手势自带固定的识别宽度，本项只在设得比它更小时生效——调大不会扩大范围、也不会更容易误触；设得太小会让左/右缘手势难以触发。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -80,7 +80,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>调节松手后完成或取消返回动画的时长（0.15–0.6 秒）。越短越跟手，越长越顺滑。（注：默认原生边缘返回走系统转场，不消费以下动画参数；仅弹窗返回时生效，属预期行为而非 bug。）</string>
+			<string>调节松手后「边缘指示胶囊」放大淡出 / 弹回消失的时长（0.15–0.6 秒），不影响页面返回动画本身。左缘跟手返回由系统原生转场收尾，时长由 UIKit 决定、不可调；调大只会让胶囊在屏幕上停留更久。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -92,7 +92,7 @@
 			<key>key</key>
 			<string>duration</string>
 			<key>label</key>
-			<string>动画时长 (s)</string>
+			<string>胶囊淡出时长 (s)</string>
 			<key>max</key>
 			<real>0.6</real>
 			<key>min</key>
@@ -118,9 +118,9 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>调节边缘返回的触发灵敏度。两个阈值都越低 → 越容易返回（更跟手，但快速横滑列表时可能误触）；越高 → 越需明显拖动或甩动才返回。建议保持默认，按真机手感微调。（注：默认原生边缘返回走系统转场，不消费以下动画参数；仅弹窗返回时生效，属预期行为而非 bug。）</string>
+			<string>调节「右缘返回 / 微信左缘 / 兜底返回」这类松手提交型路径的判定阈值：位移或甩动速度任一超过阈值即执行返回，越低越容易返回，越高越需明显拖动或甩动。注意：左缘跟手返回走系统原生转场，是否提交由 UIKit 决定，本组两项不参与——调了手感没变化是设计取舍，不是 bug。</string>
 			<key>label</key>
-			<string>返回灵敏度</string>
+			<string>返回灵敏度（松手提交型）</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -146,7 +146,7 @@
 			<key>defaults</key>
 			<string>com.zlhkf.oback</string>
 			<key>footnote</key>
-			<string>仅弹窗返回（方案B）时生效；默认左缘原生 nav 返回（方案A，系统转场）不消费此参数——调了无变化属预期，非 bug。</string>
+			<string>与上方「提交位移阈值」成组：只作用于右缘返回、微信左缘、兜底返回等松手提交型路径；左缘跟手返回由系统原生转场判定，不消费这两个阈值。</string>
 			<key>key</key>
 			<string>commitVelocity</string>
 			<key>label</key>
